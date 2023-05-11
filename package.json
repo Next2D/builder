@@ -1,0 +1,35 @@
+{
+  "name": "@next2d/builder",
+  "version": "0.0.99",
+  "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as HTML, macOS, Windows, iOS, and Android",
+  "author": "Toshiyuki Ienaga <ienaga@tvon.jp>",
+  "license": "MIT",
+  "homepage": "https://next2d.app",
+  "bugs": "https://github.com/Next2D/view-generator/issues",
+  "main": "./index.js",
+  "keywords": [
+    "Next2D",
+    "Next2D Framework",
+    "Multi-platform",
+    "builder"
+  ],
+  "scripts": {
+    "lint": "eslint index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Next2D/builder.git"
+  },
+  "bin": {
+    "@next2d/builder": "index.js"
+  },
+  "dependencies": {
+    "@next2d/env": "^1.0.1",
+    "@types/node": "^20.1.0",
+    "electron": "^24.2.0",
+    "electron-builder": "^23.6.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.40.0"
+  }
+}

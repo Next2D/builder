@@ -1,7 +1,7 @@
 {
   "name": "@next2d/builder",
-  "version": "0.0.99",
-  "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as HTML, macOS, Windows, iOS, and Android",
+  "version": "0.0.1",
+  "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
   "author": "Toshiyuki Ienaga <ienaga@tvon.jp>",
   "license": "MIT",
   "homepage": "https://next2d.app",
@@ -9,9 +9,11 @@
   "main": "./index.js",
   "keywords": [
     "Next2D",
-    "Next2D Framework",
-    "Multi-platform",
-    "builder"
+    "JavaScript for MacOS",
+    "JavaScript for Windows",
+    "JavaScript for iOS",
+    "JavaScript for Android",
+    "Multi-platform"
   ],
   "scripts": {
     "lint": "eslint index.js"

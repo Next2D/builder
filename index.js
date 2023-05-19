@@ -12,9 +12,11 @@ if (15 > version.split(".")[0]) {
     process.exit(1);
 }
 
-const fs = require("fs");
-const webpackConfig = require(`${process.cwd()}/webpack.config.js`);
+const fs              = require("fs");
+const cp              = require("child_process");
+const webpackConfig   = require(`${process.cwd()}/webpack.config.js`);
 const electronBuilder = require("electron-builder");
+const chalk           = require("chalk");
 
 let platform    = "";
 let environment = "";
@@ -119,32 +121,36 @@ const buildWeb = () =>
 {
     return new Promise((resolve) =>
     {
-        const cp = require("child_process");
-
         const command = `${process.cwd()}/node_modules/.bin/webpack`;
 
+        const mode = debug ? "development" : "production";
         const stream = cp.spawn(command, [
             "--mode",
-            "production",
+            mode,
             "--env",
             environment
         ]);
 
-        stream.on("error", (error) =>
+        let errorCheck = false;
+        stream.stderr.on("data", (error) =>
         {
-            console.error(error);
-            process.exit(1);
+            errorCheck = true;
+            console.error(chalk.red(error.toString()));
         });
 
-        stream.on("data", (data) =>
+        stream.stdout.on("data", (data) =>
         {
-            console.log("koko");
             console.log(data.toString());
         });
 
         stream.on("exit", () =>
         {
-            console.log("build web app.");
+            if (errorCheck) {
+                process.exit(1);
+            }
+
+            console.log(chalk.green("Build web app."));
+            console.log();
             resolve();
         });
     });
@@ -163,13 +169,15 @@ const generateElectronConfig = (platform) =>
     let config = {};
 
     const configPath = `${process.cwd()}/electron.build.js`;
-    if (fs.existsSync(configPath)) {
-        config = Object.assign(config,  require(configPath));
+    if (!fs.existsSync(configPath)) {
+        console.error(chalk.red("The file `electron.build.js` could not be found."));
+        process.exit(1);
     }
 
+    config = Object.assign(config, require(configPath));
     if (!config.appId) {
         console.log();
-        console.log("`appId` is not set.");
+        console.log(chalk.red("`appId` is not set."));
         console.log("Please set `appId` in `electron.build.js`.");
         console.log();
         process.exit(1);
@@ -204,10 +212,6 @@ const generateElectronConfig = (platform) =>
             break;
 
         default:
-            console.log();
-            console.log("The specified platform could not be found.");
-            console.log();
-            process.exit(1);
             break;
 
     }
@@ -300,7 +304,6 @@ const buildWindow = () =>
 
             if (debug) {
 
-                const cp = require("child_process");
                 const stream = cp.spawn(
                     `${process.cwd()}/node_modules/.bin/electron`,
                     [
@@ -319,7 +322,7 @@ const buildWindow = () =>
                     unlinkElectronIndexPath();
                 });
 
-                stream.on("destroy", () =>
+                stream.on("disconnect", () =>
                 {
                     if (generatedHTML) {
                         fs.unlinkSync(htmlFile);
@@ -387,8 +390,6 @@ const buildMac = () =>
 
             if (debug) {
 
-                const cp = require("child_process");
-
                 const stream = cp.spawn(
                     `${process.cwd()}/node_modules/.bin/electron`,
                     [
@@ -407,7 +408,7 @@ const buildMac = () =>
                     unlinkElectronIndexPath();
                 });
 
-                stream.on("destroy", () =>
+                stream.on("disconnect", () =>
                 {
                     if (generatedHTML) {
                         fs.unlinkSync(htmlFile);
@@ -438,43 +439,106 @@ const buildMac = () =>
 };
 
 /**
- * @description Steam用アプリの書き出し関数
- *              Export function for Steam apps
+ * @description iOSのプロジェクトを生成
+ *              Generate iOS project
  *
+ * @return {Promise<void>}
  * @method
  * @public
  */
-const buildSteam = () =>
+const generateNativeProject = () =>
 {
-    buildWeb();
+    if (fs.existsSync(`${process.cwd()}/${platform}`)) {
+        return Promise.resolve();
+    }
+
+    return new Promise((resolve) =>
+    {
+        const stream = cp.spawn("npx", ["cap", "add", platform]);
+
+        let errorCheck = false;
+        stream.stderr.on("data", (error) =>
+        {
+            errorCheck = true;
+            console.error(chalk.red(error.toString()));
+        });
+
+        stream.stdout.on("data", (data) =>
+        {
+            console.log(data.toString());
+        });
+
+        stream.on("exit", () =>
+        {
+            if (errorCheck) {
+                process.exit(1);
+            }
+
+            console.log(chalk.green(`Successfully generated ${platform} project.`));
+            console.log();
+
+            resolve();
+        });
+    });
 };
 
 /**
  * @description iOS用アプリの書き出し関数
  *              Export function for iOS apps
  *
+ * @return {void}
  * @method
  * @public
  */
-const buildIOS = () =>
+const runNative = () =>
 {
-    buildWeb();
+    generateNativeProject()
+        .then(() =>
+        {
+            return buildWeb();
+        })
+        .then(() =>
+        {
+            /**
+             * Capacitorの書き出しに必要な設定を生成
+             * Generate settings necessary for exporting Capacitor
+             */
+            const config = JSON.parse(
+                fs.readFileSync(`${process.cwd()}/capacitor.config.json`, { "encoding": "utf8" })
+            );
 
-    // TODO
-};
+            /**
+             * 読み込みようのindex.htmlファイルがなければ生成
+             * If there is no index.html file to load, generate one.
+             */
+            const htmlFile      = `${webpackConfig.output.path}/index.html`;
+            const generatedHTML = buildHTML(htmlFile, config.appName);
 
-/**
- * @description android用アプリの書き出し関数
- *              Export function for android apps
- *
- * @method
- * @public
- */
-const buildAndroid = () =>
-{
-    buildWeb();
+            config.webDir = htmlFile
+                .replace(process.cwd(), ".")
+                .replace("index.html", "")
+                .trim();
 
-    // TODO
+            fs.writeFileSync(
+                `${process.cwd()}/capacitor.config.json`,
+                JSON.stringify(config, null, 2)
+            );
+
+            return Promise.resolve(generatedHTML);
+
+        })
+        .then((generated_html) =>
+        {
+            process.on("exit", () =>
+            {
+                if (generated_html) {
+                    fs.unlinkSync(`${webpackConfig.output.path}/index.html`);
+                }
+            });
+
+            const { run } = require("@capacitor/cli");
+            run();
+        });
 };
 
 switch (platform) {
@@ -488,11 +552,15 @@ switch (platform) {
         break;
 
     case "ios":
-        buildIOS();
+        if (debug) {
+            runNative();
+        }
         break;
 
     case "android":
-        buildAndroid();
+        if (debug) {
+            runNative();
+        }
         break;
 
     case "web":
@@ -505,10 +573,6 @@ switch (platform) {
                 console.error(error);
                 process.exit(1);
             });
-        break;
-
-    case "steam":
-        buildSteam();
         break;
 
     default:

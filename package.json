@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
   "author": "Toshiyuki Ienaga <ienaga@tvon.jp>",
   "license": "MIT",
@@ -26,8 +26,10 @@
     "@next2d/builder": "index.js"
   },
   "dependencies": {
+    "@capacitor/cli": "^5.0.3",
     "@next2d/env": "^1.0.1",
     "@types/node": "^20.1.0",
+    "chalk": "4.1.0",
     "electron": "^24.2.0",
     "electron-builder": "^23.6.0"
   },

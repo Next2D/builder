@@ -1,12 +1,14 @@
 {
   "name": "@next2d/builder",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
-  "author": "Toshiyuki Ienaga <ienaga@tvon.jp>",
+  "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "homepage": "https://next2d.app",
   "bugs": "https://github.com/Next2D/view-generator/issues",
-  "main": "./index.js",
   "keywords": [
     "Next2D",
     "JavaScript for MacOS",
@@ -16,24 +18,32 @@
     "Multi-platform"
   ],
   "scripts": {
-    "lint": "eslint index.js"
+    "lint": "eslint src/index.ts",
+    "publish": "tsc"
   },
+  "files": [
+    "dist"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Next2D/builder.git"
   },
   "bin": {
-    "@next2d/builder": "index.js"
+    "@next2d/builder": "dist/index.js"
   },
   "dependencies": {
-    "@capacitor/cli": "^5.0.3",
-    "@next2d/env": "^1.0.1",
-    "@types/node": "^20.1.0",
-    "chalk": "4.1.0",
-    "electron": "^24.2.0",
-    "electron-builder": "^23.6.0"
+    "@capacitor/cli": "^5.5.1",
+    "@next2d/env": "^2.0.2",
+    "@types/node": "^20.8.10",
+    "electron": "^27.0.3",
+    "electron-builder": "^24.6.4",
+    "picocolors": "^1.0.0",
+    "vite": "^4.5.0"
   },
   "devDependencies": {
-    "eslint": "^8.40.0"
+    "@typescript-eslint/eslint-plugin": "^6.10.0",
+    "@typescript-eslint/parser": "^6.10.0",
+    "eslint": "^8.53.0",
+    "typescript": "^5.2.2"
   }
 }

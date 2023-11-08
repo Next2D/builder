@@ -2,12 +2,12 @@
 
 "use strict";
 
-// import run from "@capacitor/cli";
-import pc from "picocolors";
-import fs from "fs";
-import cp from "child_process";
-import { loadConfigFromFile } from "vite";
-import electronBuilder from "electron-builder";
+const cli = require("@capacitor/cli");
+const pc = require("picocolors");
+const fs = require("fs");
+const cp = require("child_process");
+const vite = require("vite");
+const electronBuilder = require("electron-builder");
 
 const recommendeVersion: number = 18;
 const version: string = process.versions.node;
@@ -122,7 +122,21 @@ const loadConfig = (): Promise<void> =>
 {
     return new Promise(async (resolve): Promise<void> =>
     {
-        const config: any = await loadConfigFromFile(
+        const packageJson = JSON.parse(
+            fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+        );
+
+        if (packageJson.type !== "module") {
+            packageJson.type = "module";
+
+            // overwride
+            fs.writeFileSync(
+                `${process.cwd()}/package.json`,
+                JSON.stringify(packageJson, null, 2)
+            );
+        }
+
+        const config: any = await vite.loadConfigFromFile(
             {
                 "command": "build",
                 "mode": "build"
@@ -164,7 +178,7 @@ const buildWeb = (): Promise<void> =>
             "build"
         ]);
 
-        stream.stdout.on("data", (data) =>
+        stream.stdout.on("data", (data: any) =>
         {
             console.log(data.toString());
         });
@@ -434,13 +448,13 @@ const generateNativeProject = (): Promise<void> =>
         const stream = cp.spawn("npx", ["cap", "add", platform]);
 
         let errorCheck = false;
-        stream.stderr.on("data", (error) =>
+        stream.stderr.on("data", (error: any) =>
         {
             errorCheck = true;
             console.error(pc.red(error.toString()));
         });
 
-        stream.stdout.on("data", (data) =>
+        stream.stdout.on("data", (data: any) =>
         {
             console.log(data.toString());
         });
@@ -486,6 +500,13 @@ const runNative = (): void =>
                 `${process.cwd()}/capacitor.config.json`,
                 JSON.stringify(config, null, 2)
             );
+
+            const nodePath = process.argv[0];
+            const filePath = process.argv[1];
+            process.argv = [nodePath, filePath, "run", platform];
+
+            // run simulator
+            cli.run();
         });
 };
 

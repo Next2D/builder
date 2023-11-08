@@ -7,10 +7,10 @@ Multi-platform Builder
 [![license](https://img.shields.io/github/license/Next2D/builder)](https://github.com/Next2D/builder/blob/main/LICENSE)
 
 [日本語]\
-Next2D Frameworkのマルチプラットフォームビルダー、macOS、Windows、iOS、Android、Web（HTML）など、各種プラットフォームへの書き出しに対応
+Next2D Frameworkのマルチプラットフォームビルダー、Steam用のWindows、macOS、Linux、スマートフォン(iOS、Android)、Web（HTML）など、各種プラットフォームへの書き出しに対応
 
 [English]\
-Next2D Framework multi-platform builder, supports export to various platforms including macOS, Windows, iOS, Android, and Web (HTML)
+Multi-platform builder for Next2D Framework, export to various platforms including Windows, macOS, Linux, Smartphones (iOS, Android) and Web (HTML) for Steam
 
 ## Supported
 
@@ -28,10 +28,10 @@ Next2D Framework multi-platform builder, supports export to various platforms in
 npx @next2d/builder --platform web --env prd
 ```
 
-### debug example.
+### preview example.
 
 ```linux
-npx @next2d/builder --debug --platform web --env prd
+npx @next2d/builder --preview --platform web --env prd
 ```
 
 ## License

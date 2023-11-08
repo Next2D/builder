@@ -5,3 +5,5 @@ src
 .eslintrc.json
 .gitattributes
 .gitignore
+tsconfig.eslint.json
+tsconfig.json

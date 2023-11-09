@@ -2,11 +2,11 @@
 
 "use strict";
 
-const cli = require("@capacitor/cli");
-const pc = require("picocolors");
-const fs = require("fs");
-const cp = require("child_process");
-const vite = require("vite");
+const cli             = require("@capacitor/cli");
+const pc              = require("picocolors");
+const fs              = require("fs");
+const cp              = require("child_process");
+const vite            = require("vite");
 const electronBuilder = require("electron-builder");
 
 const recommendeVersion: number = 18;
@@ -21,7 +21,7 @@ Please update your version of Node.`);
 let platform: string    = "";
 let environment: string = "";
 let hasHelp: boolean    = false;
-let preview: boolean      = false;
+let preview: boolean    = false;
 
 for (let idx: number = 0; idx < process.argv.length; ++idx) {
 
@@ -114,6 +114,18 @@ process.env.NEXT2D_EBUILD_ENVIRONMENT = environment;
 process.env.NEXT2D_TARGET_PLATFORM    = platform;
 
 /**
+ * @type {string}
+ * @constant
+ */
+const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
+
+/**
+ * @type {string}
+ * @constant
+ */
+const ELECTRON_CONFIG_NAME: string = "electron.build.json";
+
+/**
  * @return {Promise}
  * @method
  * @public
@@ -151,7 +163,8 @@ const loadConfig = (): Promise<void> =>
 
         if (!fs.existsSync(`${$buildDir}`)) {
             fs.mkdirSync(`${$buildDir}`, { "recursive": true });
-            console.log(pc.green(`create build dir: ${$buildDir}`));
+            console.log(pc.green(`Create build directory: ${$buildDir}`));
+            console.log();
         }
 
         resolve();
@@ -168,25 +181,24 @@ const loadConfig = (): Promise<void> =>
  */
 const buildWeb = (): Promise<void> =>
 {
-    return new Promise((resolve): void =>
+    return new Promise((resolve, reject): void =>
     {
-        const command = `${process.cwd()}/node_modules/.bin/vite`;
+        const command: string = `${process.cwd()}/node_modules/.bin/vite`;
 
         const stream = cp.spawn(command, [
             "--outDir",
             $buildDir,
             "build"
-        ]);
+        ], { "stdio": "inherit" });
 
-        stream.stdout.on("data", (data: any) =>
+        stream.on("close", (code: number): void =>
         {
-            console.log(data.toString());
-        });
+            if (code !== 0) {
+                reject("Export of `HTML` and `JavaScript` failed.");
+            }
 
-        stream.on("exit", () =>
-        {
-            console.log(pc.green("`HTML` and `JavaScript` files are written out."));
             console.log();
+            console.log(pc.green("`HTML` and `JavaScript` files are written out."));
             resolve();
         });
     });
@@ -204,9 +216,9 @@ const generateElectronConfig = (): any =>
 {
     let config: any = {};
 
-    const configPath: string = `${process.cwd()}/electron.build.json`;
+    const configPath: string = `${process.cwd()}/${ELECTRON_CONFIG_NAME}`;
     if (!fs.existsSync(configPath)) {
-        console.error(pc.red("The file `electron.build.json` could not be found."));
+        console.error(pc.red(`The file \`${ELECTRON_CONFIG_NAME}\` could not be found.`));
         process.exit(1);
     }
 
@@ -217,7 +229,7 @@ const generateElectronConfig = (): any =>
     if (!config.appId) {
         console.log();
         console.log(pc.red("`appId` is not set."));
-        console.log("Please set `appId` in `electron.build.json`.");
+        console.log(`Please set \`appId\` in \`${ELECTRON_CONFIG_NAME}\`.`);
         console.log();
         process.exit(1);
     }
@@ -260,6 +272,24 @@ const generateElectronConfig = (): any =>
 
             break;
 
+        case "linux":
+        case "steam:linux":
+            if (!("linux" in config)) {
+                config.linux = {
+                    "target": "deb"
+                };
+            }
+
+            if ("win" in config) {
+                delete config.win;
+            }
+
+            if ("mac" in config) {
+                delete config.mac;
+            }
+
+            break;
+
         default:
             break;
 
@@ -275,7 +305,12 @@ const generateElectronConfig = (): any =>
         config.directories.output += "/";
     }
 
-    config.directories.output += `${platformDir}/${environment}`;
+    if (!("files" in config)) {
+        config.files = [];
+    }
+
+    config.files.push(`${$outDir}/${platformDir}/${environment}/`);
+    config.directories.output += `${platformDir}/build`;
 
     return config;
 };
@@ -353,11 +388,14 @@ const buildSteam = (): void =>
             `${process.cwd()}/node_modules/.bin/electron`,
             [
                 `${process.cwd()}/electron.js`
-            ]
+            ],
+            { "stdio": "inherit" }
         );
 
-        stream.on("exit", () =>
+        stream.on("close", (code: number): void =>
         {
+            console.log("preview close.");
+
             unlinkElectronIndexPath();
 
             // reset
@@ -365,17 +403,11 @@ const buildSteam = (): void =>
                 `${process.cwd()}/package.json`,
                 JSON.stringify(packageJson, null, 2)
             );
-        });
 
-        stream.on("disconnect", () =>
-        {
-            unlinkElectronIndexPath();
-
-            // reset
-            fs.writeFileSync(
-                `${process.cwd()}/package.json`,
-                JSON.stringify(packageJson, null, 2)
-            );
+            if (code !== 0) {
+                console.log(pc.red("Failed to start Electron."));
+                console.log();
+            }
         });
 
     } else {
@@ -387,6 +419,7 @@ const buildSteam = (): void =>
         const config: any = generateElectronConfig();
 
         console.log(pc.green("Start the `Electron` build process."));
+        console.log();
 
         const buildObject: any = {
             "projectDir": process.cwd(),
@@ -409,21 +442,41 @@ const buildSteam = (): void =>
             case "steam:linux":
                 buildObject.targets = electronBuilder.Platform.LINUX.createTarget();
                 break;
+
+            default:
+                console.log(pc.red("There is an error in the export platform settings."));
+                console.log();
+                break;
+
         }
 
         electronBuilder
             .build(buildObject)
-            .then(() =>
+            .then((): void =>
             {
                 unlinkElectronIndexPath();
-
-                console.log(pc.green("Finished building `Electron`."));
 
                 // reset
                 fs.writeFileSync(
                     `${process.cwd()}/package.json`,
                     JSON.stringify(packageJson, null, 2)
                 );
+
+                console.log(pc.green(`Finished building \`Electron\` for ${platform}.`));
+                console.log();
+            })
+            .catch((error: any): void =>
+            {
+                unlinkElectronIndexPath();
+
+                // reset
+                fs.writeFileSync(
+                    `${process.cwd()}/package.json`,
+                    JSON.stringify(packageJson, null, 2)
+                );
+
+                console.log(pc.red("Export of Electron failed."));
+                console.log(pc.red(error));
             });
 
     }
@@ -439,30 +492,22 @@ const buildSteam = (): void =>
  */
 const generateNativeProject = (): Promise<void> =>
 {
-    if (fs.existsSync(`${process.cwd()}/${platform}`)) {
-        return Promise.resolve();
-    }
-
-    return new Promise((resolve): void =>
+    return new Promise((resolve, reject): void =>
     {
-        const stream = cp.spawn("npx", ["cap", "add", platform]);
+        if (fs.existsSync(`${process.cwd()}/${platform}`)) {
+            return resolve();
+        }
 
-        let errorCheck = false;
-        stream.stderr.on("data", (error: any) =>
-        {
-            errorCheck = true;
-            console.error(pc.red(error.toString()));
-        });
+        const stream = cp.spawn("npx", [
+            "cap",
+            "add",
+            platform
+        ], { "stdio": "inherit" });
 
-        stream.stdout.on("data", (data: any) =>
+        stream.on("close", (code: number): void =>
         {
-            console.log(data.toString());
-        });
-
-        stream.on("exit", () =>
-        {
-            if (errorCheck) {
-                process.exit(1);
+            if (code !== 0) {
+                reject(`Failed generated ${platform} project.`);
             }
 
             console.log(pc.green(`Successfully generated ${platform} project.`));
@@ -477,37 +522,39 @@ const generateNativeProject = (): Promise<void> =>
  * @description iOS用アプリの書き出し関数
  *              Export function for iOS apps
  *
- * @return {void}
+ * @return {Promise}
  * @method
  * @public
  */
-const runNative = (): void =>
+const runNative = async (): Promise<void> =>
 {
-    generateNativeProject()
-        .then(() =>
-        {
-            /**
-             * Capacitorの書き出しに必要な設定を生成
-             * Generate settings necessary for exporting Capacitor
-             */
-            const config = JSON.parse(
-                fs.readFileSync(`${process.cwd()}/capacitor.config.json`, { "encoding": "utf8" })
-            );
+    await generateNativeProject();
 
-            config.webDir = `${$outDir}/${platformDir}/${environment}/`;
+    /**
+     * Capacitorの書き出しに必要な設定を生成
+     * Generate settings necessary for exporting Capacitor
+     */
+    const config = JSON.parse(
+        fs.readFileSync(`${process.cwd()}/${CAPACITOR_CONFIG_NAME}`, { "encoding": "utf8" })
+    );
 
-            fs.writeFileSync(
-                `${process.cwd()}/capacitor.config.json`,
-                JSON.stringify(config, null, 2)
-            );
+    config.webDir = `${$outDir}/${platformDir}/${environment}/`;
 
-            const nodePath = process.argv[0];
-            const filePath = process.argv[1];
-            process.argv = [nodePath, filePath, "run", platform];
+    fs.writeFileSync(
+        `${process.cwd()}/${CAPACITOR_CONFIG_NAME}`,
+        JSON.stringify(config, null, 2)
+    );
 
-            // run simulator
-            cli.run();
-        });
+    /**
+     * 引数をcapacitorに合わせて書き換え
+     * Rewrite arguments to match capacitor
+     */
+    const nodePath: string = process.argv[0];
+    const filePath: string = process.argv[1];
+    process.argv = [nodePath, filePath, "run", platform];
+
+    // run simulator
+    cli.run();
 };
 
 /**
@@ -532,11 +579,6 @@ const build = (): void =>
             break;
 
         case "ios":
-            if (preview) {
-                runNative();
-            }
-            break;
-
         case "android":
             if (preview) {
                 runNative();
@@ -544,7 +586,7 @@ const build = (): void =>
             break;
 
         case "web":
-            console.log(pc.green("build done."));
+            console.log();
             break;
 
         default:
@@ -554,13 +596,24 @@ const build = (): void =>
     }
 };
 
-loadConfig()
-    .then((): void =>
-    {
-        buildWeb()
-            .then(build)
-            .catch((error) => {
-                console.log(pc.red(error));
-                process.exit(1);
-            });
-    });
+/**
+ * @description 実行関数
+ *              function execution
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const execute = async (): Promise<void> =>
+{
+    await loadConfig();
+
+    buildWeb()
+        .then(build)
+        .catch((error): void => {
+            console.log(pc.red(error));
+            process.exit(1);
+        });
+};
+
+execute();

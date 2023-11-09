@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
+        with:
+          registry-url: "https://registry.npmjs.org"
       - run: npm install
       - run: npm run publish
       - run: npm publish --access public

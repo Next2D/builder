@@ -16,8 +16,9 @@ Multi-platform builder for Next2D Framework, export to various platforms includi
 
 | platform | detail                   |
 |----------|--------------------------|
-| macOS    | Export dmg file          |
 | Windows  | Export an exe file       |
+| macOS    | Export dmg, app file     |
+| Linux    | Export deb file          |
 | iOS      | Implementing...          |
 | Android  | Implementing...          |
 | web      | Export minfy'd JS files  |

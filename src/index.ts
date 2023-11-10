@@ -2,12 +2,11 @@
 
 "use strict";
 
-const cli             = require("@capacitor/cli");
-const pc              = require("picocolors");
-const fs              = require("fs");
-const cp              = require("child_process");
-const vite            = require("vite");
-const electronBuilder = require("electron-builder");
+import pc from "picocolors";
+import fs from "fs";
+import cp from "child_process";
+import { loadConfigFromFile } from "vite";
+import { Platform, build as electronBuilder } from "electron-builder";
 
 const recommendeVersion: number = 18;
 const version: string = process.versions.node;
@@ -85,6 +84,29 @@ if (hasHelp) {
     echoHelp();
 }
 
+if (!platform || !environment) {
+    echoHelp();
+}
+
+switch (platform) {
+
+    case "windows":
+    case "macos":
+    case "linux":
+    case "steam:windows":
+    case "steam:macos":
+    case "steam:linux":
+    case "ios":
+    case "android":
+    case "web":
+        break;
+
+    default:
+        echoHelp();
+        break;
+
+}
+
 /**
  * @type {string}
  * @private
@@ -123,7 +145,13 @@ const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
  * @type {string}
  * @constant
  */
-const ELECTRON_CONFIG_NAME: string = "electron.build.json";
+const ELECTRON_BUILD_CONFIG_NAME: string = "electron.build.json";
+
+/**
+ * @type {string}
+ * @constant
+ */
+const ELECTRON_INDEX_CONFIG_NAME: string = "electron.index.json";
 
 /**
  * @return {Promise}
@@ -148,7 +176,7 @@ const loadConfig = (): Promise<void> =>
             );
         }
 
-        const config: any = await vite.loadConfigFromFile(
+        const config: any = await loadConfigFromFile(
             {
                 "command": "build",
                 "mode": "build"
@@ -156,10 +184,10 @@ const loadConfig = (): Promise<void> =>
             `${process.cwd()}/vite.config.ts`
         );
 
+        // update config
         $configObject = config;
-
-        $outDir = $configObject.config?.build?.outDir || "dist";
-        $buildDir = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
+        $outDir       = $configObject.config?.build?.outDir || "dist";
+        $buildDir     = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
 
         if (!fs.existsSync(`${$buildDir}`)) {
             fs.mkdirSync(`${$buildDir}`, { "recursive": true });
@@ -216,9 +244,9 @@ const generateElectronConfig = (): any =>
 {
     let config: any = {};
 
-    const configPath: string = `${process.cwd()}/${ELECTRON_CONFIG_NAME}`;
+    const configPath: string = `${process.cwd()}/${ELECTRON_BUILD_CONFIG_NAME}`;
     if (!fs.existsSync(configPath)) {
-        console.error(pc.red(`The file \`${ELECTRON_CONFIG_NAME}\` could not be found.`));
+        console.error(pc.red(`The file \`${ELECTRON_BUILD_CONFIG_NAME}\` could not be found.`));
         process.exit(1);
     }
 
@@ -229,7 +257,7 @@ const generateElectronConfig = (): any =>
     if (!config.appId) {
         console.log();
         console.log(pc.red("`appId` is not set."));
-        console.log(`Please set \`appId\` in \`${ELECTRON_CONFIG_NAME}\`.`);
+        console.log(`Please set \`appId\` in \`${ELECTRON_BUILD_CONFIG_NAME}\`.`);
         console.log();
         process.exit(1);
     }
@@ -301,16 +329,12 @@ const generateElectronConfig = (): any =>
         };
     }
 
-    if (config.directories.output.slice(-1) !== "/") {
-        config.directories.output += "/";
-    }
-
     if (!("files" in config)) {
         config.files = [];
     }
 
     config.files.push(`${$outDir}/${platformDir}/${environment}/`);
-    config.directories.output += `${platformDir}/build`;
+    config.directories.output = `${$outDir}/${platformDir}/build`;
 
     return config;
 };
@@ -325,9 +349,9 @@ const generateElectronConfig = (): any =>
  */
 const setElectronIndexPath = (): void =>
 {
-    const htmlFilePath = `${$buildDir}/index.html`;
+    const htmlFilePath: string = `${$buildDir}/index.html`;
     fs.writeFileSync(
-        `${process.cwd()}/electron.index.json`,
+        `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`,
         JSON.stringify({
             "path": htmlFilePath.replace(process.cwd(), ".").trim()
         }, null, 2)
@@ -344,7 +368,7 @@ const setElectronIndexPath = (): void =>
  */
 const unlinkElectronIndexPath = (): void =>
 {
-    const jsonPath = `${process.cwd()}/electron.index.json`;
+    const jsonPath = `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`;
     if (fs.existsSync(jsonPath)) {
         fs.unlinkSync(jsonPath);
     }
@@ -360,22 +384,6 @@ const unlinkElectronIndexPath = (): void =>
  */
 const buildSteam = (): void =>
 {
-    const packageJson = JSON.parse(
-        fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
-    );
-
-    // edit type
-    packageJson.type = "commonjs";
-
-    // overwride
-    fs.writeFileSync(
-        `${process.cwd()}/package.json`,
-        JSON.stringify(packageJson, null, 2)
-    );
-
-    // revert type
-    packageJson.type = "module";
-
     /**
      * Electronで読み込むindex.htmlのパスをセット
      * Set the path to index.html to load in Electron
@@ -384,7 +392,17 @@ const buildSteam = (): void =>
 
     if (preview) {
 
-        const stream = cp.spawn(
+        const packageJson = JSON.parse(
+            fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+        );
+        packageJson.type = "commonjs";
+
+        fs.writeFileSync(
+            `${process.cwd()}/package.json`,
+            JSON.stringify(packageJson, null, 2)
+        );
+
+        cp.spawn(
             `${process.cwd()}/node_modules/.bin/electron`,
             [
                 `${process.cwd()}/electron.js`
@@ -392,23 +410,20 @@ const buildSteam = (): void =>
             { "stdio": "inherit" }
         );
 
-        stream.on("close", (code: number): void =>
+        setTimeout((): void =>
         {
-            console.log("preview close.");
+            if (packageJson.type !== "module") {
+                packageJson.type = "module";
+
+                // overwride
+                fs.writeFileSync(
+                    `${process.cwd()}/package.json`,
+                    JSON.stringify(packageJson, null, 2)
+                );
+            }
 
             unlinkElectronIndexPath();
-
-            // reset
-            fs.writeFileSync(
-                `${process.cwd()}/package.json`,
-                JSON.stringify(packageJson, null, 2)
-            );
-
-            if (code !== 0) {
-                console.log(pc.red("Failed to start Electron."));
-                console.log();
-            }
-        });
+        }, 1000);
 
     } else {
 
@@ -430,37 +445,32 @@ const buildSteam = (): void =>
 
             case "windows":
             case "steam:windows":
-                buildObject.targets = electronBuilder.Platform.WINDOWS.createTarget();
+                buildObject.targets = Platform.WINDOWS.createTarget();
                 break;
 
             case "macos":
             case "steam:macos":
-                buildObject.targets = electronBuilder.Platform.MAC.createTarget();
+                buildObject.targets = Platform.MAC.createTarget();
                 break;
 
             case "linux":
             case "steam:linux":
-                buildObject.targets = electronBuilder.Platform.LINUX.createTarget();
+                buildObject.targets = Platform.LINUX.createTarget();
                 break;
 
             default:
+                unlinkElectronIndexPath();
                 console.log(pc.red("There is an error in the export platform settings."));
                 console.log();
+                process.exit(1);
                 break;
 
         }
 
-        electronBuilder
-            .build(buildObject)
+        electronBuilder(buildObject)
             .then((): void =>
             {
                 unlinkElectronIndexPath();
-
-                // reset
-                fs.writeFileSync(
-                    `${process.cwd()}/package.json`,
-                    JSON.stringify(packageJson, null, 2)
-                );
 
                 console.log(pc.green(`Finished building \`Electron\` for ${platform}.`));
                 console.log();
@@ -468,12 +478,6 @@ const buildSteam = (): void =>
             .catch((error: any): void =>
             {
                 unlinkElectronIndexPath();
-
-                // reset
-                fs.writeFileSync(
-                    `${process.cwd()}/package.json`,
-                    JSON.stringify(packageJson, null, 2)
-                );
 
                 console.log(pc.red("Export of Electron failed."));
                 console.log(pc.red(error));
@@ -545,16 +549,11 @@ const runNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    /**
-     * 引数をcapacitorに合わせて書き換え
-     * Rewrite arguments to match capacitor
-     */
-    const nodePath: string = process.argv[0];
-    const filePath: string = process.argv[1];
-    process.argv = [nodePath, filePath, "run", platform];
-
-    // run simulator
-    cli.run();
+    cp.spawn("npx", [
+        "cap",
+        "run",
+        platform
+    ], { "stdio": "inherit" });
 };
 
 /**
@@ -565,7 +564,7 @@ const runNative = async (): Promise<void> =>
  * @method
  * @public
  */
-const build = (): void =>
+const multiBuild = (): void =>
 {
     switch (platform) {
 
@@ -609,7 +608,7 @@ const execute = async (): Promise<void> =>
     await loadConfig();
 
     buildWeb()
-        .then(build)
+        .then(multiBuild)
         .catch((error): void => {
             console.log(pc.red(error));
             process.exit(1);

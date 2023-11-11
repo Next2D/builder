@@ -6,7 +6,7 @@ import pc from "picocolors";
 import fs from "fs";
 import cp from "child_process";
 import { loadConfigFromFile } from "vite";
-import { Platform, build as electronBuilder } from "electron-builder";
+import { api } from "@electron-forge/core";
 
 const recommendeVersion: number = 18;
 const version: string = process.versions.node;
@@ -141,11 +141,11 @@ process.env.NEXT2D_TARGET_PLATFORM    = platform;
  */
 const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
 
-/**
- * @type {string}
- * @constant
- */
-const ELECTRON_BUILD_CONFIG_NAME: string = "electron.build.json";
+// /**
+//  * @type {string}
+//  * @constant
+//  */
+// const ELECTRON_BUILD_CONFIG_NAME: string = "electron.build.json";
 
 /**
  * @type {string}
@@ -233,112 +233,112 @@ const buildWeb = (): Promise<void> =>
     });
 };
 
-/**
- * @description Electronの書き出しに必要なconfigを生成
- *              Generate config for Electron export
- *
- * @return {object}
- * @method
- * @public
- */
-const generateElectronConfig = (): any =>
-{
-    let config: any = {};
+// /**
+//  * @description Electronの書き出しに必要なconfigを生成
+//  *              Generate config for Electron export
+//  *
+//  * @return {object}
+//  * @method
+//  * @public
+//  */
+// const generateElectronConfig = (): any =>
+// {
+//     let config: any = {};
 
-    const configPath: string = `${process.cwd()}/${ELECTRON_BUILD_CONFIG_NAME}`;
-    if (!fs.existsSync(configPath)) {
-        console.error(pc.red(`The file \`${ELECTRON_BUILD_CONFIG_NAME}\` could not be found.`));
-        process.exit(1);
-    }
+//     const configPath: string = `${process.cwd()}/${ELECTRON_BUILD_CONFIG_NAME}`;
+//     if (!fs.existsSync(configPath)) {
+//         console.error(pc.red(`The file \`${ELECTRON_BUILD_CONFIG_NAME}\` could not be found.`));
+//         process.exit(1);
+//     }
 
-    config = Object.assign(config,
-        JSON.parse(fs.readFileSync(configPath, { "encoding": "utf8" }))
-    );
+//     config = Object.assign(config,
+//         JSON.parse(fs.readFileSync(configPath, { "encoding": "utf8" }))
+//     );
 
-    if (!config.appId) {
-        console.log();
-        console.log(pc.red("`appId` is not set."));
-        console.log(`Please set \`appId\` in \`${ELECTRON_BUILD_CONFIG_NAME}\`.`);
-        console.log();
-        process.exit(1);
-    }
+//     if (!config.appId) {
+//         console.log();
+//         console.log(pc.red("`appId` is not set."));
+//         console.log(`Please set \`appId\` in \`${ELECTRON_BUILD_CONFIG_NAME}\`.`);
+//         console.log();
+//         process.exit(1);
+//     }
 
-    switch (platform) {
+//     switch (platform) {
 
-        case "windows":
-        case "steam:windows":
-            if (!("win" in config)) {
-                config.win = {
-                    "target": "portable"
-                };
-            }
+//         case "windows":
+//         case "steam:windows":
+//             if (!("win" in config)) {
+//                 config.win = {
+//                     "target": "portable"
+//                 };
+//             }
 
-            if ("mac" in config) {
-                delete config.mac;
-            }
+//             if ("mac" in config) {
+//                 delete config.mac;
+//             }
 
-            if ("linux" in config) {
-                delete config.linux;
-            }
+//             if ("linux" in config) {
+//                 delete config.linux;
+//             }
 
-            break;
+//             break;
 
-        case "macos":
-        case "steam:macos":
-            if (!("mac" in config)) {
-                config.mac = {
-                    "target": "dmg"
-                };
-            }
+//         case "macos":
+//         case "steam:macos":
+//             if (!("mac" in config)) {
+//                 config.mac = {
+//                     "target": "dmg"
+//                 };
+//             }
 
-            if ("win" in config) {
-                delete config.win;
-            }
+//             if ("win" in config) {
+//                 delete config.win;
+//             }
 
-            if ("linux" in config) {
-                delete config.linux;
-            }
+//             if ("linux" in config) {
+//                 delete config.linux;
+//             }
 
-            break;
+//             break;
 
-        case "linux":
-        case "steam:linux":
-            if (!("linux" in config)) {
-                config.linux = {
-                    "target": "deb"
-                };
-            }
+//         case "linux":
+//         case "steam:linux":
+//             if (!("linux" in config)) {
+//                 config.linux = {
+//                     "target": "deb"
+//                 };
+//             }
 
-            if ("win" in config) {
-                delete config.win;
-            }
+//             if ("win" in config) {
+//                 delete config.win;
+//             }
 
-            if ("mac" in config) {
-                delete config.mac;
-            }
+//             if ("mac" in config) {
+//                 delete config.mac;
+//             }
 
-            break;
+//             break;
 
-        default:
-            break;
+//         default:
+//             break;
 
-    }
+//     }
 
-    if (!("directories" in config)) {
-        config.directories = {
-            "output": "dist"
-        };
-    }
+//     if (!("directories" in config)) {
+//         config.directories = {
+//             "output": "dist"
+//         };
+//     }
 
-    if (!("files" in config)) {
-        config.files = [];
-    }
+//     if (!("files" in config)) {
+//         config.files = [];
+//     }
 
-    config.files.push(`${$outDir}/${platformDir}/${environment}/`);
-    config.directories.output = `${$outDir}/${platformDir}/build`;
+//     config.files.push(`${$outDir}/${platformDir}/${environment}/`);
+//     config.directories.output = `${$outDir}/${platformDir}/build`;
 
-    return config;
-};
+//     return config;
+// };
 
 /**
  * @description Electronで読み込むindex.htmlのファイルパスをセット
@@ -376,14 +376,108 @@ const unlinkElectronIndexPath = (): void =>
 };
 
 /**
- * @description Windows用アプリの書き出し関数
- *              Export function for Windows apps
+ * @description electronがインストールされてなければインストールを実行
+ *              If electron is not installed, run install.
  *
- * @return {void}
+ * @return {Promise}
  * @method
  * @public
  */
-const buildSteam = (): void =>
+const installElectron = (): Promise<void> =>
+{
+    return new Promise((resolve, reject): void =>
+    {
+        if (fs.existsSync(`${process.cwd()}/electron/node_modules`)) {
+            return resolve();
+        }
+
+        const stream = cp.spawn("npm", [
+            "--prefix",
+            `${process.cwd()}/electron`,
+            "install",
+            `${process.cwd()}/electron`
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("`Electron` installation failed.");
+            }
+
+            console.log(pc.green("`Electron` successfully installed."));
+            resolve();
+        });
+    });
+};
+
+/**
+ * @description electronに含むリソースを初期化
+ *              Initialize resources included in electron
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const removeResources = (): Promise<void> =>
+{
+    return new Promise((resolve, reject): void =>
+    {
+        const stream = cp.spawn("rm", [
+            "-rf",
+            `${process.cwd()}/electron/resources/`
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("Failed to remove built resources.");
+            }
+
+            console.log(pc.green("Successfully remove built resources."));
+            resolve();
+        });
+    });
+};
+
+/**
+ * @description ビルドしたリソースをコピー
+ *              Copy built resources
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const copyResources = (): Promise<void> =>
+{
+    return new Promise((resolve, reject): void =>
+    {
+        const stream = cp.spawn("cp", [
+            "-r",
+            `${$buildDir}/`,
+            `${process.cwd()}/electron/resources`
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("Failed to copy built resources.");
+            }
+
+            console.log(pc.green("Successfully copy built resources."));
+            resolve();
+        });
+    });
+};
+
+/**
+ * @description Windows用アプリの書き出し関数
+ *              Export function for Windows apps
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const buildSteam = async (): Promise<void> =>
 {
     /**
      * Electronで読み込むindex.htmlのパスをセット
@@ -428,35 +522,39 @@ const buildSteam = (): void =>
 
     } else {
 
-        /**
-         * Electronの書き出しに必要な設定を生成
-         * Generate settings necessary for exporting Electron
-         */
-        const config: any = generateElectronConfig();
+        await installElectron();
+
+        // reset
+        await removeResources();
+
+        // copy HTML, JavaScript
+        await copyResources();
 
         console.log(pc.green("Start the `Electron` build process."));
         console.log();
 
-        const buildObject: any = {
-            "projectDir": process.cwd(),
-            "config": config
+        const packageOptions = {
+            "dir": `${process.cwd()}/electron`,
+            "outDir": `${$outDir}/${platformDir}/build`,
+            "platform": "",
+            "arch": "all"
         };
 
         switch (platform) {
 
             case "windows":
             case "steam:windows":
-                buildObject.targets = Platform.WINDOWS.createTarget();
+                packageOptions.platform = "win32";
                 break;
 
             case "macos":
             case "steam:macos":
-                buildObject.targets = Platform.MAC.createTarget();
+                packageOptions.platform = "mas";
                 break;
 
             case "linux":
             case "steam:linux":
-                buildObject.targets = Platform.LINUX.createTarget();
+                packageOptions.platform = "linux";
                 break;
 
             default:
@@ -468,7 +566,8 @@ const buildSteam = (): void =>
 
         }
 
-        electronBuilder(buildObject)
+        api
+            .package(packageOptions)
             .then((): void =>
             {
                 unlinkElectronIndexPath();
@@ -483,7 +582,6 @@ const buildSteam = (): void =>
                 console.log(pc.red("Export of Electron failed."));
                 console.log(pc.red(error));
             });
-
     }
 };
 

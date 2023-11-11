@@ -176,12 +176,14 @@ const loadConfig = (): Promise<void> =>
             );
         }
 
+        const ext: string = fs.existsSync(`${process.cwd()}/vite.config.ts`) ? "ts" : "js";
+
         const config: any = await loadConfigFromFile(
             {
                 "command": "build",
                 "mode": "build"
             },
-            `${process.cwd()}/vite.config.ts`
+            `${process.cwd()}/vite.config.${ext}`
         );
 
         // update config

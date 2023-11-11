@@ -211,9 +211,8 @@ const buildWeb = (): Promise<void> =>
 {
     return new Promise((resolve, reject): void =>
     {
-        const command: string = `${process.cwd()}/node_modules/.bin/vite`;
-
-        const stream = cp.spawn(command, [
+        const stream = cp.spawn("npx", [
+            "vite",
             "--outDir",
             $buildDir,
             "build"

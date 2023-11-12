@@ -141,18 +141,6 @@ process.env.NEXT2D_TARGET_PLATFORM    = platform;
  */
 const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
 
-// /**
-//  * @type {string}
-//  * @constant
-//  */
-// const ELECTRON_BUILD_CONFIG_NAME: string = "electron.build.json";
-
-/**
- * @type {string}
- * @constant
- */
-const ELECTRON_INDEX_CONFIG_NAME: string = "electron.index.json";
-
 /**
  * @return {Promise}
  * @method
@@ -231,148 +219,6 @@ const buildWeb = (): Promise<void> =>
             resolve();
         });
     });
-};
-
-// /**
-//  * @description Electronの書き出しに必要なconfigを生成
-//  *              Generate config for Electron export
-//  *
-//  * @return {object}
-//  * @method
-//  * @public
-//  */
-// const generateElectronConfig = (): any =>
-// {
-//     let config: any = {};
-
-//     const configPath: string = `${process.cwd()}/${ELECTRON_BUILD_CONFIG_NAME}`;
-//     if (!fs.existsSync(configPath)) {
-//         console.error(pc.red(`The file \`${ELECTRON_BUILD_CONFIG_NAME}\` could not be found.`));
-//         process.exit(1);
-//     }
-
-//     config = Object.assign(config,
-//         JSON.parse(fs.readFileSync(configPath, { "encoding": "utf8" }))
-//     );
-
-//     if (!config.appId) {
-//         console.log();
-//         console.log(pc.red("`appId` is not set."));
-//         console.log(`Please set \`appId\` in \`${ELECTRON_BUILD_CONFIG_NAME}\`.`);
-//         console.log();
-//         process.exit(1);
-//     }
-
-//     switch (platform) {
-
-//         case "windows":
-//         case "steam:windows":
-//             if (!("win" in config)) {
-//                 config.win = {
-//                     "target": "portable"
-//                 };
-//             }
-
-//             if ("mac" in config) {
-//                 delete config.mac;
-//             }
-
-//             if ("linux" in config) {
-//                 delete config.linux;
-//             }
-
-//             break;
-
-//         case "macos":
-//         case "steam:macos":
-//             if (!("mac" in config)) {
-//                 config.mac = {
-//                     "target": "dmg"
-//                 };
-//             }
-
-//             if ("win" in config) {
-//                 delete config.win;
-//             }
-
-//             if ("linux" in config) {
-//                 delete config.linux;
-//             }
-
-//             break;
-
-//         case "linux":
-//         case "steam:linux":
-//             if (!("linux" in config)) {
-//                 config.linux = {
-//                     "target": "deb"
-//                 };
-//             }
-
-//             if ("win" in config) {
-//                 delete config.win;
-//             }
-
-//             if ("mac" in config) {
-//                 delete config.mac;
-//             }
-
-//             break;
-
-//         default:
-//             break;
-
-//     }
-
-//     if (!("directories" in config)) {
-//         config.directories = {
-//             "output": "dist"
-//         };
-//     }
-
-//     if (!("files" in config)) {
-//         config.files = [];
-//     }
-
-//     config.files.push(`${$outDir}/${platformDir}/${environment}/`);
-//     config.directories.output = `${$outDir}/${platformDir}/build`;
-
-//     return config;
-// };
-
-/**
- * @description Electronで読み込むindex.htmlのファイルパスをセット
- *              Set the file path of index.html to be loaded by Electron
- *
- * @return {void}
- * @method
- * @public
- */
-const setElectronIndexPath = (): void =>
-{
-    const htmlFilePath: string = `${$buildDir}/index.html`;
-    fs.writeFileSync(
-        `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`,
-        JSON.stringify({
-            "path": htmlFilePath.replace(process.cwd(), ".").trim()
-        }, null, 2)
-    );
-};
-
-/**
- * @description Electronで読み込むindex.htmlのファイルパスを初期化
- *              Initialize the file path of index.html to be loaded by Electron
- *
- * @return {void}
- * @method
- * @public
- */
-const unlinkElectronIndexPath = (): void =>
-{
-    const jsonPath = `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`;
-    if (fs.existsSync(jsonPath)) {
-        fs.unlinkSync(jsonPath);
-    }
 };
 
 /**
@@ -479,56 +325,23 @@ const copyResources = (): Promise<void> =>
  */
 const buildSteam = async (): Promise<void> =>
 {
-    /**
-     * Electronで読み込むindex.htmlのパスをセット
-     * Set the path to index.html to load in Electron
-     */
-    setElectronIndexPath();
+    // reset
+    await removeResources();
+
+    // copy HTML, JavaScript
+    await copyResources();
 
     if (preview) {
 
-        const packageJson = JSON.parse(
-            fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+        cp.spawn("npx", [
+            "electron",
+            `${process.cwd()}/electron/index.js`
+        ], { "stdio": "inherit" }
         );
-        packageJson.type = "commonjs";
-
-        fs.writeFileSync(
-            `${process.cwd()}/package.json`,
-            JSON.stringify(packageJson, null, 2)
-        );
-
-        cp.spawn(
-            `${process.cwd()}/node_modules/.bin/electron`,
-            [
-                `${process.cwd()}/electron.js`
-            ],
-            { "stdio": "inherit" }
-        );
-
-        setTimeout((): void =>
-        {
-            if (packageJson.type !== "module") {
-                packageJson.type = "module";
-
-                // overwride
-                fs.writeFileSync(
-                    `${process.cwd()}/package.json`,
-                    JSON.stringify(packageJson, null, 2)
-                );
-            }
-
-            unlinkElectronIndexPath();
-        }, 1000);
 
     } else {
 
         await installElectron();
-
-        // reset
-        await removeResources();
-
-        // copy HTML, JavaScript
-        await copyResources();
 
         console.log(pc.green("Start the `Electron` build process."));
         console.log();
@@ -558,11 +371,9 @@ const buildSteam = async (): Promise<void> =>
                 break;
 
             default:
-                unlinkElectronIndexPath();
                 console.log(pc.red("There is an error in the export platform settings."));
                 console.log();
                 process.exit(1);
-                break;
 
         }
 
@@ -570,15 +381,11 @@ const buildSteam = async (): Promise<void> =>
             .package(packageOptions)
             .then((): void =>
             {
-                unlinkElectronIndexPath();
-
                 console.log(pc.green(`Finished building \`Electron\` for ${platform}.`));
                 console.log();
             })
             .catch((error: any): void =>
             {
-                unlinkElectronIndexPath();
-
                 console.log(pc.red("Export of Electron failed."));
                 console.log(pc.red(error));
             });
@@ -589,7 +396,7 @@ const buildSteam = async (): Promise<void> =>
  * @description iOSのプロジェクトを生成
  *              Generate iOS project
  *
- * @return {Promise<void>}
+ * @return {Promise}
  * @method
  * @public
  */

@@ -148,7 +148,7 @@ const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
  */
 const loadConfig = (): Promise<void> =>
 {
-    return new Promise(async (resolve): Promise<void> =>
+    return new Promise((resolve): void =>
     {
         const packageJson = JSON.parse(
             fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
@@ -166,26 +166,28 @@ const loadConfig = (): Promise<void> =>
 
         const ext: string = fs.existsSync(`${process.cwd()}/vite.config.ts`) ? "ts" : "js";
 
-        const config: any = await loadConfigFromFile(
+        loadConfigFromFile(
             {
                 "command": "build",
                 "mode": "build"
             },
             `${process.cwd()}/vite.config.${ext}`
-        );
+        )
+            .then((config): void =>
+            {
+                // update config
+                $configObject = config;
+                $outDir       = $configObject.config?.build?.outDir || "dist";
+                $buildDir     = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
 
-        // update config
-        $configObject = config;
-        $outDir       = $configObject.config?.build?.outDir || "dist";
-        $buildDir     = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
+                if (!fs.existsSync(`${$buildDir}`)) {
+                    fs.mkdirSync(`${$buildDir}`, { "recursive": true });
+                    console.log(pc.green(`Create build directory: ${$buildDir}`));
+                    console.log();
+                }
 
-        if (!fs.existsSync(`${$buildDir}`)) {
-            fs.mkdirSync(`${$buildDir}`, { "recursive": true });
-            console.log(pc.green(`Create build directory: ${$buildDir}`));
-            console.log();
-        }
-
-        resolve();
+                resolve();
+            });
     });
 };
 

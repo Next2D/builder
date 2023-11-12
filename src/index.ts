@@ -6,7 +6,7 @@ import pc from "picocolors";
 import fs from "fs";
 import cp from "child_process";
 import { loadConfigFromFile } from "vite";
-import { Platform, build as electronBuilder } from "electron-builder";
+import { api } from "@electron-forge/core";
 
 const recommendeVersion: number = 18;
 const version: string = process.versions.node;
@@ -142,18 +142,6 @@ process.env.NEXT2D_TARGET_PLATFORM    = platform;
 const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
 
 /**
- * @type {string}
- * @constant
- */
-const ELECTRON_BUILD_CONFIG_NAME: string = "electron.build.json";
-
-/**
- * @type {string}
- * @constant
- */
-const ELECTRON_INDEX_CONFIG_NAME: string = "electron.index.json";
-
-/**
  * @return {Promise}
  * @method
  * @public
@@ -234,256 +222,173 @@ const buildWeb = (): Promise<void> =>
 };
 
 /**
- * @description Electronの書き出しに必要なconfigを生成
- *              Generate config for Electron export
+ * @description electronがインストールされてなければインストールを実行
+ *              If electron is not installed, run install.
  *
- * @return {object}
+ * @return {Promise}
  * @method
  * @public
  */
-const generateElectronConfig = (): any =>
+const installElectron = (): Promise<void> =>
 {
-    let config: any = {};
+    return new Promise((resolve, reject): void =>
+    {
+        if (fs.existsSync(`${process.cwd()}/electron/node_modules`)) {
+            return resolve();
+        }
 
-    const configPath: string = `${process.cwd()}/${ELECTRON_BUILD_CONFIG_NAME}`;
-    if (!fs.existsSync(configPath)) {
-        console.error(pc.red(`The file \`${ELECTRON_BUILD_CONFIG_NAME}\` could not be found.`));
-        process.exit(1);
-    }
+        const stream = cp.spawn("npm", [
+            "--prefix",
+            `${process.cwd()}/electron`,
+            "install",
+            `${process.cwd()}/electron`
+        ], { "stdio": "inherit" });
 
-    config = Object.assign(config,
-        JSON.parse(fs.readFileSync(configPath, { "encoding": "utf8" }))
-    );
-
-    if (!config.appId) {
-        console.log();
-        console.log(pc.red("`appId` is not set."));
-        console.log(`Please set \`appId\` in \`${ELECTRON_BUILD_CONFIG_NAME}\`.`);
-        console.log();
-        process.exit(1);
-    }
-
-    switch (platform) {
-
-        case "windows":
-        case "steam:windows":
-            if (!("win" in config)) {
-                config.win = {
-                    "target": "portable"
-                };
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("`Electron` installation failed.");
             }
 
-            if ("mac" in config) {
-                delete config.mac;
-            }
-
-            if ("linux" in config) {
-                delete config.linux;
-            }
-
-            break;
-
-        case "macos":
-        case "steam:macos":
-            if (!("mac" in config)) {
-                config.mac = {
-                    "target": "dmg"
-                };
-            }
-
-            if ("win" in config) {
-                delete config.win;
-            }
-
-            if ("linux" in config) {
-                delete config.linux;
-            }
-
-            break;
-
-        case "linux":
-        case "steam:linux":
-            if (!("linux" in config)) {
-                config.linux = {
-                    "target": "deb"
-                };
-            }
-
-            if ("win" in config) {
-                delete config.win;
-            }
-
-            if ("mac" in config) {
-                delete config.mac;
-            }
-
-            break;
-
-        default:
-            break;
-
-    }
-
-    if (!("directories" in config)) {
-        config.directories = {
-            "output": "dist"
-        };
-    }
-
-    if (!("files" in config)) {
-        config.files = [];
-    }
-
-    config.files.push(`${$outDir}/${platformDir}/${environment}/`);
-    config.directories.output = `${$outDir}/${platformDir}/build`;
-
-    return config;
+            console.log(pc.green("`Electron` successfully installed."));
+            resolve();
+        });
+    });
 };
 
 /**
- * @description Electronで読み込むindex.htmlのファイルパスをセット
- *              Set the file path of index.html to be loaded by Electron
+ * @description electronに含むリソースを初期化
+ *              Initialize resources included in electron
  *
- * @return {void}
+ * @return {Promise}
  * @method
  * @public
  */
-const setElectronIndexPath = (): void =>
+const removeResources = (): Promise<void> =>
 {
-    const htmlFilePath: string = `${$buildDir}/index.html`;
-    fs.writeFileSync(
-        `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`,
-        JSON.stringify({
-            "path": htmlFilePath.replace(process.cwd(), ".").trim()
-        }, null, 2)
-    );
+    return new Promise((resolve, reject): void =>
+    {
+        const stream = cp.spawn("rm", [
+            "-rf",
+            `${process.cwd()}/electron/resources/`
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("Failed to remove built resources.");
+            }
+
+            console.log(pc.green("Successfully remove built resources."));
+            resolve();
+        });
+    });
 };
 
 /**
- * @description Electronで読み込むindex.htmlのファイルパスを初期化
- *              Initialize the file path of index.html to be loaded by Electron
+ * @description ビルドしたリソースをコピー
+ *              Copy built resources
  *
- * @return {void}
+ * @return {Promise}
  * @method
  * @public
  */
-const unlinkElectronIndexPath = (): void =>
+const copyResources = (): Promise<void> =>
 {
-    const jsonPath = `${process.cwd()}/${ELECTRON_INDEX_CONFIG_NAME}`;
-    if (fs.existsSync(jsonPath)) {
-        fs.unlinkSync(jsonPath);
-    }
+    return new Promise((resolve, reject): void =>
+    {
+        const stream = cp.spawn("cp", [
+            "-r",
+            `${$buildDir}/`,
+            `${process.cwd()}/electron/resources`
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                reject("Failed to copy built resources.");
+            }
+
+            console.log(pc.green("Successfully copy built resources."));
+            resolve();
+        });
+    });
 };
 
 /**
  * @description Windows用アプリの書き出し関数
  *              Export function for Windows apps
  *
- * @return {void}
+ * @return {Promise}
  * @method
  * @public
  */
-const buildSteam = (): void =>
+const buildSteam = async (): Promise<void> =>
 {
-    /**
-     * Electronで読み込むindex.htmlのパスをセット
-     * Set the path to index.html to load in Electron
-     */
-    setElectronIndexPath();
+    // reset
+    await removeResources();
+
+    // copy HTML, JavaScript
+    await copyResources();
 
     if (preview) {
 
-        const packageJson = JSON.parse(
-            fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+        cp.spawn("npx", [
+            "electron",
+            `${process.cwd()}/electron/index.js`
+        ], { "stdio": "inherit" }
         );
-        packageJson.type = "commonjs";
-
-        fs.writeFileSync(
-            `${process.cwd()}/package.json`,
-            JSON.stringify(packageJson, null, 2)
-        );
-
-        cp.spawn(
-            `${process.cwd()}/node_modules/.bin/electron`,
-            [
-                `${process.cwd()}/electron.js`
-            ],
-            { "stdio": "inherit" }
-        );
-
-        setTimeout((): void =>
-        {
-            if (packageJson.type !== "module") {
-                packageJson.type = "module";
-
-                // overwride
-                fs.writeFileSync(
-                    `${process.cwd()}/package.json`,
-                    JSON.stringify(packageJson, null, 2)
-                );
-            }
-
-            unlinkElectronIndexPath();
-        }, 1000);
 
     } else {
 
-        /**
-         * Electronの書き出しに必要な設定を生成
-         * Generate settings necessary for exporting Electron
-         */
-        const config: any = generateElectronConfig();
+        await installElectron();
 
         console.log(pc.green("Start the `Electron` build process."));
         console.log();
 
-        const buildObject: any = {
-            "projectDir": process.cwd(),
-            "config": config
+        const packageOptions = {
+            "dir": `${process.cwd()}/electron`,
+            "outDir": `${$outDir}/${platformDir}/build`,
+            "platform": "",
+            "arch": "all"
         };
 
         switch (platform) {
 
             case "windows":
             case "steam:windows":
-                buildObject.targets = Platform.WINDOWS.createTarget();
+                packageOptions.platform = "win32";
                 break;
 
             case "macos":
             case "steam:macos":
-                buildObject.targets = Platform.MAC.createTarget();
+                packageOptions.platform = "mas";
                 break;
 
             case "linux":
             case "steam:linux":
-                buildObject.targets = Platform.LINUX.createTarget();
+                packageOptions.platform = "linux";
                 break;
 
             default:
-                unlinkElectronIndexPath();
                 console.log(pc.red("There is an error in the export platform settings."));
                 console.log();
                 process.exit(1);
-                break;
 
         }
 
-        electronBuilder(buildObject)
+        api
+            .package(packageOptions)
             .then((): void =>
             {
-                unlinkElectronIndexPath();
-
                 console.log(pc.green(`Finished building \`Electron\` for ${platform}.`));
                 console.log();
             })
             .catch((error: any): void =>
             {
-                unlinkElectronIndexPath();
-
                 console.log(pc.red("Export of Electron failed."));
                 console.log(pc.red(error));
             });
-
     }
 };
 
@@ -491,7 +396,7 @@ const buildSteam = (): void =>
  * @description iOSのプロジェクトを生成
  *              Generate iOS project
  *
- * @return {Promise<void>}
+ * @return {Promise}
  * @method
  * @public
  */

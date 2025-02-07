@@ -146,49 +146,42 @@ const CAPACITOR_CONFIG_NAME: string = "capacitor.config.json";
  * @method
  * @public
  */
-const loadConfig = (): Promise<void> =>
+const loadConfig = async (): Promise<void> =>
 {
-    return new Promise((resolve): void =>
-    {
-        const packageJson = JSON.parse(
-            fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+    const packageJson = JSON.parse(
+        fs.readFileSync(`${process.cwd()}/package.json`, { "encoding": "utf8" })
+    );
+
+    if (packageJson.type !== "module") {
+        packageJson.type = "module";
+
+        // overwride
+        fs.writeFileSync(
+            `${process.cwd()}/package.json`,
+            JSON.stringify(packageJson, null, 2)
         );
+    }
 
-        if (packageJson.type !== "module") {
-            packageJson.type = "module";
+    const ext: string = fs.existsSync(`${process.cwd()}/vite.config.ts`) ? "ts" : "js";
 
-            // overwride
-            fs.writeFileSync(
-                `${process.cwd()}/package.json`,
-                JSON.stringify(packageJson, null, 2)
-            );
-        }
+    const config = await loadConfigFromFile(
+        {
+            "command": "build",
+            "mode": "build"
+        },
+        `${process.cwd()}/vite.config.${ext}`
+    );
 
-        const ext: string = fs.existsSync(`${process.cwd()}/vite.config.ts`) ? "ts" : "js";
+    // update config
+    $configObject = config;
+    $outDir       = $configObject.config?.build?.outDir || "dist";
+    $buildDir     = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
 
-        loadConfigFromFile(
-            {
-                "command": "build",
-                "mode": "build"
-            },
-            `${process.cwd()}/vite.config.${ext}`
-        )
-            .then((config): void =>
-            {
-                // update config
-                $configObject = config;
-                $outDir       = $configObject.config?.build?.outDir || "dist";
-                $buildDir     = `${process.cwd()}/${$outDir}/${platformDir}/${environment}`;
-
-                if (!fs.existsSync(`${$buildDir}`)) {
-                    fs.mkdirSync(`${$buildDir}`, { "recursive": true });
-                    console.log(pc.green(`Create build directory: ${$buildDir}`));
-                    console.log();
-                }
-
-                resolve();
-            });
-    });
+    if (!fs.existsSync(`${$buildDir}`)) {
+        fs.mkdirSync(`${$buildDir}`, { "recursive": true });
+        console.log(pc.green(`Create build directory: ${$buildDir}`));
+        console.log();
+    }
 };
 
 /**
@@ -201,24 +194,35 @@ const loadConfig = (): Promise<void> =>
  */
 const buildWeb = (): Promise<void> =>
 {
-    return new Promise((resolve, reject): void =>
+    return new Promise<void>((resolve, reject): void =>
     {
         const stream = cp.spawn("npx", [
-            "vite",
-            "--outDir",
-            $buildDir,
-            "build"
+            "@next2d/vite-plugin-next2d-auto-loader"
         ], { "stdio": "inherit" });
 
         stream.on("close", (code: number): void =>
         {
             if (code !== 0) {
-                reject("Export of `HTML` and `JavaScript` failed.");
+                reject("vite plugin command failed.");
             }
 
-            console.log();
-            console.log(pc.green("`HTML` and `JavaScript` files are written out."));
-            resolve();
+            const stream = cp.spawn("npx", [
+                "vite",
+                "--outDir",
+                $buildDir,
+                "build"
+            ], { "stdio": "inherit" });
+
+            stream.on("close", (code: number): void =>
+            {
+                if (code !== 0) {
+                    reject("Export of `HTML` and `JavaScript` failed.");
+                }
+
+                console.log();
+                console.log(pc.green("`HTML` and `JavaScript` files are written out."));
+                resolve();
+            });
         });
     });
 };
@@ -233,7 +237,7 @@ const buildWeb = (): Promise<void> =>
  */
 const installElectron = (): Promise<void> =>
 {
-    return new Promise((resolve, reject): void =>
+    return new Promise<void>((resolve, reject): void =>
     {
         if (fs.existsSync(`${process.cwd()}/electron/node_modules`)) {
             return resolve();
@@ -268,7 +272,7 @@ const installElectron = (): Promise<void> =>
  */
 const removeResources = (): Promise<void> =>
 {
-    return new Promise((resolve, reject): void =>
+    return new Promise<void>((resolve, reject): void =>
     {
         const stream = cp.spawn("rm", [
             "-rf",
@@ -297,7 +301,7 @@ const removeResources = (): Promise<void> =>
  */
 const copyResources = (): Promise<void> =>
 {
-    return new Promise((resolve, reject): void =>
+    return new Promise<void>((resolve, reject): void =>
     {
         const stream = cp.spawn("cp", [
             "-r",
@@ -338,8 +342,7 @@ const buildSteam = async (): Promise<void> =>
         cp.spawn("npx", [
             "electron",
             `${process.cwd()}/electron/index.js`
-        ], { "stdio": "inherit" }
-        );
+        ], { "stdio": "inherit" });
 
     } else {
 
@@ -472,7 +475,7 @@ const runNative = async (): Promise<void> =>
  * @method
  * @public
  */
-const multiBuild = (): void =>
+const multiBuild = async (): Promise<void> =>
 {
     switch (platform) {
 
@@ -482,13 +485,13 @@ const multiBuild = (): void =>
         case "steam:windows":
         case "steam:macos":
         case "steam:linux":
-            buildSteam();
+            await buildSteam();
             break;
 
         case "ios":
         case "android":
             if (preview) {
-                runNative();
+                await runNative();
             }
             break;
 
@@ -513,14 +516,14 @@ const multiBuild = (): void =>
  */
 const execute = async (): Promise<void> =>
 {
-    await loadConfig();
-
-    buildWeb()
-        .then(multiBuild)
-        .catch((error): void => {
-            console.log(pc.red(error));
-            process.exit(1);
-        });
+    try {
+        await loadConfig();
+        await buildWeb();
+        await multiBuild();
+    } catch (error) {
+        console.error(error);
+        process.exit(1);
+    }
 };
 
 execute();

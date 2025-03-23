@@ -21,7 +21,7 @@
   ],
   "scripts": {
     "lint": "eslint src/index.ts",
-    "publish": "tsc"
+    "release": "tsc"
   },
   "files": [
     "dist"

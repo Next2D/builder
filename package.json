@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.0.17",
+  "version": "0.0.16",
   "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
   "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",

@@ -1,7 +1,7 @@
 Multi-platform Builder
 =============
 
-[![CodeQL](https://github.com/Next2D/builder/actions/workflows/codeql-analysis.yml/badge.svg?branch=main)](https://github.com/Next2D/builder/actions/workflows/codeql-analysis.yml)
+[![CodeQL](https://github.com/Next2D/builder/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/Next2D/builder/actions/workflows/github-code-scanning/codeql)
 [![Lint](https://github.com/Next2D/builder/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/Next2D/builder/actions/workflows/lint.yml)
 [![release](https://img.shields.io/github/v/release/Next2D/builder)](https://github.com/Next2D/builder/releases)
 [![license](https://img.shields.io/github/license/Next2D/builder)](https://github.com/Next2D/builder/blob/main/LICENSE)

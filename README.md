@@ -28,22 +28,22 @@ With Next2D Framework, you can efficiently develop and deploy applications optim
 
 ## Supported
 
-| platform        | detail                   |
-|-----------------|--------------------------|
-| Windows         | Export an exe file       |
-| macOS           | Export dmg, app file     |
-| Linux           | Export deb file          |
-| Steam:Windows   | Export an exe file       |
-| Steam:macOS     | Export dmg, app file     |
-| Steam:Linux     | Export deb file          |
-| web             | Export minfy'd JS files  |
+| platform        | detail                              |
+|-----------------|-------------------------------------|
+| Windows         | Export an exe file                  |
+| macOS           | Export dmg, app file                |
+| Linux           | Export deb file                     |
+| Steam:Windows   | Export an exe file                  |
+| Steam:macOS     | Export dmg, app file                |
+| Steam:Linux     | Export deb file                     |
+| web             | Export minfy'd JS files             |
+| iOS             | open Xcode, and Export ipa          |
+| iOS             | open Android Studio, and Export apk |
 
 ### Scheduled introduction
 
 | platform        | 
 |-----------------|
-| iOS             |
-| Android         |
 | Nintendo Switch |
 
 ### build example.

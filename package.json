@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
   "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",
@@ -8,7 +8,7 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "homepage": "https://next2d.app",
-  "bugs": "https://github.com/Next2D/view-generator/issues",
+  "bugs": "https://github.com/Next2D/builder/issues",
   "keywords": [
     "Next2D",
     "JavaScript for Linux",
@@ -35,18 +35,18 @@
   },
   "dependencies": {
     "@electron-forge/core": "^7.10.2",
-    "@types/node": "^24.9.2",
+    "@types/node": "^24.10.1",
     "picocolors": "^1.1.1",
-    "vite": "^7.1.12"
+    "vite": "^7.2.4"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3.3.1",
-    "@eslint/js": "^9.39.0",
-    "@typescript-eslint/eslint-plugin": "^8.46.2",
-    "@typescript-eslint/parser": "^8.46.2",
-    "eslint": "^9.39.0",
+    "@eslint/eslintrc": "^3.3.3",
+    "@eslint/js": "^9.39.1",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
     "eslint-plugin-unused-imports": "^4.3.0",
-    "globals": "^16.4.0",
+    "globals": "^16.5.0",
     "typescript": "^5.9.3"
   }
 }

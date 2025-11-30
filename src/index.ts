@@ -8,7 +8,7 @@ import cp from "child_process";
 import { loadConfigFromFile } from "vite";
 import { api } from "@electron-forge/core";
 
-const recommendeVersion: number = 18;
+const recommendeVersion: number = 22;
 const version: string = process.versions.node;
 if (recommendeVersion > parseInt(version.split(".")[0])) {
     pc.red(`You are running Node Version:${version}.
@@ -21,6 +21,8 @@ let platform: string    = "";
 let environment: string = "";
 let hasHelp: boolean    = false;
 let preview: boolean    = false;
+let open: boolean       = false;
+let build: boolean      = false;
 
 for (let idx: number = 0; idx < process.argv.length; ++idx) {
 
@@ -28,6 +30,14 @@ for (let idx: number = 0; idx < process.argv.length; ++idx) {
 
         case "--preview":
             preview = true;
+            break;
+
+        case "--open":
+            open = true;
+            break;
+
+        case "--build":
+            build = true;
             break;
 
         case "--help":
@@ -468,6 +478,102 @@ const runNative = async (): Promise<void> =>
 };
 
 /**
+ * @description iOS/Androidアプリのオープン関数
+ *              Open function for iOS/Android apps
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const openNative = async (): Promise<void> =>
+{
+    await generateNativeProject();
+
+    /**
+     * Capacitorの書き出しに必要な設定を生成
+     * Generate settings necessary for exporting Capacitor
+     */
+    const config = JSON.parse(
+        fs.readFileSync(`${process.cwd()}/${CAPACITOR_CONFIG_NAME}`, { "encoding": "utf8" })
+    );
+
+    config.webDir = `${$outDir}/${platformDir}/${environment}/`;
+
+    fs.writeFileSync(
+        `${process.cwd()}/${CAPACITOR_CONFIG_NAME}`,
+        JSON.stringify(config, null, 2)
+    );
+
+    const stream = cp.spawn("npx", [
+        "cap",
+        "sync",
+        platform
+    ], { "stdio": "inherit" });
+
+    stream.on("close", (code: number): void =>
+    {
+        if (code !== 0) {
+            console.log(pc.red(`Failed to sync ${platform} project.`));
+            return;
+        }
+
+        cp.spawn("npx", [
+            "cap",
+            "open",
+            platform
+        ], { "stdio": "inherit" });
+    });
+};
+
+/**
+ * @description iOS/Androidアプリのビルド関数
+ *              Build function for iOS/Android apps
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const buildNative = async (): Promise<void> =>
+{
+    await generateNativeProject();
+
+    /**
+     * Capacitorの書き出しに必要な設定を生成
+     * Generate settings necessary for exporting Capacitor
+     */
+    const config = JSON.parse(
+        fs.readFileSync(`${process.cwd()}/${CAPACITOR_CONFIG_NAME}`, { "encoding": "utf8" })
+    );
+
+    config.webDir = `${$outDir}/${platformDir}/${environment}/`;
+
+    fs.writeFileSync(
+        `${process.cwd()}/${CAPACITOR_CONFIG_NAME}`,
+        JSON.stringify(config, null, 2)
+    );
+
+    const stream = cp.spawn("npx", [
+        "cap",
+        "sync",
+        platform
+    ], { "stdio": "inherit" });
+
+    stream.on("close", (code: number): void =>
+    {
+        if (code !== 0) {
+            console.log(pc.red(`Failed to sync ${platform} project.`));
+            return;
+        }
+
+        cp.spawn("npx", [
+            "cap",
+            "build",
+            platform
+        ], { "stdio": "inherit" });
+    });
+};
+
+/**
  * @description ビルドの実行関数
  *              Build Execution Functions
  *
@@ -490,9 +596,27 @@ const multiBuild = async (): Promise<void> =>
 
         case "ios":
         case "android":
-            if (preview) {
-                await runNative();
+            switch (true) {
+
+                case open:
+                    await openNative();
+                    break;
+
+                case build:
+                    await buildNative();
+                    break;
+
+                case preview:
+                    await runNative();
+                    break;
+
+                default:
+                    break;
             }
+            break;
+
+        case "open:ios":
+            await openNative();
             break;
 
         case "web":

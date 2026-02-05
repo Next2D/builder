@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-platform builder for Next2d Framework, supporting export to various platforms such as macOS, Windows, iOS, Android and Web(HTML)",
   "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",
@@ -35,18 +35,18 @@
   },
   "dependencies": {
     "@electron-forge/core": "^7.11.1",
-    "@types/node": "^25.0.10",
+    "@types/node": "^25.2.0",
     "picocolors": "^1.1.1",
     "vite": "^7.3.1"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.3",
     "@eslint/js": "^9.39.2",
-    "@typescript-eslint/eslint-plugin": "^8.53.1",
-    "@typescript-eslint/parser": "^8.53.1",
+    "@typescript-eslint/eslint-plugin": "^8.54.0",
+    "@typescript-eslint/parser": "^8.54.0",
     "eslint": "^9.39.2",
     "eslint-plugin-unused-imports": "^4.3.0",
-    "globals": "^17.1.0",
+    "globals": "^17.3.0",
     "typescript": "^5.9.3"
   }
 }

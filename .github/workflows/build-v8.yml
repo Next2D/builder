@@ -75,9 +75,9 @@ jobs:
           call ninja -C out\x64.release v8_monolith
           if errorlevel 1 (
             echo.
-            echo ===== BUILD FAILED: retrying only the failed steps to surface the error =====
-            echo ===== 下のログが実際のエラー内容 (失敗コマンドのみ再実行) =====
-            call ninja -C out\x64.release v8_monolith
+            echo ===== BUILD FAILED: retrying serially to surface the exact error =====
+            echo ===== -j 1 で再実行するため、このログの最後 = 失敗コマンドのエラー本体 =====
+            call ninja -C out\x64.release -j 1 v8_monolith
             if errorlevel 1 exit /b 1
           )
 

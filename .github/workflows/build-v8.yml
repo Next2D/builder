@@ -1,0 +1,105 @@
+# V8 monolith (Windows x64) を GitHub Actions 上でビルドし、Releases へ発行する。
+#
+# 目的: ゲーム開発者が `npx @next2d/builder --platform xbox` を実行したとき、
+# builder がここで発行した prebuilt を自動ダウンロードできるようにする
+# (`--v8-root` / V8_ROOT の指定を不要にする)。
+#
+# 運用: 手動トリガー (Actions タブ → build-v8 → Run workflow)。
+# バージョンを上げるときは v8_version を変えて実行し、src/index.ts の
+# XBOX_V8_VERSION と xbox-host-ci.yml の V8_TAG を同じ値に更新する。
+#
+# 所要: 約 2〜4 時間 (V8 のフルビルド)。job 上限 6 時間以内。
+name: build-v8
+
+on:
+  workflow_dispatch:
+    inputs:
+      v8_version:
+        description: "V8 version tag (https://github.com/v8/v8/tags)"
+        required: true
+        default: "13.6.233.17"
+
+permissions:
+  contents: write   # Releases への発行に必要
+
+jobs:
+  build-v8-windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Setup depot_tools
+        shell: pwsh
+        working-directory: ${{ runner.temp }}
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\depot_tools"
+          Add-Content $env:GITHUB_ENV "DEPOT_TOOLS_WIN_TOOLCHAIN=0"
+
+      - name: Fetch V8 ${{ inputs.v8_version }} (no history)
+        shell: cmd
+        working-directory: ${{ runner.temp }}
+        env:
+          V8_VERSION: ${{ inputs.v8_version }}
+        run: |
+          call fetch --no-history v8
+          if errorlevel 1 exit /b 1
+          cd v8
+          git fetch --depth 1 origin refs/tags/%V8_VERSION%
+          if errorlevel 1 exit /b 1
+          git checkout FETCH_HEAD
+          if errorlevel 1 exit /b 1
+          call gclient sync -D
+          if errorlevel 1 exit /b 1
+
+      - name: Build v8_monolith
+        shell: cmd
+        working-directory: ${{ runner.temp }}/v8
+        run: |
+          rem フラグはホスト側 (templates/xbox/CMakeLists.txt) の defines と一致させること:
+          rem   v8_enable_pointer_compression <-> V8_COMPRESS_POINTERS
+          rem   v8_enable_sandbox             <-> V8_ENABLE_SANDBOX
+          rem use_custom_libcxx=false : MSVC (MS STL) とのリンクに必須
+          rem icu_use_data_file=false : icudtl.dat の同梱を不要にする
+          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=true"
+          if errorlevel 1 exit /b 1
+          call ninja -C out\x64.release v8_monolith
+          if errorlevel 1 exit /b 1
+
+      - name: Package (include/ + lib/v8_monolith.lib)
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/v8
+        run: |
+          New-Item -ItemType Directory -Force package/lib | Out-Null
+          Copy-Item include package/include -Recurse
+          Copy-Item out/x64.release/obj/v8_monolith.lib package/lib/
+          Copy-Item out/x64.release/args.gn package/
+          "${{ inputs.v8_version }}" | Set-Content package/VERSION.txt
+          $zip = "$env:GITHUB_WORKSPACE/v8-monolith-${{ inputs.v8_version }}-windows-x64.zip"
+          Compress-Archive -Path package/* -DestinationPath $zip
+          Get-Item $zip | Select-Object Name, Length
+
+      - name: Publish to GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v8-${{ inputs.v8_version }}-windows-x64"
+          $zip = "v8-monolith-${{ inputs.v8_version }}-windows-x64.zip"
+          $notes = @"
+          Prebuilt V8 monolith for the Next2D Xbox host (windows-x64).
+
+          - V8 ``${{ inputs.v8_version }}`` / VS2022 (windows-latest runner)
+          - gn args: monolithic, no external startup data, use_custom_libcxx=false,
+            icu_use_data_file=false, pointer compression + sandbox enabled
+          - Layout: ``include/`` + ``lib/v8_monolith.lib`` (pass the extracted dir to ``--v8-root``)
+
+          ``npx @next2d/builder --platform xbox`` downloads this automatically when
+          ``--v8-root`` / ``V8_ROOT`` is not specified.
+          "@
+          # 既存タグなら差し替え、無ければ新規作成
+          gh release view $tag --repo ${{ github.repository }} 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip --clobber --repo ${{ github.repository }}
+          } else {
+            gh release create $tag $zip --title $tag --notes $notes --repo ${{ github.repository }}
+          }

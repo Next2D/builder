@@ -48,8 +48,12 @@ On other platforms the builder scaffolds the host project and stages assets only
 See the generated `xbox/README.md` for full build steps.
 
 ```bat
-npx @next2d/builder --platform xbox --env prd --v8-root C:\path\to\v8
+npx @next2d/builder --platform xbox --env prd
 ```
+
+The prebuilt V8 engine is downloaded automatically on the first Xbox build
+(published from the `build-v8` workflow). To use your own build, pass
+`--v8-root C:\path\to\v8`.
 
 ### Scheduled introduction
 

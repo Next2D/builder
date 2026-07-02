@@ -44,8 +44,9 @@ void V8Runtime::InitializeProcess(const char* exec_path)
 {
     // Xbox(GDK) / Nintendo Switch のリテール環境は動的コード生成(JIT)を禁止する。
     // V8 を jitless (Ignition インタプリタのみ・TurboFan/Sparkplug/RWXページ無し) で動かす。
-    // WebAssembly も JIT を要するため無効化する。
-    v8::V8::SetFlagsFromString("--jitless --no-expose-wasm --no-opt");
+    // prebuilt V8 (build-v8.yml) は v8_jitless=true + turbofan/wasm 無効でビルドされる。
+    // wasm/opt 系フラグはそのビルドに存在しないため渡さない (未知フラグ警告を避ける)。
+    v8::V8::SetFlagsFromString("--jitless");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);
     v8::V8::InitializeExternalStartupData(exec_path);

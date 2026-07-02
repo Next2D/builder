@@ -49,7 +49,7 @@ FILES=(
 )
 for f in "${FILES[@]}"; do
     c++ -fsyntax-only -std=c++20 -Isrc -isystem "${V8INC}" \
-        -DV8_COMPRESS_POINTERS -DV8_ENABLE_SANDBOX "$f"
+        -DV8_COMPRESS_POINTERS "$f"
     echo "OK   $f"
 done
 

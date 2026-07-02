@@ -1,7 +1,7 @@
 # Xbox ホスト (templates/xbox) の CI。
 #
-# ローカルに Windows PC / GDK が無くても、GitHub Actions の windows-latest 上で
-# 以下を検証する:
+# ローカルに Windows PC / GDK が無くても、GitHub Actions の Windows ランナー
+# (windows-2022 = VS2022/v143, GDK ビルドと同じ toolset) 上で以下を検証する:
 #   1. raster-tests        : Canvas2D ソフトラスタライザの単体テスト (Linux + Windows/MSVC)
 #   2. windows-platform    : WIC / DirectWrite / Media Foundation / XAudio2 の
 #                            実 API を Windows 上で実行する smoke テスト
@@ -42,7 +42,8 @@ jobs:
 
   windows-tests:
     name: RasterCore + Windows platform tests (MSVC)
-    runs-on: windows-latest
+    # VS2022 (v143) 世代に固定 — GDK ビルドの実ターゲットと同じ toolset で検証する
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -72,7 +73,8 @@ jobs:
 
   v8-syntax-check:
     name: V8-dependent sources compile check (MSVC)
-    runs-on: windows-latest
+    # VS2022 (v143) 世代に固定 — GDK ビルドの実ターゲットと同じ toolset で検証する
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -119,7 +121,7 @@ jobs:
           # CMakeLists.txt と同じ定義でコンパイルのみ実行 (/c)。
           cl /c /nologo /std:c++20 /Zc:__cplusplus /EHsc /W3 `
              /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE `
-             /DV8_COMPRESS_POINTERS /DV8_ENABLE_SANDBOX `
+             /DV8_COMPRESS_POINTERS `
              /Isrc /I"$v8inc" `
              @files
           if ($LASTEXITCODE -ne 0) { exit 1 }

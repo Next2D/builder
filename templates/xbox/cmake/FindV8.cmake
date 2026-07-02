@@ -10,10 +10,16 @@
 #            v8_monolithic=true
 #            v8_use_external_startup_data=false
 #            is_component_build=false
+#            use_custom_libcxx=false
+#            icu_use_data_file=false
+#            treat_warnings_as_errors=false
+#            v8_jitless=true
+#            v8_enable_turbofan=false
+#            v8_enable_webassembly=false
 #            target_cpu="x64"
 #            is_debug=false
 #            v8_enable_pointer_compression=true
-#            v8_enable_sandbox=true'
+#            v8_enable_sandbox=false'
 #        ninja -C out/x64.release v8_monolith
 #
 #   2. 配布物 (v8_monolith.lib + include/) を取得

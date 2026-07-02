@@ -4,6 +4,7 @@
 
 import pc from "picocolors";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import cp from "child_process";
@@ -95,8 +96,9 @@ const echoHelp = (): void =>
     console.log("For preview example:");
     console.log("npx @next2d/builder --preview --platform web --env prd");
     console.log();
-    console.log("For Xbox build example (prebuilt V8 monolith path):");
-    console.log("npx @next2d/builder --platform xbox --env prd --v8-root C:\\path\\to\\v8");
+    console.log("For Xbox build example (prebuilt V8 is downloaded automatically):");
+    console.log("npx @next2d/builder --platform xbox --env prd");
+    console.log("To use your own V8 build: --v8-root C:\\path\\to\\v8");
     console.log();
     process.exit(1);
 };
@@ -614,6 +616,18 @@ const getTemplateDir = (name: string): string =>
 const XBOX_CONFIG_NAME: string = "MicrosoftGame.config";
 
 /**
+ * @description 自動ダウンロードする prebuilt V8 のバージョン。
+ *              `.github/workflows/build-v8.yml` で発行した Releases のタグと、
+ *              `xbox-host-ci.yml` の V8_TAG に一致させること。
+ *              The prebuilt V8 version to auto-download. Must match the release tag
+ *              published by `build-v8.yml` and V8_TAG in `xbox-host-ci.yml`.
+ *
+ * @type {string}
+ * @constant
+ */
+const XBOX_V8_VERSION: string = "13.6.233.17";
+
+/**
  * @description ゲーム側の `xbox/` へスキャフォールドしないテンプレート内ファイル。
  *              - MicrosoftGame.config : ゲーム固有設定 (injectGameConfig が注入)
  *              - tests / .v8_headers  : builder リポジトリ側の開発用テスト・キャッシュ
@@ -736,6 +750,69 @@ const copyXboxResources = (): Promise<void> =>
 };
 
 /**
+ * @description Xbox ビルドに使う V8 のパスを解決する。優先順:
+ *              1. `--v8-root` 引数
+ *              2. 環境変数 `V8_ROOT`
+ *              3. キャッシュ済みの prebuilt (%LOCALAPPDATA%/next2d/v8/<version>)
+ *              4. GitHub Releases (build-v8.yml が発行) から自動ダウンロード
+ *              3・4 により、通常は何も指定せずに `--platform xbox` だけでビルドできる。
+ *              Resolve the V8 path for the Xbox build. With the cached/auto-downloaded
+ *              prebuilt, no flag or env var is required in the common case.
+ *
+ * @return {Promise<string>}
+ * @method
+ * @public
+ */
+const resolveXboxV8Root = async (): Promise<string> =>
+{
+    // 1. --v8-root 引数
+    if (v8Root) {
+        return path.resolve(process.cwd(), v8Root);
+    }
+
+    // 2. 環境変数 V8_ROOT
+    if (process.env.V8_ROOT) {
+        return process.env.V8_ROOT;
+    }
+
+    // 3. キャッシュ済み prebuilt
+    const cacheBase: string = process.env.LOCALAPPDATA
+        ? `${process.env.LOCALAPPDATA}/next2d`
+        : `${os.homedir()}/.cache/next2d`;
+    const cacheDir: string = `${cacheBase}/v8/${XBOX_V8_VERSION}`;
+    if (fs.existsSync(`${cacheDir}/include/v8.h`)) {
+        return cacheDir;
+    }
+
+    // 4. GitHub Releases から自動ダウンロード (マシンごとに初回のみ)
+    const assetName: string = `v8-monolith-${XBOX_V8_VERSION}-windows-x64.zip`;
+    const url: string = `https://github.com/Next2D/builder/releases/download/v8-${XBOX_V8_VERSION}-windows-x64/${assetName}`;
+
+    console.log(pc.green(`Downloading prebuilt V8 ${XBOX_V8_VERSION} (first time only) ...`));
+    console.log(url);
+
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`download failed: HTTP ${response.status}`);
+    }
+
+    fs.mkdirSync(cacheDir, { "recursive": true });
+    const zipPath: string = `${cacheDir}/${assetName}.tmp`;
+    fs.writeFileSync(zipPath, Buffer.from(await response.arrayBuffer()));
+
+    // Windows 10+ 標準の tar (bsdtar) は zip も展開できる
+    const extract = cp.spawnSync("tar", ["-xf", zipPath, "-C", cacheDir], { "stdio": "inherit" });
+    fs.rmSync(zipPath, { "force": true });
+    if (extract.status !== 0 || !fs.existsSync(`${cacheDir}/include/v8.h`)) {
+        fs.rmSync(cacheDir, { "recursive": true, "force": true });
+        throw new Error("failed to extract the prebuilt V8 archive");
+    }
+
+    console.log(pc.green(`Prebuilt V8 cached at: ${cacheDir}`));
+    return cacheDir;
+};
+
+/**
  * @description Xbox(GDKネイティブ)用アプリの書き出し関数。
  *              V8にNext2DのJSを載せ、Dawn(WebGPU/D3D12)で描画するC++ホストをビルドする。
  *              Export function for Xbox (GDK native) apps.
@@ -778,19 +855,19 @@ const buildXbox = async (): Promise<void> =>
     const cmakeBuildDir: string = `${process.cwd()}/${$outDir}/${platformDir}/build`;
 
     /**
-     * prebuilt V8 monolith のパス。優先順: `--v8-root` 引数 > 環境変数 V8_ROOT。
-     * どちらも無い場合は CMake (FindV8.cmake) が明確なエラーで停止するため、
-     * ここでは事前に分かりやすく案内だけする。
+     * prebuilt V8 のパスを解決する (--v8-root > V8_ROOT > キャッシュ > 自動ダウンロード)。
+     * 通常は何も指定せずにビルドできる。
      */
-    const resolvedV8Root: string = v8Root
-        ? path.resolve(process.cwd(), v8Root)
-        : process.env.V8_ROOT || "";
-
-    if (!resolvedV8Root) {
-        console.log(pc.red("V8 path is not specified."));
-        console.log(pc.red("Pass `--v8-root <path>` (or set the V8_ROOT environment variable):"));
-        console.log(pc.red("  npx @next2d/builder --platform xbox --env prd --v8-root C:\\path\\to\\v8"));
-        console.log(pc.red(`The path must contain \`include/v8.h\` and \`lib/v8_monolith.lib\`. See ${XBOX_DIR_NAME}/README.md.`));
+    let resolvedV8Root: string = "";
+    try {
+        resolvedV8Root = await resolveXboxV8Root();
+    } catch (error) {
+        console.log(pc.red(`Failed to prepare the prebuilt V8: ${error}`));
+        console.log(pc.red("Fallbacks:"));
+        console.log(pc.red("  1) Retry later (the download may have failed temporarily)."));
+        console.log(pc.red("  2) Build V8 yourself and pass `--v8-root <path>`:"));
+        console.log(pc.red("     npx @next2d/builder --platform xbox --env prd --v8-root C:\\path\\to\\v8"));
+        console.log(pc.red(`     See ${XBOX_DIR_NAME}/README.md ("V8 の用意") for the build steps.`));
         return;
     }
     if (!fs.existsSync(`${resolvedV8Root}/include/v8.h`)) {

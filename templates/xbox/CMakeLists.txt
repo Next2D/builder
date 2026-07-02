@@ -92,10 +92,13 @@ else()
     target_compile_definitions(Next2DXboxHost PRIVATE NEXT2D_XBOX_CONSOLE=0)
 endif()
 
-# V8 のプラットフォーム要件
+# V8 のプラットフォーム要件。
+# prebuilt V8 (build-v8.yml) のビルドフラグと一致させること:
+#   V8_COMPRESS_POINTERS <-> v8_enable_pointer_compression=true
+#   sandbox は無効 (libc++ ハードニング必須のため use_custom_libcxx=false と両立しない)
+#   → V8_ENABLE_SANDBOX は定義しない
 target_compile_definitions(Next2DXboxHost PRIVATE
     V8_COMPRESS_POINTERS
-    V8_ENABLE_SANDBOX
     NOMINMAX
     WIN32_LEAN_AND_MEAN
     UNICODE

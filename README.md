@@ -39,6 +39,17 @@ With Next2D Framework, you can efficiently develop and deploy applications optim
 | web             | Export minfy'd JS files             |
 | iOS             | open Xcode, and Export ipa          |
 | iOS             | open Android Studio, and Export apk |
+| Xbox            | GDK native title (V8 + Dawn/WebGPU) |
+
+Xbox exports a GDK native title that runs the Next2D JavaScript on the V8 engine and
+renders with Dawn (WebGPU → D3D12), packaged as a C++ executable (no Electron/WebView).
+Building the GDK package requires Windows + Visual Studio 2022 + Microsoft GDK + a devkit.
+On other platforms the builder scaffolds the host project and stages assets only.
+See the generated `xbox/README.md` for full build steps.
+
+```bat
+npx @next2d/builder --platform xbox --env prd --v8-root C:\path\to\v8
+```
 
 ### Scheduled introduction
 

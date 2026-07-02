@@ -122,7 +122,7 @@ cd v8
 :: CI のコンパイル検証と同じバージョンに固定 (xbox-host-ci.yml の V8_TAG)
 git checkout 13.6.233.17
 gclient sync
-gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=true"
+gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
 ninja -C out\x64.release v8_monolith
 ```
 
@@ -135,9 +135,12 @@ ninja -C out\x64.release v8_monolith
 
 > - `use_custom_libcxx=false` は必須。V8 は clang でビルドされるため、これを外すと
 >   V8 同梱の libc++ が使われ、MSVC (MS STL) でビルドする本ホストとリンクできません。
+> - `v8_enable_sandbox=false` は必須。sandbox は libc++ ハードニング(=V8 同梱 libc++)を
+>   要求するため `use_custom_libcxx=false` と両立しません (BUILD.gn の assert で停止)。
+>   本ホストは自明に信頼済みのゲーム JS のみ実行するため無効で問題ありません。
 > - `icu_use_data_file=false` を推奨。外すと実行時に `icudtl.dat` の同梱が必要になります。
-> - pointer compression / sandbox は `CMakeLists.txt` の `V8_COMPRESS_POINTERS` /
->   `V8_ENABLE_SANDBOX` と一致させてください。不一致は ABI 崩れの原因になります。
+> - pointer compression は `CMakeLists.txt` の `V8_COMPRESS_POINTERS` と一致させてください
+>   (sandbox 無効に合わせ `V8_ENABLE_SANDBOX` は定義しません)。不一致は ABI 崩れの原因になります。
 > - 上記は PC (`Gaming.Desktop.x64`) 用。コンソール実機 (`Gaming.Xbox.*`) 向けは
 >   GDK ツールチェーンでの再ビルドが必要です (devkit 入手後の作業)。
 

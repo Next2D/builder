@@ -119,7 +119,7 @@ jobs:
           # CMakeLists.txt と同じ定義でコンパイルのみ実行 (/c)。
           cl /c /nologo /std:c++20 /Zc:__cplusplus /EHsc /W3 `
              /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE `
-             /DV8_COMPRESS_POINTERS /DV8_ENABLE_SANDBOX `
+             /DV8_COMPRESS_POINTERS `
              /Isrc /I"$v8inc" `
              @files
           if ($LASTEXITCODE -ne 0) { exit 1 }

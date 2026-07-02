@@ -57,10 +57,12 @@ jobs:
         run: |
           rem フラグはホスト側 (templates/xbox/CMakeLists.txt) の defines と一致させること:
           rem   v8_enable_pointer_compression <-> V8_COMPRESS_POINTERS
-          rem   v8_enable_sandbox             <-> V8_ENABLE_SANDBOX
           rem use_custom_libcxx=false : MSVC (MS STL) とのリンクに必須
+          rem v8_enable_sandbox=false : sandbox は libc++ ハードニング必須のため
+          rem                           use_custom_libcxx=false と両立しない (BUILD.gn の assert)。
+          rem                           ホストは自明に信頼済みのゲームJSのみ実行するため無効で問題ない。
           rem icu_use_data_file=false : icudtl.dat の同梱を不要にする
-          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=true"
+          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
           if errorlevel 1 exit /b 1
           call ninja -C out\x64.release v8_monolith
           if errorlevel 1 exit /b 1
@@ -90,7 +92,8 @@ jobs:
 
           - V8 ``${{ inputs.v8_version }}`` / VS2022 (windows-latest runner)
           - gn args: monolithic, no external startup data, use_custom_libcxx=false,
-            icu_use_data_file=false, pointer compression + sandbox enabled
+            icu_use_data_file=false, pointer compression enabled, sandbox disabled
+            (sandbox requires the bundled hardened libc++, which conflicts with MSVC linking)
           - Layout: ``include/`` + ``lib/v8_monolith.lib`` (pass the extracted dir to ``--v8-root``)
 
           ``npx @next2d/builder --platform xbox`` downloads this automatically when

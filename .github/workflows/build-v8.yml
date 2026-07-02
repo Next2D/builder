@@ -46,12 +46,29 @@ jobs:
           call fetch --no-history v8
           if errorlevel 1 exit /b 1
           cd v8
-          git fetch --depth 1 origin refs/tags/%V8_VERSION%
+          rem 重要: リビジョンは gclient に渡す。手動 git checkout だけだと
+          rem gclient sync が main へ戻してしまい、タグではなく main をビルドしてしまう。
+          call gclient sync -D --revision refs/tags/%V8_VERSION%
           if errorlevel 1 exit /b 1
-          git checkout FETCH_HEAD
-          if errorlevel 1 exit /b 1
-          call gclient sync -D
-          if errorlevel 1 exit /b 1
+
+      - name: Verify checked-out V8 version (fail fast)
+        shell: pwsh
+        working-directory: ${{ runner.temp }}/v8
+        run: |
+          # include/v8-version.h とタグの一致を検証する。
+          # 不一致のまま 2 時間ビルドして main 由来のエラーに悩まされるのを防ぐ。
+          $expected = "${{ inputs.v8_version }}"
+          $h = Get-Content include/v8-version.h -Raw
+          $maj = [regex]::Match($h, 'V8_MAJOR_VERSION (\d+)').Groups[1].Value
+          $min = [regex]::Match($h, 'V8_MINOR_VERSION (\d+)').Groups[1].Value
+          $bld = [regex]::Match($h, 'V8_BUILD_NUMBER (\d+)').Groups[1].Value
+          $pat = [regex]::Match($h, 'V8_PATCH_LEVEL (\d+)').Groups[1].Value
+          $actual = "$maj.$min.$bld.$pat"
+          if ($actual -ne $expected) {
+            Write-Error "V8 version mismatch: expected $expected but tree is $actual (gclient sync did not pin the tag)"
+            exit 1
+          }
+          Write-Host "OK: building V8 $actual"
 
       - name: Build v8_monolith
         shell: cmd

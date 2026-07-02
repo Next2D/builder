@@ -122,7 +122,7 @@ cd v8
 :: CI のコンパイル検証と同じバージョンに固定 (xbox-host-ci.yml の V8_TAG)
 git checkout 13.6.233.17
 gclient sync
-gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false treat_warnings_as_errors=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
+gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false treat_warnings_as_errors=false v8_jitless=true v8_enable_turbofan=false v8_enable_webassembly=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
 ninja -C out\x64.release v8_monolith
 ```
 
@@ -142,6 +142,9 @@ ninja -C out\x64.release v8_monolith
 > - `treat_warnings_as_errors=false` を推奨。`use_custom_libcxx=false` では MSVC STL の
 >   ヘッダ警告が -Werror で停止することがあります。**VS のバージョンは VS2022 (v143) を推奨**
 >   (新しすぎる STL は V8 の clang が警告/エラーを出しやすい)。
+> - `v8_jitless=true` + `v8_enable_turbofan=false` + `v8_enable_webassembly=false` を推奨。
+>   ホストは実行時 `--jitless` で動かすため (Xbox は JIT 禁止)、JIT/wasm をビルドから
+>   外すのが正しい構成です (BUILD.gn の assert もこの組み合わせを要求)。ビルドも大幅に速くなります。
 > - pointer compression は `CMakeLists.txt` の `V8_COMPRESS_POINTERS` と一致させてください
 >   (sandbox 無効に合わせ `V8_ENABLE_SANDBOX` は定義しません)。不一致は ABI 崩れの原因になります。
 > - 上記は PC (`Gaming.Desktop.x64`) 用。コンソール実機 (`Gaming.Xbox.*`) 向けは

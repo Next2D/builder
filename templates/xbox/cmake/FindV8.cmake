@@ -13,6 +13,9 @@
 #            use_custom_libcxx=false
 #            icu_use_data_file=false
 #            treat_warnings_as_errors=false
+#            v8_jitless=true
+#            v8_enable_turbofan=false
+#            v8_enable_webassembly=false
 #            target_cpu="x64"
 #            is_debug=false
 #            v8_enable_pointer_compression=true

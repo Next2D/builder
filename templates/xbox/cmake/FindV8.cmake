@@ -12,6 +12,7 @@
 #            is_component_build=false
 #            use_custom_libcxx=false
 #            icu_use_data_file=false
+#            treat_warnings_as_errors=false
 #            target_cpu="x64"
 #            is_debug=false
 #            v8_enable_pointer_compression=true

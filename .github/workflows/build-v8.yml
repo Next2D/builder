@@ -24,7 +24,9 @@ permissions:
 
 jobs:
   build-v8-windows-x64:
-    runs-on: windows-latest
+    # windows-latest (VS2026/MSVC 14.5x) は STL が新しすぎて V8 の clang が
+    # -Werror で停止する。ホストの要件 (VS2022/v143, GDK) と同じ世代に固定する。
+    runs-on: windows-2022
     timeout-minutes: 360
     steps:
       - name: Setup depot_tools
@@ -62,7 +64,9 @@ jobs:
           rem                           use_custom_libcxx=false と両立しない (BUILD.gn の assert)。
           rem                           ホストは自明に信頼済みのゲームJSのみ実行するため無効で問題ない。
           rem icu_use_data_file=false : icudtl.dat の同梱を不要にする
-          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
+          rem treat_warnings_as_errors=false : use_custom_libcxx=false では MSVC STL の
+          rem                                  ヘッダ警告が -Werror で停止するため無効化
+          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false treat_warnings_as_errors=false target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
           if errorlevel 1 exit /b 1
           call ninja -C out\x64.release v8_monolith
           if errorlevel 1 exit /b 1

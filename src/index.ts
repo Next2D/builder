@@ -4,6 +4,8 @@
 
 import pc from "picocolors";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import cp from "child_process";
 import { loadConfigFromFile } from "vite";
 import { api } from "@electron-forge/core";
@@ -23,6 +25,7 @@ let hasHelp: boolean    = false;
 let preview: boolean    = false;
 let open: boolean       = false;
 let build: boolean      = false;
+let v8Root: string      = "";
 
 for (let idx: number = 0; idx < process.argv.length; ++idx) {
 
@@ -53,6 +56,11 @@ for (let idx: number = 0; idx < process.argv.length; ++idx) {
             environment = process.argv[++idx];
             break;
 
+        case "--v8-root":
+            // Xbox ビルドで使う prebuilt V8 monolith のパス (環境変数 V8_ROOT より優先)
+            v8Root = process.argv[++idx] || "";
+            break;
+
         default:
             break;
 
@@ -78,7 +86,7 @@ if (!platform || !environment) {
 const echoHelp = (): void =>
 {
     console.log();
-    console.log(pc.green("`--platform` can be specified for macOS, Windows, iOS, Android, and Web"));
+    console.log(pc.green("`--platform` can be specified for macOS, Windows, iOS, Android, Xbox, and Web"));
     console.log(pc.green("It is not case sensitive."));
     console.log();
     console.log("For build example:");
@@ -86,6 +94,9 @@ const echoHelp = (): void =>
     console.log();
     console.log("For preview example:");
     console.log("npx @next2d/builder --preview --platform web --env prd");
+    console.log();
+    console.log("For Xbox build example (prebuilt V8 monolith path):");
+    console.log("npx @next2d/builder --platform xbox --env prd --v8-root C:\\path\\to\\v8");
     console.log();
     process.exit(1);
 };
@@ -108,6 +119,7 @@ switch (platform) {
     case "steam:linux":
     case "ios":
     case "android":
+    case "xbox":
     case "web":
         break;
 
@@ -574,6 +586,270 @@ const buildNative = async (): Promise<void> =>
 };
 
 /**
+ * @type {string}
+ * @constant
+ */
+const XBOX_DIR_NAME: string = "xbox";
+
+/**
+ * @description builder パッケージに同梱したテンプレートの絶対パスを取得
+ *              Get the absolute path of a template shipped with the builder package
+ *
+ * @param  {string} name
+ * @return {string}
+ * @method
+ * @public
+ */
+const getTemplateDir = (name: string): string =>
+{
+    // dist/index.js から見た templates/ (パッケージルート直下)
+    const currentDir: string = path.dirname(fileURLToPath(import.meta.url));
+    return path.resolve(currentDir, "..", "templates", name);
+};
+
+/**
+ * @type {string}
+ * @constant
+ */
+const XBOX_CONFIG_NAME: string = "MicrosoftGame.config";
+
+/**
+ * @description ゲーム側の `xbox/` へスキャフォールドしないテンプレート内ファイル。
+ *              - MicrosoftGame.config : ゲーム固有設定 (injectGameConfig が注入)
+ *              - tests / .v8_headers  : builder リポジトリ側の開発用テスト・キャッシュ
+ *              - build 系             : テンプレート内でビルドした場合の生成物
+ *              Template entries excluded from the per-game `xbox/` scaffold.
+ *
+ * @type {Set<string>}
+ * @constant
+ */
+const XBOX_SCAFFOLD_EXCLUDES: Set<string> = new Set([
+    XBOX_CONFIG_NAME,
+    "tests",
+    ".v8_headers",
+    "build",
+    "out",
+    "_deps",
+    "CMakeCache.txt",
+    "CMakeFiles"
+]);
+
+/**
+ * @description XboxホストのC++/CMake一式をbuilder同梱テンプレートから毎回更新する。
+ *              ホストは「エンジン相当」でユーザーは編集しない前提のため、常に最新へ上書きする。
+ *              ただし各ゲーム固有の `MicrosoftGame.config` は対象外(injectGameConfigが扱う)。
+ *              Refresh the Xbox host (C++/CMake) from the builder's bundled template on every build.
+ *              The host is engine-like and not user-edited, so it is always overwritten,
+ *              excluding the per-game `MicrosoftGame.config` (handled by injectGameConfig).
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const refreshXboxHost = (): Promise<void> =>
+{
+    return new Promise<void>((resolve, reject): void =>
+    {
+        const projectDir: string = `${process.cwd()}/${XBOX_DIR_NAME}`;
+        const templateDir: string = getTemplateDir("xbox");
+        if (!fs.existsSync(templateDir)) {
+            return reject(`Xbox template not found: ${templateDir}`);
+        }
+
+        try {
+            fs.cpSync(templateDir, projectDir, {
+                "recursive": true,
+                // ゲーム固有設定と builder 側の開発用ファイルはスキャフォールドしない
+                "filter": (src: string): boolean => !XBOX_SCAFFOLD_EXCLUDES.has(path.basename(src))
+            });
+            console.log(pc.green(`Successfully refreshed \`${XBOX_DIR_NAME}\` host.`));
+            resolve();
+        } catch (error) {
+            reject(`Failed to refresh ${XBOX_DIR_NAME} host. ${error}`);
+        }
+    });
+};
+
+/**
+ * @description ゲームルートの `MicrosoftGame.config` をXboxホストへ注入する。
+ *              capacitor.config.json と同様、各ゲーム固有の設定(TitleId/StoreId/名称/ロゴ)は
+ *              プロジェクトルートで管理し、それをホストのビルド対象へ配置する。
+ *              未配置ならbuilder同梱の既定をフォールバックとして使い、作成を促す。
+ *              Inject the game-root `MicrosoftGame.config` into the Xbox host.
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const injectGameConfig = (): Promise<void> =>
+{
+    return new Promise<void>((resolve, reject): void =>
+    {
+        const rootConfig: string = `${process.cwd()}/${XBOX_CONFIG_NAME}`;
+        const hostConfig: string = `${process.cwd()}/${XBOX_DIR_NAME}/${XBOX_CONFIG_NAME}`;
+
+        try {
+            if (fs.existsSync(rootConfig)) {
+                fs.cpSync(rootConfig, hostConfig);
+                console.log(pc.green(`Applied project \`${XBOX_CONFIG_NAME}\`.`));
+            } else {
+                // フォールバック: builder同梱の既定を配置し、ルートへの作成を促す
+                fs.cpSync(`${getTemplateDir("xbox")}/${XBOX_CONFIG_NAME}`, hostConfig);
+                console.log(pc.yellow(`\`${XBOX_CONFIG_NAME}\` not found at project root. Using the default template.`));
+                console.log(pc.yellow(`Create \`${XBOX_CONFIG_NAME}\` at your project root (like capacitor.config.json) to set TitleId/StoreId/logos.`));
+            }
+            resolve();
+        } catch (error) {
+            reject(`Failed to apply ${XBOX_CONFIG_NAME}. ${error}`);
+        }
+    });
+};
+
+/**
+ * @description ビルド済みWeb資材(JS/HTML/アセット)をXboxホストのassetsへ配置
+ *              Deploy built web resources (JS/HTML/assets) into the Xbox host assets
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const copyXboxResources = (): Promise<void> =>
+{
+    return new Promise<void>((resolve, reject): void =>
+    {
+        const assetsDir: string = `${process.cwd()}/${XBOX_DIR_NAME}/assets/app`;
+
+        try {
+            // reset
+            fs.rmSync(assetsDir, { "recursive": true, "force": true });
+            fs.mkdirSync(assetsDir, { "recursive": true });
+
+            // copy built web resources (JS/HTML/assets)
+            fs.cpSync(`${$buildDir}/`, assetsDir, { "recursive": true });
+
+            console.log(pc.green("Successfully copy built resources to Xbox host."));
+            resolve();
+        } catch (error) {
+            reject(`Failed to copy built resources to Xbox host. ${error}`);
+        }
+    });
+};
+
+/**
+ * @description Xbox(GDKネイティブ)用アプリの書き出し関数。
+ *              V8にNext2DのJSを載せ、Dawn(WebGPU/D3D12)で描画するC++ホストをビルドする。
+ *              Export function for Xbox (GDK native) apps.
+ *              Builds a C++ host that runs Next2D's JS on V8 and renders via Dawn (WebGPU/D3D12).
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const buildXbox = async (): Promise<void> =>
+{
+    // C++/CMake ホストを最新へ更新 (ゲーム固有設定は除外)
+    await refreshXboxHost();
+    // ゲームルートの MicrosoftGame.config を注入
+    await injectGameConfig();
+    // ビルド済みWeb資材を配置
+    await copyXboxResources();
+
+    /**
+     * GDK ビルドは Windows + Visual Studio + Microsoft GDK が必須。
+     * それ以外の環境ではスキャフォールドと資材配置のみを行い、手順を案内する。
+     * The GDK build requires Windows + Visual Studio + Microsoft GDK.
+     * On other platforms we only scaffold and copy assets, then guide the next steps.
+     */
+    if (process.platform !== "win32") {
+        console.log();
+        console.log(pc.yellow("Xbox host project has been generated and assets were copied."));
+        console.log(pc.yellow("The GDK build must run on Windows with Visual Studio and the Microsoft GDK installed."));
+        console.log(pc.yellow(`See ${XBOX_DIR_NAME}/README.md for the build steps.`));
+        console.log();
+        return;
+    }
+
+    /**
+     * @type {string}
+     * GDK の対象コンソール世代。既定は Xbox Series X|S (Scarlett)。
+     * 必要に応じて `Gaming.Xbox.XboxOne.x64` / `Gaming.Desktop.x64` を選択。
+     */
+    const gdkArch: string = process.env.NEXT2D_XBOX_ARCH || "Gaming.Xbox.Scarlett.x64";
+    const cmakeBuildDir: string = `${process.cwd()}/${$outDir}/${platformDir}/build`;
+
+    /**
+     * prebuilt V8 monolith のパス。優先順: `--v8-root` 引数 > 環境変数 V8_ROOT。
+     * どちらも無い場合は CMake (FindV8.cmake) が明確なエラーで停止するため、
+     * ここでは事前に分かりやすく案内だけする。
+     */
+    const resolvedV8Root: string = v8Root
+        ? path.resolve(process.cwd(), v8Root)
+        : process.env.V8_ROOT || "";
+
+    if (!resolvedV8Root) {
+        console.log(pc.red("V8 path is not specified."));
+        console.log(pc.red("Pass `--v8-root <path>` (or set the V8_ROOT environment variable):"));
+        console.log(pc.red("  npx @next2d/builder --platform xbox --env prd --v8-root C:\\path\\to\\v8"));
+        console.log(pc.red(`The path must contain \`include/v8.h\` and \`lib/v8_monolith.lib\`. See ${XBOX_DIR_NAME}/README.md.`));
+        return;
+    }
+    if (!fs.existsSync(`${resolvedV8Root}/include/v8.h`)) {
+        console.log(pc.red(`\`include/v8.h\` not found under: ${resolvedV8Root}`));
+        console.log(pc.red(`Check the \`--v8-root\` path. See ${XBOX_DIR_NAME}/README.md for how to prepare the prebuilt V8.`));
+        return;
+    }
+
+    const configure = (): Promise<void> =>
+    {
+        return new Promise<void>((resolve, reject): void =>
+        {
+            const stream = cp.spawn("cmake", [
+                "-S", `${process.cwd()}/${XBOX_DIR_NAME}`,
+                "-B", cmakeBuildDir,
+                "-G", "Visual Studio 17 2022",
+                "-A", gdkArch,
+                "-D", `V8_ROOT=${resolvedV8Root}`
+            ], { "stdio": "inherit" });
+
+            stream.on("close", (code: number): void =>
+            {
+                if (code !== 0) {
+                    return reject("Failed to configure the Xbox (CMake/GDK) project.");
+                }
+                resolve();
+            });
+        });
+    };
+
+    await configure();
+
+    if (open || preview) {
+        // Visual Studio ソリューションを開く (実機/エミュレータでの実行はVS側で行う)
+        cp.spawn("cmake", [
+            "--open", cmakeBuildDir
+        ], { "stdio": "inherit" });
+        return;
+    }
+
+    // フルビルド (Release パッケージまで)
+    const stream = cp.spawn("cmake", [
+        "--build", cmakeBuildDir,
+        "--config", "Release"
+    ], { "stdio": "inherit" });
+
+    stream.on("close", (code: number): void =>
+    {
+        if (code !== 0) {
+            console.log(pc.red("Export of the Xbox (GDK) package failed."));
+            return;
+        }
+        console.log();
+        console.log(pc.green(`Finished building the Xbox (GDK) package for ${gdkArch}.`));
+        console.log();
+    });
+};
+
+/**
  * @description ビルドの実行関数
  *              Build Execution Functions
  *
@@ -615,8 +891,8 @@ const multiBuild = async (): Promise<void> =>
             }
             break;
 
-        case "open:ios":
-            await openNative();
+        case "xbox":
+            await buildXbox();
             break;
 
         case "web":

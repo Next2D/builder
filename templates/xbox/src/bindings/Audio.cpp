@@ -1,0 +1,320 @@
+#include "Bindings.h"
+
+#include "HostContext.h"
+#include "AssetLoader.h"
+#include "EventTarget.h"
+#include "platform/AudioEngine.h"
+#include "v8/V8Util.h"
+
+#include <memory>
+#include <vector>
+
+namespace next2d {
+
+using v8util::Str;
+using v8util::ToStdString;
+
+namespace {
+
+// GainNode.gain.value を保持し、接続済みボイスへ音量を反映する。
+struct GainParam {
+    float value = 1.0f;
+    std::shared_ptr<AudioVoice> voice;  // source.connect(gain) 時にリンクされる
+};
+
+void ReleaseGainParam(const v8::WeakCallbackInfo<GainParam>& info)
+{
+    delete info.GetParameter();
+}
+
+// 再生中(非ループ)の source ノード。毎フレーム IsFinished を見て "ended" を発火する。
+std::vector<v8::Global<v8::Object>>& PlayingSources()
+{
+    static std::vector<v8::Global<v8::Object>> sources;
+    return sources;
+}
+
+// JS オブジェクトに shared_ptr を保持させるためのホルダ。GC で解放する。
+template <typename T>
+struct Holder {
+    std::shared_ptr<T> ptr;
+};
+
+template <typename T>
+void ReleaseHolder(const v8::WeakCallbackInfo<Holder<T>>& info)
+{
+    delete info.GetParameter();
+}
+
+template <typename T>
+void Attach(v8::Isolate* isolate, v8::Local<v8::Object> obj, std::shared_ptr<T> ptr)
+{
+    auto* holder = new Holder<T>{std::move(ptr)};
+    obj->SetInternalField(0, v8::External::New(isolate, holder));
+    auto* handle = new v8::Global<v8::Object>(isolate, obj);
+    handle->SetWeak(holder, ReleaseHolder<T>, v8::WeakCallbackType::kParameter);
+}
+
+template <typename T>
+std::shared_ptr<T> Get(v8::Local<v8::Object> obj)
+{
+    auto* holder = static_cast<Holder<T>*>(
+        obj->GetInternalField(0).As<v8::External>()->Value());
+    return holder->ptr;
+}
+
+v8::Local<v8::ObjectTemplate> InternalTemplate(v8::Isolate* isolate)
+{
+    v8::Local<v8::ObjectTemplate> tmpl = v8::ObjectTemplate::New(isolate);
+    tmpl->SetInternalFieldCount(1);
+    return tmpl;
+}
+
+// --- AudioBufferSourceNode ------------------------------------------------
+void SourceStart(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto voice = Get<AudioVoice>(args.This());
+    bool loop = false;
+    v8::Local<v8::Value> loop_val;
+    if (args.This()->Get(args.GetIsolate()->GetCurrentContext(),
+                         Str(args.GetIsolate(), "loop")).ToLocal(&loop_val)) {
+        loop = loop_val->BooleanValue(args.GetIsolate());
+    }
+    if (voice) {
+        voice->Start(loop);
+        // 非ループ再生は終了時に "ended" を発火するため登録する。
+        if (!loop) {
+            PlayingSources().emplace_back(args.GetIsolate(), args.This());
+        }
+    }
+}
+
+void SourceStop(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto voice = Get<AudioVoice>(args.This());
+    if (voice) {
+        voice->Stop();
+    }
+}
+
+// GainNode の connect: 実際に音量を反映するのは source.connect(gain) 側。ここは no-op。
+void GainConnect(const v8::FunctionCallbackInfo<v8::Value>& /*args*/) {}
+
+// source.disconnect(): player は stop() でこれを呼ぶ。ボイスを停止し登録からも外す
+// (PlayingSources の強参照 Global がノードを固定し続けるのを防ぐ)。
+void SourceDisconnect(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto voice = Get<AudioVoice>(args.This());
+    if (voice) {
+        voice->Stop();
+    }
+    auto& sources = PlayingSources();
+    v8::Local<v8::Object> node = args.This();
+    for (size_t i = 0; i < sources.size();) {
+        if (sources[i].Get(isolate) == node) {
+            sources.erase(sources.begin() + i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+// source.connect(destination): destination が GainNode なら voice をリンクして音量を反映する。
+void SourceConnect(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto voice = Get<AudioVoice>(args.This());
+    if (!voice || args.Length() < 1 || !args[0]->IsObject()) {
+        return;
+    }
+    // 接続先(GainNode)の gain オブジェクトから GainParam を取り出しリンクする。
+    v8::Local<v8::Object> dest = args[0].As<v8::Object>();
+    v8::Local<v8::Value> gain_val;
+    if (!dest->Get(ctx, Str(isolate, "gain")).ToLocal(&gain_val) || !gain_val->IsObject()) {
+        return;
+    }
+    v8::Local<v8::Object> gain = gain_val.As<v8::Object>();
+    if (gain->InternalFieldCount() < 1) {
+        return;
+    }
+    auto* param = static_cast<GainParam*>(
+        gain->GetInternalField(0).As<v8::External>()->Value());
+    if (param) {
+        param->voice = voice;
+        voice->SetVolume(param->value);  // 接続時点の音量を即時反映
+    }
+}
+
+// createBufferSource() -> AudioBufferSourceNode
+void CreateBufferSource(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    AudioEngine* engine = HostContext::From(isolate)->audio;
+
+    v8::Local<v8::Object> node = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
+    // buffer は後から setter 経由で設定する想定 (ここでは空ボイス)。
+    Attach<AudioVoice>(isolate, node, nullptr);
+
+    v8util::SetValue(isolate, node, "loop", v8::Boolean::New(isolate, false));
+    v8util::SetMethod(isolate, node, "start", SourceStart);
+    v8util::SetMethod(isolate, node, "stop", SourceStop);
+    v8util::SetMethod(isolate, node, "connect", SourceConnect);
+    // source.addEventListener("ended", ...) を player が使うため EventTarget を設置する。
+    InstallEventTarget(isolate, node);
+    v8util::SetMethod(isolate, node, "disconnect", SourceDisconnect);
+
+    // buffer プロパティ設定時に AudioVoice を生成するアクセサ
+    // (SetAccessor は V8 12.9 で削除。SetNativeDataProperty を使う)
+    node->SetNativeDataProperty(ctx, Str(isolate, "buffer"),
+        nullptr,
+        [](v8::Local<v8::Name>, v8::Local<v8::Value> value,
+           const v8::PropertyCallbackInfo<void>& info) {
+            v8::Isolate* iso = info.GetIsolate();
+            if (!value->IsObject()) {
+                return;
+            }
+            auto pcm = Get<PcmBuffer>(value.As<v8::Object>());
+            AudioEngine* eng = HostContext::From(iso)->audio;
+            auto voice = eng->CreateVoice(pcm);
+            Attach<AudioVoice>(iso, info.This(), voice);
+        }).Check();
+
+    args.GetReturnValue().Set(node);
+}
+
+// --- GainNode -------------------------------------------------------------
+void CreateGain(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    v8::Local<v8::Object> node = v8::Object::New(isolate);
+
+    // gain オブジェクトは内部フィールドに GainParam を持ち、value アクセサで
+    // リンク済みボイスへ音量を即時反映する (再生中のミュート/音量変更に対応)。
+    v8::Local<v8::Object> gain = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
+    auto* param = new GainParam();
+    gain->SetInternalField(0, v8::External::New(isolate, param));
+    auto* handle = new v8::Global<v8::Object>(isolate, gain);
+    handle->SetWeak(param, ReleaseGainParam, v8::WeakCallbackType::kParameter);
+
+    gain->SetNativeDataProperty(ctx, Str(isolate, "value"),
+        [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
+            auto* p = static_cast<GainParam*>(
+                info.This()->GetInternalField(0).As<v8::External>()->Value());
+            info.GetReturnValue().Set(v8::Number::New(info.GetIsolate(), p ? p->value : 1.0));
+        },
+        [](v8::Local<v8::Name>, v8::Local<v8::Value> value,
+           const v8::PropertyCallbackInfo<void>& info) {
+            auto* p = static_cast<GainParam*>(
+                info.This()->GetInternalField(0).As<v8::External>()->Value());
+            if (!p || !value->IsNumber()) return;
+            p->value = static_cast<float>(value.As<v8::Number>()->Value());
+            if (p->voice) p->voice->SetVolume(p->value);  // 再生中も反映
+        }).Check();
+
+    v8util::SetValue(isolate, node, "gain", gain);
+    v8util::SetMethod(isolate, node, "connect", GainConnect);
+    v8util::SetMethod(isolate, node, "disconnect",
+        [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+    args.GetReturnValue().Set(node);
+}
+
+// 毎フレーム呼ばれ、再生終了した source ノードへ "ended" を発火する (main.cpp のループから)。
+} // namespace
+
+void PumpAudioEvents(v8::Isolate* isolate)
+{
+    auto& sources = PlayingSources();
+    if (sources.empty()) return;
+    v8::HandleScope scope(isolate);
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    for (size_t i = 0; i < sources.size();) {
+        v8::Local<v8::Object> node = sources[i].Get(isolate);
+        auto voice = Get<AudioVoice>(node);
+        if (!voice || voice->IsFinished()) {
+            if (voice) {
+                v8::Local<v8::Object> ev = v8::Object::New(isolate);
+                ev->Set(ctx, Str(isolate, "type"), Str(isolate, "ended")).Check();
+                DispatchEvent(isolate, node, ev);
+            }
+            sources.erase(sources.begin() + i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+namespace {
+
+// --- decodeAudioData ------------------------------------------------------
+void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    v8::Local<v8::Promise::Resolver> resolver =
+        v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    std::vector<uint8_t> input;
+    if (args.Length() >= 1 && args[0]->IsArrayBuffer()) {
+        auto ab = args[0].As<v8::ArrayBuffer>();
+        auto store = ab->GetBackingStore();
+        input.assign(static_cast<uint8_t*>(store->Data()),
+                     static_cast<uint8_t*>(store->Data()) + store->ByteLength());
+    }
+
+    auto pcm = std::make_shared<PcmBuffer>();
+    if (input.empty() || !AudioEngine::Decode(input, *pcm)) {
+        resolver->Reject(ctx, v8::Exception::Error(Str(isolate, "audio decode failed"))).Check();
+        return;
+    }
+
+    v8::Local<v8::Object> buffer = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
+    Attach<PcmBuffer>(isolate, buffer, pcm);
+    v8util::SetValue(isolate, buffer, "sampleRate", v8::Number::New(isolate, pcm->sample_rate));
+    v8util::SetValue(isolate, buffer, "numberOfChannels", v8::Integer::New(isolate, pcm->channels));
+    v8util::SetValue(isolate, buffer, "duration",
+        v8::Number::New(isolate, pcm->channels
+            ? static_cast<double>(pcm->samples.size()) / pcm->channels / pcm->sample_rate
+            : 0.0));
+    resolver->Resolve(ctx, buffer).Check();
+}
+
+// AudioContext コンストラクタ
+void AudioContextConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    if (!args.IsConstructCall()) {
+        v8util::ThrowTypeError(isolate, "AudioContext must be called with new");
+        return;
+    }
+    v8::Local<v8::Object> self = args.This();
+    v8util::SetValue(isolate, self, "sampleRate", v8::Number::New(isolate, 48000));
+    v8util::SetValue(isolate, self, "destination", v8::Object::New(isolate));
+    v8util::SetMethod(isolate, self, "createBufferSource", CreateBufferSource);
+    v8util::SetMethod(isolate, self, "createGain", CreateGain);
+    v8util::SetMethod(isolate, self, "decodeAudioData", DecodeAudioData);
+    args.GetReturnValue().Set(self);
+}
+
+} // namespace
+
+void InstallAudio(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* /*host*/)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    v8::Local<v8::FunctionTemplate> tmpl =
+        v8::FunctionTemplate::New(isolate, AudioContextConstructor);
+    tmpl->SetClassName(Str(isolate, "AudioContext"));
+    v8::Local<v8::Function> fn = tmpl->GetFunction(ctx).ToLocalChecked();
+
+    global->Set(ctx, Str(isolate, "AudioContext"), fn).Check();
+    global->Set(ctx, Str(isolate, "webkitAudioContext"), fn).Check();
+}
+
+} // namespace next2d

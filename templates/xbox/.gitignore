@@ -1,0 +1,16 @@
+# ビルド成果物
+build/
+out/
+*.exe
+*.pdb
+*.msixvc
+*.xvc
+
+# builder が assets/app にビルド済みWeb資材(vite出力)を配置する (生成物)
+assets/
+
+# Dawn / CMake の取得キャッシュ
+_deps/
+CMakeCache.txt
+CMakeFiles/
+.v8_headers/

@@ -1,0 +1,160 @@
+#include "Bindings.h"
+
+#include "HostContext.h"
+#include "AssetLoader.h"
+#include "ImageSource.h"
+#include "platform/WicDecoder.h"
+#include "v8/V8Util.h"
+
+#include <objbase.h>
+
+#include <cstring>
+#include <vector>
+
+namespace next2d {
+
+using v8util::Str;
+using v8util::ToStdString;
+
+namespace {
+
+void ReleaseDecoded(const v8::WeakCallbackInfo<DecodedImage>& info)
+{
+    delete info.GetParameter();
+}
+
+// Image コンストラクタ: src セッターで読み込み+デコードし onload を発火する。
+void ImageConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    if (!args.IsConstructCall()) {
+        v8util::ThrowTypeError(isolate, "Image must be called with new");
+        return;
+    }
+    // 実体は通常オブジェクト。src セッターで decode をトリガする。
+    args.This()->Set(isolate->GetCurrentContext(),
+                     Str(isolate, "complete"),
+                     v8::Boolean::New(isolate, false)).Check();
+    args.GetReturnValue().Set(args.This());
+}
+
+// createImageBitmap(source) -> Promise<ImageBitmap>
+// source は Blob / Response.arrayBuffer 結果(ArrayBuffer/TypedArray) を想定。
+void CreateImageBitmap(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    v8::Local<v8::Promise::Resolver> resolver =
+        v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    if (args.Length() < 1) {
+        resolver->Reject(ctx, v8::Exception::TypeError(Str(isolate, "source required"))).Check();
+        return;
+    }
+
+    std::vector<uint8_t> input;
+    if (args[0]->IsArrayBuffer()) {
+        auto ab = args[0].As<v8::ArrayBuffer>();
+        auto store = ab->GetBackingStore();
+        input.assign(static_cast<uint8_t*>(store->Data()),
+                     static_cast<uint8_t*>(store->Data()) + store->ByteLength());
+    } else if (args[0]->IsArrayBufferView()) {
+        auto view = args[0].As<v8::ArrayBufferView>();
+        input.resize(view->ByteLength());
+        view->CopyContents(input.data(), input.size());
+    } else if (args[0]->IsString()) {
+        // URL 文字列: assets から読み込む
+        AssetLoader* assets = HostContext::From(isolate)->assets;
+        auto bytes = assets->ReadBinary(ToStdString(isolate, args[0]));
+        if (bytes) {
+            input = std::move(*bytes);
+        }
+    }
+
+    auto* img = new DecodedImage();
+    if (input.empty() || !DecodeImageWithWIC(input, *img)) {
+        delete img;
+        resolver->Reject(ctx, v8::Exception::Error(Str(isolate, "Image decode failed"))).Check();
+        return;
+    }
+
+    resolver->Resolve(ctx, WrapImageBitmap(isolate, img)).Check();
+}
+
+} // namespace
+
+// ImageBitmap をラップ (内部フィールド0=External<DecodedImage>, __isImageBitmap=true)。
+v8::Local<v8::Object> WrapImageBitmap(v8::Isolate* isolate, DecodedImage* image)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    v8::Local<v8::ObjectTemplate> tmpl = v8::ObjectTemplate::New(isolate);
+    tmpl->SetInternalFieldCount(1);
+    v8::Local<v8::Object> obj = tmpl->NewInstance(ctx).ToLocalChecked();
+    obj->SetInternalField(0, v8::External::New(isolate, image));
+
+    v8util::SetValue(isolate, obj, "__isImageBitmap", v8::Boolean::New(isolate, true));
+    v8util::SetValue(isolate, obj, "width", v8::Integer::NewFromUnsigned(isolate, image->width));
+    v8util::SetValue(isolate, obj, "height", v8::Integer::NewFromUnsigned(isolate, image->height));
+    v8util::SetMethod(isolate, obj, "close", [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+
+    auto* handle = new v8::Global<v8::Object>(isolate, obj);
+    handle->SetWeak(image, ReleaseDecoded, v8::WeakCallbackType::kParameter);
+    return obj;
+}
+
+// 画像ソース(ImageBitmap / 2Dコンテキストを持つ canvas) から RGBA を取得する。
+bool GetImageSourcePixels(v8::Isolate* isolate, v8::Local<v8::Value> source,
+                          const uint8_t** out_rgba, uint32_t* out_width, uint32_t* out_height)
+{
+    if (!source->IsObject()) {
+        return false;
+    }
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    v8::Local<v8::Object> obj = source.As<v8::Object>();
+
+    // ImageBitmap
+    v8::Local<v8::Value> is_bitmap;
+    if (obj->Get(ctx, Str(isolate, "__isImageBitmap")).ToLocal(&is_bitmap) &&
+        is_bitmap->IsBoolean() && is_bitmap.As<v8::Boolean>()->Value()) {
+        auto* img = static_cast<DecodedImage*>(
+            obj->GetInternalField(0).As<v8::External>()->Value());
+        *out_rgba = img->rgba.data();
+        *out_width = img->width;
+        *out_height = img->height;
+        return true;
+    }
+
+    // video 要素: 現在フレームを返す
+    v8::Local<v8::Value> is_video;
+    if (obj->Get(ctx, Str(isolate, "__isVideoElement")).ToLocal(&is_video) &&
+        is_video->IsBoolean() && is_video.As<v8::Boolean>()->Value()) {
+        return GetVideoFramePixels(isolate, obj, out_rgba, out_width, out_height);
+    }
+
+    // canvas / OffscreenCanvas: getContext('2d') 済みなら __ctx2d を持つ
+    v8::Local<v8::Value> ctx2d;
+    if (obj->Get(ctx, Str(isolate, "__ctx2d")).ToLocal(&ctx2d) && ctx2d->IsObject()) {
+        return GetCanvas2DPixels(ctx2d.As<v8::Object>(), out_rgba, out_width, out_height);
+    }
+    return false;
+}
+
+void InstallImage(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* /*host*/)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    // COM (WIC 用) 初期化
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    v8::Local<v8::FunctionTemplate> image_tmpl =
+        v8::FunctionTemplate::New(isolate, ImageConstructor);
+    image_tmpl->SetClassName(Str(isolate, "Image"));
+    global->Set(ctx, Str(isolate, "Image"),
+                image_tmpl->GetFunction(ctx).ToLocalChecked()).Check();
+
+    v8util::SetMethod(isolate, global, "createImageBitmap", CreateImageBitmap);
+}
+
+} // namespace next2d

@@ -1,0 +1,138 @@
+# Xbox ホスト (templates/xbox) の CI。
+#
+# ローカルに Windows PC / GDK が無くても、GitHub Actions の windows-latest 上で
+# 以下を検証する:
+#   1. raster-tests        : Canvas2D ソフトラスタライザの単体テスト (Linux + Windows/MSVC)
+#   2. windows-platform    : WIC / DirectWrite / Media Foundation / XAudio2 の
+#                            実 API を Windows 上で実行する smoke テスト
+#   3. v8-syntax-check     : V8 依存ソースを V8 ヘッダ + MSVC でコンパイル検証
+#                            (リンクなし。Dawn 依存の WebGPU.cpp / DawnContext.cpp /
+#                             main.cpp と GDK 依存は対象外 → 実機セットアップ時に検証)
+name: xbox-host-ci
+
+on:
+  push:
+    paths:
+      - "templates/xbox/**"
+      - ".github/workflows/xbox-host-ci.yml"
+  pull_request:
+    paths:
+      - "templates/xbox/**"
+      - ".github/workflows/xbox-host-ci.yml"
+  workflow_dispatch:
+
+env:
+  # コンパイル検証に使う V8 ヘッダのバージョン (README「V8 の用意」と揃える)
+  V8_TAG: 13.6.233.17
+
+jobs:
+  raster-tests-linux:
+    name: RasterCore tests + V8 syntax check (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch V8 headers (${{ env.V8_TAG }})
+        run: |
+          git clone --depth 1 --branch "$V8_TAG" --filter=blob:none --sparse \
+            https://github.com/v8/v8.git v8_headers
+          cd v8_headers && git sparse-checkout set include
+      - name: Run raster tests + ASan + V8 syntax check
+        working-directory: templates/xbox
+        run: tests/check_local.sh "$GITHUB_WORKSPACE/v8_headers/include"
+
+  windows-tests:
+    name: RasterCore + Windows platform tests (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build & run RasterCore tests
+        shell: cmd
+        working-directory: templates/xbox
+        run: |
+          cl /nologo /std:c++17 /EHsc /W3 /O1 tests\raster_test.cpp /Fe:raster_test.exe
+          if errorlevel 1 exit /b 1
+          raster_test.exe
+
+      - name: Build & run Windows platform tests (WIC/DirectWrite/MF/XAudio2)
+        shell: cmd
+        working-directory: templates/xbox
+        run: |
+          cl /nologo /std:c++17 /EHsc /W3 /DNOMINMAX /Isrc ^
+             tests\windows_platform_test.cpp ^
+             src\platform\WicDecoder.cpp ^
+             src\platform\TextRasterizer.cpp ^
+             src\platform\AudioEngine.cpp ^
+             /Fe:platform_test.exe ^
+             ole32.lib uuid.lib windowscodecs.lib d2d1.lib dwrite.lib ^
+             mfplat.lib mfreadwrite.lib mfuuid.lib xaudio2.lib shlwapi.lib
+          if errorlevel 1 exit /b 1
+          platform_test.exe
+
+  v8-syntax-check:
+    name: V8-dependent sources compile check (MSVC)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Fetch V8 headers (${{ env.V8_TAG }})
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:V8_TAG --filter=blob:none --sparse `
+            https://github.com/v8/v8.git v8_headers
+          Push-Location v8_headers
+          git sparse-checkout set include
+          Pop-Location
+
+      - name: Compile-check (no link)
+        shell: pwsh
+        working-directory: templates/xbox
+        run: |
+          $v8inc = Join-Path $env:GITHUB_WORKSPACE "v8_headers/include"
+          # Dawn 依存 (webgpu_cpp.h が Dawn ビルドで生成されるため CI では検証不可):
+          #   src/main.cpp, src/gpu/DawnContext.cpp, src/bindings/webgpu/WebGPU.cpp
+          # GDK 依存 (GameInput.h):
+          #   src/platform/GamepadManager.cpp (下の別ステップで warn-only)
+          $files = @(
+            "src/AssetLoader.cpp",
+            "src/EventLoop.cpp",
+            "src/v8/V8Runtime.cpp",
+            "src/worker/WorkerRuntime.cpp",
+            "src/bindings/Audio.cpp",
+            "src/bindings/Canvas.cpp",
+            "src/bindings/Canvas2D.cpp",
+            "src/bindings/Console.cpp",
+            "src/bindings/DomShims.cpp",
+            "src/bindings/EventTarget.cpp",
+            "src/bindings/Fetch.cpp",
+            "src/bindings/Gamepad.cpp",
+            "src/bindings/Image.cpp",
+            "src/bindings/Network.cpp",
+            "src/bindings/Timers.cpp",
+            "src/bindings/Video.cpp",
+            "src/platform/AudioEngine.cpp",
+            "src/platform/WicDecoder.cpp",
+            "src/platform/TextRasterizer.cpp"
+          )
+          # CMakeLists.txt と同じ定義でコンパイルのみ実行 (/c)。
+          cl /c /nologo /std:c++20 /Zc:__cplusplus /EHsc /W3 `
+             /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE `
+             /DV8_COMPRESS_POINTERS /DV8_ENABLE_SANDBOX `
+             /Isrc /I"$v8inc" `
+             @files
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "OK: all V8-dependent sources compiled"
+
+      - name: Compile-check GamepadManager (GameInput.h — warn only)
+        shell: pwsh
+        working-directory: templates/xbox
+        continue-on-error: true
+        run: |
+          # GameInput.h は GDK 付属。Windows SDK に含まれる環境でのみ検証できる。
+          cl /c /nologo /std:c++20 /EHsc /W3 /DNOMINMAX /DWIN32_LEAN_AND_MEAN `
+             /Isrc src/platform/GamepadManager.cpp
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "GameInput.h not available in this SDK (expected without GDK)"
+          }

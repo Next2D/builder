@@ -14,3 +14,4 @@ _deps/
 CMakeCache.txt
 CMakeFiles/
 .v8_headers/
+*.bin

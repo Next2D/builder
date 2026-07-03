@@ -220,7 +220,7 @@ const buildWeb = (): Promise<void> =>
 {
     return new Promise<void>((resolve, reject): void =>
     {
-        const stream = cp.spawn("npx", [
+        const stream = $spawn("npx", [
             "@next2d/vite-plugin-next2d-auto-loader"
         ], { "stdio": "inherit" });
 
@@ -230,7 +230,7 @@ const buildWeb = (): Promise<void> =>
                 reject("vite plugin command failed.");
             }
 
-            const stream = cp.spawn("npx", [
+            const stream = $spawn("npx", [
                 "vite",
                 "--outDir",
                 $buildDir,
@@ -267,7 +267,7 @@ const installElectron = (): Promise<void> =>
             return resolve();
         }
 
-        const stream = cp.spawn("npm", [
+        const stream = $spawn("npm", [
             "--prefix",
             `${process.cwd()}/electron`,
             "install",
@@ -363,7 +363,7 @@ const buildSteam = async (): Promise<void> =>
 
     if (preview) {
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "electron",
             `${process.cwd()}/electron/index.js`
         ], { "stdio": "inherit" });
@@ -437,7 +437,7 @@ const generateNativeProject = (): Promise<void> =>
             return resolve();
         }
 
-        const stream = cp.spawn("npx", [
+        const stream = $spawn("npx", [
             "cap",
             "add",
             platform
@@ -484,7 +484,7 @@ const runNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    cp.spawn("npx", [
+    $spawn("npx", [
         "cap",
         "run",
         platform
@@ -518,7 +518,7 @@ const openNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    const stream = cp.spawn("npx", [
+    const stream = $spawn("npx", [
         "cap",
         "sync",
         platform
@@ -531,7 +531,7 @@ const openNative = async (): Promise<void> =>
             return;
         }
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "cap",
             "open",
             platform
@@ -566,7 +566,7 @@ const buildNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    const stream = cp.spawn("npx", [
+    const stream = $spawn("npx", [
         "cap",
         "sync",
         platform
@@ -579,7 +579,7 @@ const buildNative = async (): Promise<void> =>
             return;
         }
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "cap",
             "build",
             platform
@@ -614,6 +614,30 @@ const getTemplateDir = (name: string): string =>
  * @constant
  */
 const XBOX_CONFIG_NAME: string = "MicrosoftGame.config";
+
+/**
+ * @description npx / npm を子プロセスとして起動する (クロスプラットフォーム)。
+ *              Windows では npx/npm が .cmd (バッチファイル) のため、shell 経由で
+ *              ないと起動できない (spawn ENOENT / Node の CVE-2024-27980 対応により
+ *              .cmd の直接 spawn も不可)。スペースを含む引数は二重引用符で保護する。
+ *              Spawn npx/npm cross-platform. On Windows they are .cmd batch files,
+ *              which require a shell to spawn.
+ *
+ * @param  {string} command
+ * @param  {array} args
+ * @param  {object} options
+ * @return {object}
+ * @method
+ * @public
+ */
+const $spawn = (command: string, args: string[], options: object = {}): cp.ChildProcess =>
+{
+    if (process.platform === "win32" && (command === "npx" || command === "npm")) {
+        const quoted: string[] = args.map((a: string): string => /\s/.test(a) ? `"${a}"` : a);
+        return cp.spawn(command, quoted, { ...options, "shell": true });
+    }
+    return cp.spawn(command, args, options);
+};
 
 /**
  * @description 自動ダウンロードする prebuilt V8 のバージョン。

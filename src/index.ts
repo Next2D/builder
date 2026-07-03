@@ -932,21 +932,25 @@ const buildXbox = async (): Promise<void> =>
         return;
     }
 
-    // フルビルド (Release パッケージまで)
-    const stream = cp.spawn("cmake", [
-        "--build", cmakeBuildDir,
-        "--config", "Release"
-    ], { "stdio": "inherit" });
-
-    stream.on("close", (code: number): void =>
+    // フルビルド (Release パッケージまで)。失敗時は reject して非ゼロ終了させる
+    // (以前は表示のみで exit code 0 のまま成功扱いになっていた)
+    await new Promise<void>((resolve, reject): void =>
     {
-        if (code !== 0) {
-            console.log(pc.red("Export of the Xbox (GDK) package failed."));
-            return;
-        }
-        console.log();
-        console.log(pc.green(`Finished building the Xbox (GDK) package for ${gdkArch}.`));
-        console.log();
+        const stream = cp.spawn("cmake", [
+            "--build", cmakeBuildDir,
+            "--config", "Release"
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                return reject("Export of the Xbox (GDK) package failed.");
+            }
+            console.log();
+            console.log(pc.green(`Finished building the Xbox (GDK) package for ${gdkArch}.`));
+            console.log();
+            resolve();
+        });
     });
 };
 

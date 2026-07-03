@@ -23,6 +23,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    # MSVC は /Zc:__cplusplus を渡さないと __cplusplus を 199711L のまま報告し
+    # (/std:c++20 を指定していても)、v8config.h の C++20 チェックで停止する。
+    add_compile_options(/Zc:__cplusplus)
+endif()
+
 # GDK target platform (Gaming.Xbox.* / Gaming.Desktop.*) の判定
 if(NOT DEFINED CMAKE_GENERATOR_PLATFORM)
     message(WARNING "CMAKE_GENERATOR_PLATFORM が未設定です。builder は -A Gaming.Xbox.Scarlett.x64 等を渡します。")

@@ -3,13 +3,18 @@
 # D3D12 バックエンドのみを有効化し、Xbox(GDK)/PC(GDK) で利用する。
 #
 # 注意:
-#   - Dawn のビルドには depot_tools 由来の一部が不要になる CMake パスを使用する。
+#   - submodule はクローンしない (GIT_SUBMODULES "")。SwiftShader→LLVM まで再帰して
+#     数 GB のクローン + Windows の MAX_PATH 超過 ("Filename too long") で失敗するため。
+#     依存は Dawn 公式の DAWN_FETCH_DEPENDENCIES (python スクリプト) が必要分だけ取得する。
+#   - DAWN_FETCH_DEPENDENCIES には python3 が PATH に必要。
 #   - 初回構成はネットワークとビルド時間を要する。CI ではキャッシュ推奨。
-#   - DAWN_TAG は動作確認済みタグに固定すること (chromium ブランチに追従)。
+#   - DAWN_TAG はバインディング (bindings/webgpu/*) が使う API 世代と一致させること:
+#     wgpu::Limits / ShaderSourceWGSL / SurfaceSourceWindowsHWND / OptionalBool
+#     (いずれも 2025 以降の命名。古いタグでは SupportedLimits 等になりビルド不可)
 # =============================================================================
 include(FetchContent)
 
-set(DAWN_TAG "chromium/6478" CACHE STRING "Dawn のチェックアウトタグ")
+set(DAWN_TAG "v20260402.171122" CACHE STRING "Dawn のチェックアウトタグ (github.com/google/dawn)")
 
 # Dawn のビルドオプション: 必要なものだけを有効化
 set(DAWN_FETCH_DEPENDENCIES     ON  CACHE BOOL "" FORCE)
@@ -29,9 +34,13 @@ set(DAWN_BUILD_MONOLITHIC_LIBRARY ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     dawn
-    GIT_REPOSITORY https://dawn.googlesource.com/dawn
+    # GitHub ミラーの方が CI から高速・安定 (googlesource はレート制限がきつい)
+    GIT_REPOSITORY https://github.com/google/dawn.git
     GIT_TAG        ${DAWN_TAG}
     GIT_SHALLOW    TRUE
+    # submodule は取得しない (DAWN_FETCH_DEPENDENCIES が必要分を取得する)
+    GIT_SUBMODULES ""
+    GIT_SUBMODULES_RECURSE FALSE
 )
 
 FetchContent_MakeAvailable(dawn)

@@ -29,8 +29,11 @@ set(DAWN_BUILD_SAMPLES          OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_TESTS            OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_CMD_TOOLS        OFF CACHE BOOL "" FORCE)
 
-# webgpu_dawn: webgpu.h C-API を提供する統合ライブラリ (バインディング層はこれを叩く)
-set(DAWN_BUILD_MONOLITHIC_LIBRARY ON CACHE BOOL "" FORCE)
+# webgpu_dawn: webgpu.h C-API を提供する統合ライブラリ (バインディング層はこれを叩く)。
+# 2025 以降の Dawn では SHARED / STATIC / OFF の3値。STATIC で exe に静的リンクし
+# 追加 DLL の同梱を不要にする (BUILD_SHARED_LIBS=OFF が前提)。
+set(DAWN_BUILD_MONOLITHIC_LIBRARY STATIC CACHE STRING "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     dawn

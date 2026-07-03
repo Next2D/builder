@@ -206,10 +206,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。
     const bool selftest = cmd_line && wcsstr(cmd_line, L"--selftest") != nullptr;
 
-    // 1. GDK ランタイム初期化
-    if (FAILED(XGameRuntimeInitialize())) {
+    // 1. GDK ランタイム初期化。
+    // デスクトップでは Gaming Services 未導入の環境 (CI ランナー等) でも
+    // 起動できるよう、失敗を警告に留めて続行する (本ホストは XUser 等を未使用)。
+    // コンソールでは必須のため失敗したら終了する。
+    bool xgame_initialized = SUCCEEDED(XGameRuntimeInitialize());
+    if (!xgame_initialized) {
+#if NEXT2D_XBOX_CONSOLE
         std::cerr << "XGameRuntimeInitialize failed" << std::endl;
         return 1;
+#else
+        std::cerr << "warning: XGameRuntimeInitialize failed (Gaming Services not installed?)"
+                  << " - continuing on desktop" << std::endl;
+#endif
     }
 
     const fs::path exe_dir = ExeDir();
@@ -363,6 +372,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     host.main_canvas.Reset();
     runtime.Dispose();
     V8Runtime::ShutdownProcess();
-    XGameRuntimeUninitialize();
+    if (xgame_initialized) {
+        XGameRuntimeUninitialize();
+    }
     return exit_code;
 }

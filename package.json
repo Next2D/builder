@@ -22,6 +22,7 @@
   ],
   "scripts": {
     "lint": "eslint src/index.ts",
+    "prepare": "tsc",
     "release": "tsc"
   },
   "files": [

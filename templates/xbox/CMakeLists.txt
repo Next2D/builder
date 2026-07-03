@@ -36,6 +36,28 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
+# GDK の解決 (2通り)
+#   A) インストール済み GDK: -A Gaming.Desktop.x64 / Gaming.Xbox.* でビルド。
+#      VS 統合が include/lib を自動供給するため追加設定は不要。
+#   B) 展開レイアウト (インストーラ不要・CI 向け): NuGet の Microsoft.GDK.Windows を
+#      展開し、-A x64 + GDK_ROOT (cmake 変数 or 環境変数) で指定する。
+#      GDK_ROOT は <package>/native/<edition>/windows を指す (include/, lib/x64/, bin/x64/)。
+# -----------------------------------------------------------------------------
+string(FIND "${CMAKE_GENERATOR_PLATFORM}" "Gaming." _is_gaming_platform)
+if(_is_gaming_platform LESS 0)
+    if(NOT DEFINED GDK_ROOT)
+        set(GDK_ROOT "$ENV{GDK_ROOT}")
+    endif()
+    if(NOT GDK_ROOT OR NOT EXISTS "${GDK_ROOT}/include/XGameRuntime.h")
+        message(FATAL_ERROR
+            "GDK が見つかりません。次のいずれかで指定してください:\n"
+            "  1) GDK をインストールして -A Gaming.Desktop.x64 でビルド\n"
+            "  2) NuGet の Microsoft.GDK.Windows を展開し、-A x64 で\n"
+            "     -D GDK_ROOT=<package>/native/<edition>/windows (または環境変数 GDK_ROOT) を指定")
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
 # 依存: Dawn (WebGPU 実装 / D3D12 バックエンド)
 # -----------------------------------------------------------------------------
 include(cmake/FetchDawn.cmake)
@@ -60,6 +82,17 @@ add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
 target_include_directories(Next2DXboxHost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
+
+# 展開レイアウト (GDK_ROOT) 使用時: include/lib を明示指定し、実行時 DLL を並べる
+if(_is_gaming_platform LESS 0)
+    target_include_directories(Next2DXboxHost PRIVATE "${GDK_ROOT}/include")
+    target_link_directories(Next2DXboxHost PRIVATE "${GDK_ROOT}/lib/x64")
+    add_custom_command(TARGET Next2DXboxHost POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GDK_ROOT}/bin/x64/xgameruntime.dll"
+            "$<TARGET_FILE_DIR:Next2DXboxHost>"
+        COMMENT "Staging xgameruntime.dll next to the executable")
+endif()
 
 target_link_libraries(Next2DXboxHost PRIVATE
     v8::v8

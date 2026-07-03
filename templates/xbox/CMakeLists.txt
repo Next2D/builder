@@ -111,6 +111,17 @@ target_link_libraries(Next2DXboxHost PRIVATE
     dawn::webgpu_dawn
 )
 
+if(MSVC)
+    # CRT は静的 (/MT) に統一している (V8 monolith が静的 CRT 固定のため)。
+    # 一方 GDK の xgameruntime.lib 等は /MD ビルドで /DEFAULTLIB:msvcprt を
+    # 持ち込み LNK2005 (多重定義) を起こすので、動的 C++ ランタイムを除外して
+    # 静的側 (libcpmt) に一本化する。
+    target_link_options(Next2DXboxHost PRIVATE
+        /NODEFAULTLIB:msvcprt.lib
+        /NODEFAULTLIB:msvcprtd.lib
+    )
+endif()
+
 # WebGPU / D3D12 / GameInput / WIC / XAudio2 / GDK
 target_link_libraries(Next2DXboxHost PRIVATE
     d3d12

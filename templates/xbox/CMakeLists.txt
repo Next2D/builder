@@ -29,6 +29,12 @@ if(MSVC)
     add_compile_options(/Zc:__cplusplus)
 endif()
 
+# CRT は静的 (/MT, Debug は /MTd) に統一する。
+# prebuilt V8 monolith は GN の既定で静的 CRT ビルドのため、ホスト側が既定の /MD だと
+# libcpmt.lib と msvcprt.lib が衝突して LNK2005/LNK2038 でリンクに失敗する。
+# ここで設定することで FetchContent の Dawn も同じ CRT でビルドされる。
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # GDK target platform (Gaming.Xbox.* / Gaming.Desktop.*) の判定
 if(NOT DEFINED CMAKE_GENERATOR_PLATFORM)
     message(WARNING "CMAKE_GENERATOR_PLATFORM が未設定です。builder は -A Gaming.Xbox.Scarlett.x64 等を渡します。")

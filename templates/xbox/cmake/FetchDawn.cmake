@@ -52,3 +52,29 @@ FetchContent_MakeAvailable(dawn)
 if(NOT TARGET dawn::webgpu_dawn AND TARGET webgpu_dawn)
     add_library(dawn::webgpu_dawn ALIAS webgpu_dawn)
 endif()
+
+# -----------------------------------------------------------------------------
+# CRT を静的 (/MT) へ強制統一する。
+# CMAKE_MSVC_RUNTIME_LIBRARY 変数だけでは Dawn の third_party (fetch_dawn_dependencies
+# が取得する abseil/protobuf 等) の一部に伝播せず /MD が混ざり、静的 CRT 固定の
+# prebuilt V8 とのリンクで LNK2005/LNK2019 になる。全ターゲットへ再帰的に
+# プロパティを直接設定して確実に揃える。
+# -----------------------------------------------------------------------------
+function(next2d_force_static_crt dir)
+    get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_t IN LISTS _targets)
+        get_target_property(_type ${_t} TYPE)
+        if(NOT _type STREQUAL "INTERFACE_LIBRARY")
+            set_property(TARGET ${_t} PROPERTY
+                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        endif()
+    endforeach()
+    get_property(_subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+    foreach(_sd IN LISTS _subdirs)
+        next2d_force_static_crt("${_sd}")
+    endforeach()
+endfunction()
+
+if(MSVC)
+    next2d_force_static_crt("${dawn_SOURCE_DIR}")
+endif()

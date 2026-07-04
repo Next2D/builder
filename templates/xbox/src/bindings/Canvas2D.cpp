@@ -11,6 +11,7 @@
 #include "RasterCore.h"
 #include "platform/TextRasterizer.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <Windows.h>
 
@@ -352,9 +353,6 @@ void GetImageData(const v8::FunctionCallbackInfo<v8::Value>& a)
     a.GetReturnValue().Set(image_data);
 }
 
-// GC 時に Canvas2D 実体を解放
-void ReleaseCanvas2D(const v8::WeakCallbackInfo<Canvas2D>& info) { delete info.GetParameter(); }
-
 // fillStyle / strokeStyle / lineWidth / globalAlpha / font アクセサ
 void InstallAccessors(v8::Isolate* isolate, v8::Local<v8::Object> obj)
 {
@@ -424,8 +422,7 @@ v8::Local<v8::Object> CreateCanvas2DContext(v8::Isolate* isolate, HostContext* /
 
     auto* impl = new Canvas2D(width > 0 ? width : 1, height > 0 ? height : 1);
     obj->SetInternalField(0, v8::External::New(isolate, impl));
-    auto* handle = new v8::Global<v8::Object>(isolate, obj);
-    handle->SetWeak(impl, ReleaseCanvas2D, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, obj, impl);
 
     SetMethod(isolate, obj, "beginPath", BeginPath);
     SetMethod(isolate, obj, "moveTo", MoveTo);

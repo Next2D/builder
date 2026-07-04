@@ -13,6 +13,7 @@
 #include "ImageSource.h"
 #include "EventTarget.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -112,8 +113,6 @@ struct VideoDecoder {
     }
 };
 
-void ReleaseVideo(const v8::WeakCallbackInfo<VideoDecoder>& info) { delete info.GetParameter(); }
-
 VideoDecoder* Decoder(v8::Local<v8::Object> obj)
 {
     return static_cast<VideoDecoder*>(obj->GetInternalField(0).As<v8::External>()->Value());
@@ -180,8 +179,7 @@ v8::Local<v8::Object> CreateVideoElement(v8::Isolate* isolate, HostContext* /*ho
 
     auto* dec = new VideoDecoder();
     self->SetInternalField(0, v8::External::New(isolate, dec));
-    auto* handle = new v8::Global<v8::Object>(isolate, self);
-    handle->SetWeak(dec, ReleaseVideo, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, self, dec);
 
     SetValue(isolate, self, "__isVideoElement", v8::Boolean::New(isolate, true));
     SetValue(isolate, self, "tagName", Str(isolate, "VIDEO"));

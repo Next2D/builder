@@ -5,6 +5,7 @@
 #include "ImageSource.h"
 #include "platform/WicDecoder.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <objbase.h>
 
@@ -17,11 +18,6 @@ using v8util::Str;
 using v8util::ToStdString;
 
 namespace {
-
-void ReleaseDecoded(const v8::WeakCallbackInfo<DecodedImage>& info)
-{
-    delete info.GetParameter();
-}
 
 // Image コンストラクタ: src セッターで読み込み+デコードし onload を発火する。
 void ImageConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -99,8 +95,7 @@ v8::Local<v8::Object> WrapImageBitmap(v8::Isolate* isolate, DecodedImage* image)
     v8util::SetValue(isolate, obj, "height", v8::Integer::NewFromUnsigned(isolate, image->height));
     v8util::SetMethod(isolate, obj, "close", [](const v8::FunctionCallbackInfo<v8::Value>&) {});
 
-    auto* handle = new v8::Global<v8::Object>(isolate, obj);
-    handle->SetWeak(image, ReleaseDecoded, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, obj, image);
     return obj;
 }
 

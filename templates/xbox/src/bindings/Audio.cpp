@@ -5,6 +5,7 @@
 #include "EventTarget.h"
 #include "platform/AudioEngine.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <memory>
 #include <vector>
@@ -22,11 +23,6 @@ struct GainParam {
     std::shared_ptr<AudioVoice> voice;  // source.connect(gain) 時にリンクされる
 };
 
-void ReleaseGainParam(const v8::WeakCallbackInfo<GainParam>& info)
-{
-    delete info.GetParameter();
-}
-
 // 再生中(非ループ)の source ノード。毎フレーム IsFinished を見て "ended" を発火する。
 std::vector<v8::Global<v8::Object>>& PlayingSources()
 {
@@ -41,18 +37,11 @@ struct Holder {
 };
 
 template <typename T>
-void ReleaseHolder(const v8::WeakCallbackInfo<Holder<T>>& info)
-{
-    delete info.GetParameter();
-}
-
-template <typename T>
 void Attach(v8::Isolate* isolate, v8::Local<v8::Object> obj, std::shared_ptr<T> ptr)
 {
     auto* holder = new Holder<T>{std::move(ptr)};
     obj->SetInternalField(0, v8::External::New(isolate, holder));
-    auto* handle = new v8::Global<v8::Object>(isolate, obj);
-    handle->SetWeak(holder, ReleaseHolder<T>, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, obj, holder);
 }
 
 template <typename T>
@@ -198,8 +187,7 @@ void CreateGain(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Local<v8::Object> gain = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
     auto* param = new GainParam();
     gain->SetInternalField(0, v8::External::New(isolate, param));
-    auto* handle = new v8::Global<v8::Object>(isolate, gain);
-    handle->SetWeak(param, ReleaseGainParam, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, gain, param);
 
     gain->SetNativeDataProperty(ctx, Str(isolate, "value"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {

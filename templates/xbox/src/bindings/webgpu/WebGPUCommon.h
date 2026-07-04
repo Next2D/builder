@@ -15,6 +15,7 @@
 #include <v8.h>
 
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <memory>
 #include <string>
@@ -27,13 +28,8 @@ struct Holder {
     T handle;
 };
 
-template <typename T>
-void ReleaseHolder(const v8::WeakCallbackInfo<Holder<T>>& info)
-{
-    delete info.GetParameter();
-}
-
 // wgpu ハンドル T を、指定 ObjectTemplate から生成したオブジェクトにラップする。
+// GC 時の解放は AttachWeak (第一パスで Global を Reset する規約に準拠) に委ねる。
 template <typename T>
 v8::Local<v8::Object> Wrap(v8::Isolate* isolate,
                            v8::Local<v8::ObjectTemplate> tmpl,
@@ -43,8 +39,7 @@ v8::Local<v8::Object> Wrap(v8::Isolate* isolate,
     v8::Local<v8::Object> obj = tmpl->NewInstance(ctx).ToLocalChecked();
     auto* holder = new Holder<T>{std::move(handle)};
     obj->SetInternalField(0, v8::External::New(isolate, holder));
-    auto* global = new v8::Global<v8::Object>(isolate, obj);
-    global->SetWeak(holder, ReleaseHolder<T>, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, obj, holder);
     return obj;
 }
 

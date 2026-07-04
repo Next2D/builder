@@ -408,11 +408,17 @@ v8::Local<v8::Object> WorkerRuntime::CreateWorker(const std::string& url)
     worker->Set(ctx, Str(isolate_, "postMessage"),
         v8::Function::New(ctx, MainWorkerPostMessage, ext).ToLocalChecked()).Check();
     SetMethod(isolate_, worker, "addEventListener", AddEventListener);
-    SetMethod(isolate_, worker, "terminate",
-        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
-            auto* w = static_cast<WorkerInstance*>(a.Data().As<v8::External>()->Value());
-            w->Terminate();
-        });
+    // terminate は WorkerInstance* を data (External) で受け取る必要があるため
+    // SetMethod (data なし) ではなく Function::New で設置する。
+    worker->Set(ctx, Str(isolate_, "terminate"),
+        v8::Function::New(ctx,
+            [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+                if (!a.Data()->IsExternal()) {
+                    return;
+                }
+                auto* w = static_cast<WorkerInstance*>(a.Data().As<v8::External>()->Value());
+                w->Terminate();
+            }, ext).ToLocalChecked()).Check();
 
     ptr->main_worker_object.Reset(isolate_, worker);
 

@@ -48,9 +48,11 @@ public:
     v8::Maybe<bool> WriteHostObject(v8::Isolate*, v8::Local<v8::Object> object) override
     {
         v8::Local<v8::Context> ctx = isolate_->GetCurrentContext();
-        v8::Local<v8::Value> w, h;
-        object->Get(ctx, Str(isolate_, "width")).ToLocal(&w);
-        object->Get(ctx, Str(isolate_, "height")).ToLocal(&h);
+        // Get 失敗時に空 Local を触らないようフォールバックを入れる
+        v8::Local<v8::Value> w = v8::Undefined(isolate_);
+        v8::Local<v8::Value> h = v8::Undefined(isolate_);
+        (void) object->Get(ctx, Str(isolate_, "width")).ToLocal(&w);
+        (void) object->Get(ctx, Str(isolate_, "height")).ToLocal(&h);
         serializer->WriteUint32(w->IsNumber() ? static_cast<uint32_t>(w.As<v8::Number>()->Value()) : 0);
         serializer->WriteUint32(h->IsNumber() ? static_cast<uint32_t>(h.As<v8::Number>()->Value()) : 0);
         return v8::Just(true);
@@ -246,10 +248,12 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 bool WorkerInstance::Start()
 {
+    std::cerr << "[Worker] start: " << url_ << std::endl;
     v8::HandleScope handle_scope(isolate_);
 
     v8::Local<v8::Context> context = v8::Context::New(isolate_);
     context_.Reset(isolate_, context);
+    std::cerr << "[Worker] context created" << std::endl;
 
     // worker 専用 EventLoop を Context の embedder slot に登録
     loop_ = std::make_unique<EventLoop>(isolate_);
@@ -260,6 +264,7 @@ bool WorkerInstance::Start()
 
     // ブラウザ相当環境一式 (console/timers/fetch/image/audio/webgpu/canvas/dom)
     InstallGlobalBindings(isolate_, global, HostContext::From(isolate_));
+    std::cerr << "[Worker] bindings installed" << std::endl;
 
     // worker スコープには document/window を出さない (ライブラリの環境判定対策)。
     global->Delete(context, Str(isolate_, "document")).Check();
@@ -295,6 +300,7 @@ bool WorkerInstance::Start()
         }
         source = std::move(*src);
     }
+    std::cerr << "[Worker] source resolved (" << source.size() << " bytes)" << std::endl;
     v8::TryCatch tc(isolate_);
     v8::ScriptOrigin origin(Str(isolate_, url_));
     v8::Local<v8::String> code = Str(isolate_, source);
@@ -305,6 +311,7 @@ bool WorkerInstance::Start()
         return false;
     }
     isolate_->PerformMicrotaskCheckpoint();
+    std::cerr << "[Worker] script evaluated" << std::endl;
     return true;
 }
 
@@ -437,8 +444,10 @@ void WorkerRuntime::InstallOnGlobal(v8::Local<v8::Object> global)
 
 void WorkerRuntime::Pump(double now_ms)
 {
-    for (auto& w : workers_) {
-        w->Deliver(now_ms);
+    // 配送中の JS が new Worker() を呼ぶと workers_ に push_back され
+    // vector が再割当されるため、イテレータではなく添字で回す。
+    for (size_t i = 0; i < workers_.size(); ++i) {
+        workers_[i]->Deliver(now_ms);
     }
 }
 

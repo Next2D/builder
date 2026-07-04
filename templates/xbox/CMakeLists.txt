@@ -120,6 +120,10 @@ if(MSVC)
         /NODEFAULTLIB:msvcprt.lib
         /NODEFAULTLIB:msvcprtd.lib
     )
+
+    # Release でも PDB を生成する (クラッシュダンプ解析でスタックを名前解決するため)
+    target_compile_options(Next2DXboxHost PRIVATE /Zi)
+    target_link_options(Next2DXboxHost PRIVATE /DEBUG /OPT:REF /OPT:ICF)
 endif()
 
 # webgpu_dawn は SHARED (DLL)。実行に必要なため exe の隣へステージする

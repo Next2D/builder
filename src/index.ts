@@ -649,7 +649,7 @@ const $spawn = (command: string, args: string[], options: object = {}): cp.Child
  * @type {string}
  * @constant
  */
-const XBOX_V8_VERSION: string = "13.6.233.17";
+const XBOX_V8_VERSION: string = "13.7.152.19";
 
 /**
  * @description prebuilt V8 のアセットリビジョン。同一 V8 バージョンでも

@@ -23,7 +23,7 @@ on:
 
 env:
   # コンパイル検証に使う V8 ヘッダのバージョン (README「V8 の用意」と揃える)
-  V8_TAG: 13.6.233.17
+  V8_TAG: 13.7.152.19
 
 jobs:
   raster-tests-linux:

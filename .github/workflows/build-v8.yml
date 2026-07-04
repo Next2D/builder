@@ -17,7 +17,7 @@ on:
       v8_version:
         description: "V8 version tag (https://github.com/v8/v8/tags)"
         required: true
-        default: "13.6.233.17"
+        default: "13.7.152.19"
 
 permissions:
   contents: write   # Releases への発行に必要

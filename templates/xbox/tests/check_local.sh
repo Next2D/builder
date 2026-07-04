@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-V8_TAG="13.6.233.17"
+V8_TAG="13.7.152.19"
 V8INC="${1:-}"
 
 echo "== 1/3 RasterCore unit tests =="

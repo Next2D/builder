@@ -302,6 +302,11 @@ player の実 API 使用を全面調査し、以下を実装済み。**この環
 | ポインタ/キーボード/ホイール入力 | ⚠️ 実装(要検証) | `WndProc`→`DispatchEvent`。配送先canvasの特定は実機検証 |
 | 動画 (HTMLVideoElement) | ⚠️ 実装(要検証) | `Video.cpp`(Media Foundation)。フレーム精度/音声同期は実機検証 |
 | クリップボード (`navigator.clipboard`) | ✅ 実装 | Win32 クリップボード (readText/writeText) |
+| **JS エンジン/グローバル機能** (player 全数調査) | ✅ 実装 | Proxy=V8コア。`crypto.randomUUID`/`getRandomValues`(BCrypt)、`TextEncoder`/`TextDecoder`/`queueMicrotask`/`location`/`atob`/`btoa` は worker 含む全コンテキストへ注入。`createImageBitmap` は ImageData/ImageBitmap/canvas/Blob を受理 |
+| **WebAssembly** | ✅ 実装 (要 V8 r2) | prebuilt V8 r2 = wasm + **DrumBrake**(V8 の wasm インタープリタ、JIT 禁止コンソール向け)。実行時 `--jitless --wasm-jitless` で JS=Ignition / wasm=DrumBrake 解釈実行 |
+| **indexedDB** (最小実装) | ✅ 実装 | open/createObjectStore/transaction/get/put/delete/clear/getAll/count/keyPath。値は JSON 化可能なもの + ArrayBuffer/TypedArray(base64 永続化)。カーソル/インデックスは未対応。保存先 `%LOCALAPPDATA%\Next2D\idb_<db>.json` |
+| **localStorage / sessionStorage** | ✅ 実装 | JS セマンティクス + ファイル永続化 (`%LOCALAPPDATA%\Next2D\`)。コンソール実機では XGameSave 化が必要 («EXTEND») |
+| **Audio 要素** (`new Audio(url)`) | ✅ 実装 | play/pause/paused/loop/volume/currentTime/preload (pause→play は先頭から) |
 
 > player が使用する API はコード上すべて実装済み。残る唯一の障壁は
 > **GDK/devkit を要するコンパイル・実機検証**(この環境では物理的に不可)。

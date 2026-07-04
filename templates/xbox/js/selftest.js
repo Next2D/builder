@@ -221,6 +221,96 @@
             assert(d[4] === 0 && d[5] === 255, "(1,0) green");
         });
 
+        // ==================== エンジン/グローバル (player の V8 機能全数調査ぶん) ====================
+        await test("engine: crypto / ImageData→ImageBitmap / Proxy", async () => {
+            // crypto.randomUUID (player の WebGLUtil が ID 生成に使用)
+            const uuid = crypto.randomUUID();
+            assert(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid),
+                "uuid=" + uuid);
+            const rnd = crypto.getRandomValues(new Uint8Array(16));
+            assert(rnd.length === 16 && rnd.some((b) => b !== 0), "getRandomValues");
+
+            // createImageBitmap(ImageData) — webgpu レンダラのキャプチャ/フィルタ経路
+            const data = new Uint8ClampedArray(2 * 2 * 4);
+            data[0] = 255; data[3] = 255;   // (0,0) = 赤
+            const bmp = await createImageBitmap(new ImageData(data, 2, 2));
+            assert(bmp.width === 2 && bmp.height === 2, "ImageData bitmap " + bmp.width + "x" + bmp.height);
+            const c = new OffscreenCanvas(2, 2);
+            const ctx = c.getContext("2d");
+            ctx.drawImage(bmp, 0, 0);
+            const px = ctx.getImageData(0, 0, 1, 1).data;
+            assert(px[0] === 255, "ImageData pixel roundtrip");
+
+            // Proxy (player が4ファイルで使用。jitless V8 のコア機能)
+            const p = new Proxy({}, { "get": (_, k) => k === "x" ? 42 : undefined });
+            assert(p.x === 42, "Proxy");
+
+            // ゲームコードが使うグローバル (UserSettings=localStorage, boot=readyState, confirm)
+            localStorage.setItem("__selftest", "1");
+            assert(localStorage.getItem("__selftest") === "1", "localStorage roundtrip");
+            localStorage.removeItem("__selftest");
+            assert(localStorage.getItem("__selftest") === null, "localStorage remove");
+            assert(document.readyState === "complete", "document.readyState");
+            assert(typeof confirm("?") === "boolean", "confirm");
+        });
+
+        await test("engine: WebAssembly (DrumBrake インタープリタ実行)", async () => {
+            // (module (func $add (param i32 i32) (result i32) ...) (export "add"))
+            // prebuilt V8 r2 (wasm + DrumBrake) が必要。実行時は --wasm-jitless で解釈実行。
+            assert(typeof WebAssembly === "object", "WebAssembly global (V8 r2 required)");
+            const wasmBytes = new Uint8Array([
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+                0x03, 0x02, 0x01, 0x00,
+                0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+                0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b
+            ]);
+            const { instance } = await WebAssembly.instantiate(wasmBytes);
+            assert(instance.exports.add(19, 23) === 42, "wasm add(19,23)");
+        });
+
+        await test("engine: indexedDB / atob / btoa", async () => {
+            assert(atob(btoa("Next2D!")) === "Next2D!", "atob/btoa roundtrip");
+
+            const openReq = indexedDB.open("selftest-db", 1);
+            const db = await new Promise((resolve, reject) => {
+                openReq.onupgradeneeded = (e) => e.target.result.createObjectStore("kv");
+                openReq.onsuccess = (e) => resolve(e.target.result);
+                openReq.onerror = () => reject(new Error("open failed"));
+            });
+            const store = db.transaction(["kv"], "readwrite").objectStore("kv");
+            await new Promise((resolve, reject) => {
+                const r = store.put({ "n": 1, "bin": new Uint8Array([7, 8]) }, "k");
+                r.onsuccess = resolve;
+                r.onerror = () => reject(new Error("put failed"));
+            });
+            const v = await new Promise((resolve, reject) => {
+                const r = db.transaction(["kv"]).objectStore("kv").get("k");
+                r.onsuccess = (e) => resolve(e.target.result);
+                r.onerror = () => reject(new Error("get failed"));
+            });
+            assert(v && v.n === 1 && v.bin instanceof Uint8Array && v.bin[1] === 8,
+                "indexedDB roundtrip (binary 値含む)");
+        });
+
+        await test("engine: Worker 内の TextDecoder / location / crypto", async () => {
+            const src = "self.onmessage = function() { " +
+                "self.postMessage({ " +
+                "  td: typeof TextDecoder, loc: typeof location, cr: typeof crypto, " +
+                "  dec: new TextDecoder().decode(new TextEncoder().encode('abc')) " +
+                "}); };";
+            const url = URL.createObjectURL(new Blob([src], { "type": "text/javascript" }));
+            const worker = new Worker(url);
+            const r = await new Promise((resolve) => {
+                worker.onmessage = (e) => resolve(e.data);
+                worker.postMessage(0);
+            });
+            assert(r.td === "function" && r.loc === "object" && r.cr === "object",
+                JSON.stringify(r));
+            assert(r.dec === "abc", "worker TextDecoder roundtrip");
+            if (worker.terminate) { worker.terminate() }
+        });
+
         // ==================== ネットワーク (Blob / URL / XHR) ====================
         let blobUrl = null;
         await test("Blob / URL.createObjectURL / revokeObjectURL", () => {
@@ -465,6 +555,20 @@
             assert(buffer.sampleRate === 48000, "sampleRate=" + buffer.sampleRate);
             assert(buffer.duration > 0, "duration=" + buffer.duration);
             globalThis.__selftestAudioBuffer = buffer;
+        });
+
+        await test("Audio 要素 (new Audio / play / pause)", async () => {
+            // ゲームコードが効果音再生に使う HTMLAudioElement 最小実装
+            const a = new Audio();      // URL なし (ボイス無しでも API は成立する)
+            a.volume = 0;
+            a.loop = false;
+            a.preload = "auto";
+            a.currentTime = 0;
+            assert(a.paused === true, "initial paused");
+            await a.play();
+            assert(a.paused === false, "playing");
+            a.pause();
+            assert(a.paused === true, "paused after pause()");
         });
 
         await softTest("Audio: gain 接続 + 再生 + ended 発火", async () => {

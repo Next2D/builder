@@ -652,6 +652,18 @@ const $spawn = (command: string, args: string[], options: object = {}): cp.Child
 const XBOX_V8_VERSION: string = "13.6.233.17";
 
 /**
+ * @description prebuilt V8 のアセットリビジョン。同一 V8 バージョンでも
+ *              gn フラグ変更 (例: r2 = WebAssembly + DrumBrake 有効化) で
+ *              バイナリが変わる場合に上げ、Release タグとローカルキャッシュを分離する。
+ *              Asset revision. Bump when gn flags change for the same V8 version
+ *              (r2 = WebAssembly + DrumBrake enabled).
+ *
+ * @type {string}
+ * @constant
+ */
+const XBOX_V8_REVISION: string = "r2";
+
+/**
  * @description ゲーム側の `xbox/` へスキャフォールドしないテンプレート内ファイル。
  *              - MicrosoftGame.config : ゲーム固有設定 (injectGameConfig が注入)
  *              - tests / .v8_headers  : builder リポジトリ側の開発用テスト・キャッシュ
@@ -803,14 +815,14 @@ const resolveXboxV8Root = async (): Promise<string> =>
     const cacheBase: string = process.env.LOCALAPPDATA
         ? `${process.env.LOCALAPPDATA}/next2d`
         : `${os.homedir()}/.cache/next2d`;
-    const cacheDir: string = `${cacheBase}/v8/${XBOX_V8_VERSION}`;
+    const cacheDir: string = `${cacheBase}/v8/${XBOX_V8_VERSION}-${XBOX_V8_REVISION}`;
     if (fs.existsSync(`${cacheDir}/include/v8.h`)) {
         return cacheDir;
     }
 
     // 4. GitHub Releases から自動ダウンロード (マシンごとに初回のみ)
     const assetName: string = `v8-monolith-${XBOX_V8_VERSION}-windows-x64.zip`;
-    const url: string = `https://github.com/Next2D/builder/releases/download/v8-${XBOX_V8_VERSION}-windows-x64/${assetName}`;
+    const url: string = `https://github.com/Next2D/builder/releases/download/v8-${XBOX_V8_VERSION}-windows-x64-${XBOX_V8_REVISION}/${assetName}`;
 
     console.log(pc.green(`Downloading prebuilt V8 ${XBOX_V8_VERSION} (first time only) ...`));
     console.log(url);

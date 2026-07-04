@@ -67,6 +67,52 @@ void CreateImageBitmap(const v8::FunctionCallbackInfo<v8::Value>& args)
         if (bytes) {
             input = std::move(*bytes);
         }
+    } else if (args[0]->IsObject()) {
+        v8::Local<v8::Object> obj = args[0].As<v8::Object>();
+
+        // 1) ImageData ({ data: Uint8ClampedArray, width, height }):
+        //    デコード不要でそのまま RGBA として取り込む
+        //    (webgpu レンダラのキャプチャ/フィルタ→ImageBitmap 化の経路)。
+        v8::Local<v8::Value> data_v, w_v, h_v;
+        if (obj->Get(ctx, Str(isolate, "data")).ToLocal(&data_v) && data_v->IsArrayBufferView() &&
+            obj->Get(ctx, Str(isolate, "width")).ToLocal(&w_v) && w_v->IsNumber() &&
+            obj->Get(ctx, Str(isolate, "height")).ToLocal(&h_v) && h_v->IsNumber()) {
+            const auto w = static_cast<uint32_t>(w_v.As<v8::Number>()->Value());
+            const auto h = static_cast<uint32_t>(h_v.As<v8::Number>()->Value());
+            auto view = data_v.As<v8::ArrayBufferView>();
+            if (view->ByteLength() < static_cast<size_t>(w) * h * 4) {
+                resolver->Reject(ctx, v8::Exception::TypeError(
+                    Str(isolate, "ImageData size mismatch"))).Check();
+                return;
+            }
+            auto* raw = new DecodedImage();
+            raw->width = w;
+            raw->height = h;
+            raw->rgba.resize(static_cast<size_t>(w) * h * 4);
+            view->CopyContents(raw->rgba.data(), raw->rgba.size());
+            resolver->Resolve(ctx, WrapImageBitmap(isolate, raw)).Check();
+            return;
+        }
+
+        // 2) ImageBitmap / 2D 済み canvas / video: ピクセルを複製して新規 ImageBitmap
+        const uint8_t* px = nullptr;
+        uint32_t sw = 0, sh = 0;
+        if (GetImageSourcePixels(isolate, obj, &px, &sw, &sh) && px) {
+            auto* raw = new DecodedImage();
+            raw->width = sw;
+            raw->height = sh;
+            raw->rgba.assign(px, px + static_cast<size_t>(sw) * sh * 4);
+            resolver->Resolve(ctx, WrapImageBitmap(isolate, raw)).Check();
+            return;
+        }
+
+        // 3) Blob: 内包バイト列 (エンコード済み画像) を WIC デコードへ回す
+        v8::Local<v8::Value> blob_v;
+        if (obj->Get(ctx, Str(isolate, "__blobData")).ToLocal(&blob_v) && blob_v->IsArrayBuffer()) {
+            auto store = blob_v.As<v8::ArrayBuffer>()->GetBackingStore();
+            input.assign(static_cast<uint8_t*>(store->Data()),
+                         static_cast<uint8_t*>(store->Data()) + store->ByteLength());
+        }
     }
 
     auto* img = new DecodedImage();

@@ -30,9 +30,12 @@ set(TINT_BUILD_TESTS            OFF CACHE BOOL "" FORCE)
 set(TINT_BUILD_CMD_TOOLS        OFF CACHE BOOL "" FORCE)
 
 # webgpu_dawn: webgpu.h C-API を提供する統合ライブラリ (バインディング層はこれを叩く)。
-# 2025 以降の Dawn では SHARED / STATIC / OFF の3値。STATIC で exe に静的リンクし
-# 追加 DLL の同梱を不要にする (BUILD_SHARED_LIBS=OFF が前提)。
-set(DAWN_BUILD_MONOLITHIC_LIBRARY STATIC CACHE STRING "" FORCE)
+# 2025 以降の Dawn では SHARED / STATIC / OFF の3値。
+# SHARED (DLL) を選ぶ理由: V8 monolith と Dawn は双方が abseil を静的に内蔵しており、
+# STATIC だと raw_hash_set 等の同名シンボルが LNK2005 で衝突する (しかも absl の
+# バージョンが異なるため /FORCE:MULTIPLE は実行時破壊のリスクがある)。
+# DLL にすれば公開されるのは WebGPU C API のみで、absl は DLL 内部に閉じる。
+set(DAWN_BUILD_MONOLITHIC_LIBRARY SHARED CACHE STRING "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
 FetchContent_Declare(

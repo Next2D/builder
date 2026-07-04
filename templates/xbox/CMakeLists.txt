@@ -122,6 +122,15 @@ if(MSVC)
     )
 endif()
 
+# webgpu_dawn は SHARED (DLL)。実行に必要なため exe の隣へステージする
+if(TARGET webgpu_dawn)
+    add_custom_command(TARGET Next2DXboxHost POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:webgpu_dawn>"
+            "$<TARGET_FILE_DIR:Next2DXboxHost>"
+        COMMENT "Staging webgpu_dawn.dll next to the executable")
+endif()
+
 # WebGPU / D3D12 / GameInput / WIC / XAudio2 / GDK
 target_link_libraries(Next2DXboxHost PRIVATE
     d3d12

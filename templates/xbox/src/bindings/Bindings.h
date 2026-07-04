@@ -41,6 +41,9 @@ void InstallAudio(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContex
 // 再生終了した AudioBufferSourceNode へ "ended" を発火する。main.cpp のループから毎フレーム呼ぶ。
 void PumpAudioEvents(v8::Isolate* isolate);
 
+// V8 破棄前に呼ぶ。音声の再生追跡リスト (v8::Global) を解放する。
+void ShutdownAudioEvents();
+
 // window / document / navigator / screen 等の DOM 相当スタブと canvas 生成
 void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host);
 

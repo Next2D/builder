@@ -264,7 +264,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     host.workers = &workers;
     g_dawn = &dawn;
 
-    dawn.Initialize(hwnd, host.viewport_width, host.viewport_height);
+    // GPU 無し環境 (CI 等) では Dawn 初期化に失敗し得るが、CPU 側の機能と
+    // selftest は動かせるため続行する (Present 等は内部でゲートされる)
+    if (!dawn.Initialize(hwnd, host.viewport_width, host.viewport_height)) {
+        std::cerr << "warning: Dawn initialization failed - continuing without GPU" << std::endl;
+    }
     gamepad.Initialize();
     audio.Initialize();
 
@@ -368,7 +372,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         }
     }
 
-    // 8. 後始末
+    // 8. 後始末 (v8::Global を持つ静的リストは V8 破棄前に必ず解放する)
+    ShutdownAudioEvents();
     host.main_canvas.Reset();
     runtime.Dispose();
     V8Runtime::ShutdownProcess();

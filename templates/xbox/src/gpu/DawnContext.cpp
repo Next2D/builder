@@ -143,10 +143,14 @@ void DawnContext::Configure(uint32_t width, uint32_t height)
     config.alphaMode   = wgpu::CompositeAlphaMode::Opaque;
 
     surface_.Configure(&config);
+    configured_ = true;
 }
 
 wgpu::Texture DawnContext::GetCurrentTexture()
 {
+    if (!configured_) {
+        return nullptr;
+    }
     wgpu::SurfaceTexture surface_texture = {};
     surface_.GetCurrentTexture(&surface_texture);
     return surface_texture.texture;
@@ -154,7 +158,8 @@ wgpu::Texture DawnContext::GetCurrentTexture()
 
 void DawnContext::Present()
 {
-    if (surface_) {
+    // 未構成 (GPU 無し環境等) では no-op。毎フレームの検証エラーを避ける
+    if (surface_ && configured_) {
         surface_.Present();
     }
 }

@@ -226,6 +226,16 @@ void CreateGain(const v8::FunctionCallbackInfo<v8::Value>& args)
 // 毎フレーム呼ばれ、再生終了した source ノードへ "ended" を発火する (main.cpp のループから)。
 } // namespace
 
+// V8 破棄前に呼ぶ。再生追跡リストの v8::Global を解放する。
+// (放置すると static デストラクタが V8 破棄後に走りアクセス違反になる)
+void ShutdownAudioEvents()
+{
+    for (auto& g : PlayingSources()) {
+        g.Reset();
+    }
+    PlayingSources().clear();
+}
+
 void PumpAudioEvents(v8::Isolate* isolate)
 {
     auto& sources = PlayingSources();

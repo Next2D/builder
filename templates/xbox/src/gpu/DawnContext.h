@@ -59,6 +59,10 @@ private:
     HWND     hwnd_   = nullptr;
     uint32_t width_  = 0;
     uint32_t height_ = 0;
+
+    // surface が Configure 済みか。未構成のまま Present すると Dawn の
+    // 検証エラーが毎フレーム出るため、Present/GetCurrentTexture をゲートする。
+    bool     configured_ = false;
 };
 
 } // namespace next2d

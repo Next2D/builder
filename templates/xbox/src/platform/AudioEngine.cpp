@@ -41,6 +41,10 @@ AudioVoice::~AudioVoice()
 
 void AudioVoice::Start(bool loop)
 {
+    // 音声デバイスが無い環境 (CI 等) でも「再生開始→即終了」として扱えるよう、
+    // voice_ の有無に関わらず開始状態は記録する (IsFinished が ended 発火を導く)。
+    started_ = true;
+    looping_ = loop;
     if (!voice_) {
         return;
     }
@@ -51,8 +55,6 @@ void AudioVoice::Start(bool loop)
     buf.LoopCount = loop ? XAUDIO2_LOOP_INFINITE : 0;
     voice_->SubmitSourceBuffer(&buf);
     voice_->Start(0);
-    started_ = true;
-    looping_ = loop;
 }
 
 void AudioVoice::Stop()
@@ -66,8 +68,12 @@ void AudioVoice::Stop()
 
 bool AudioVoice::IsFinished() const
 {
-    if (!voice_ || !started_ || looping_) {
+    if (!started_ || looping_) {
         return false;
+    }
+    if (!voice_) {
+        // 実ボイスが無い (音声デバイス無し) 場合は開始と同時に終了扱い。
+        return true;
     }
     XAUDIO2_VOICE_STATE state = {};
     voice_->GetState(&state);

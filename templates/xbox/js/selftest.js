@@ -279,8 +279,10 @@
         });
 
         // ==================== WebGPU ====================
+        // GPU の無い環境 (CI ランナー等) では adapter が取れず skip になる (softTest)。
+        // 実機・GPU あり PC では全て実行される。
         let device = null;
-        await test("WebGPU: requestAdapter / requestDevice / limits", async () => {
+        await softTest("WebGPU: requestAdapter / requestDevice / limits", async () => {
             assert(navigator.gpu, "navigator.gpu");
             const format = navigator.gpu.getPreferredCanvasFormat();
             assert(typeof format === "string" && format.length > 0, "preferred format=" + format);
@@ -292,7 +294,7 @@
                 "maxTextureDimension2D=" + (device.limits && device.limits.maxTextureDimension2D));
         });
 
-        await test("WebGPU: writeBuffer -> copyBufferToBuffer -> mapAsync 読み戻し", async () => {
+        await softTest("WebGPU: writeBuffer -> copyBufferToBuffer -> mapAsync 読み戻し", async () => {
             assert(device, "needs device");
             const src = device.createBuffer({ "size": 16, "usage": GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
             const dst = device.createBuffer({ "size": 16, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -306,7 +308,7 @@
             assert(view[0] === 1 && view[3] === 4, "readback=" + Array.from(view).join(","));
         });
 
-        await test("WebGPU: copyExternalImageToTexture -> copyTextureToBuffer 読み戻し", async () => {
+        await softTest("WebGPU: copyExternalImageToTexture -> copyTextureToBuffer 読み戻し", async () => {
             assert(device && bitmap, "needs device+bitmap");
             const tex = device.createTexture({
                 "size": { "width": 2, "height": 2 },
@@ -328,7 +330,7 @@
             assert(px[4] === 0 && px[5] === 255, "(1,0) green");
         });
 
-        await test("WebGPU: dynamic offset 付き uniform で描画 (塗りの中核経路)", async () => {
+        await softTest("WebGPU: dynamic offset 付き uniform で描画 (塗りの中核経路)", async () => {
             assert(device, "needs device");
             const shader = device.createShaderModule({ "code": `
                 struct U { color: vec4f };
@@ -381,7 +383,7 @@
                 "dynamic offset 256 -> green, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
         });
 
-        await test("WebGPU: stencil8 パイプライン + setStencilReference (マスク経路)", async () => {
+        await softTest("WebGPU: stencil8 パイプライン + setStencilReference (マスク経路)", async () => {
             assert(device, "needs device");
             const shader = device.createShaderModule({ "code": `
                 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {

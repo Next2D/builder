@@ -63,6 +63,11 @@ private:
     // surface が Configure 済みか。未構成のまま Present すると Dawn の
     // 検証エラーが毎フレーム出るため、Present/GetCurrentTexture をゲートする。
     bool     configured_ = false;
+
+    // 今フレーム GetCurrentTexture が呼ばれたか。呼ばれていないフレームで
+    // Present すると Dawn の検証エラーになるため、Present をゲートする
+    // (アプリが描画しないフレームは提示しない)。
+    bool     frame_texture_acquired_ = false;
 };
 
 } // namespace next2d

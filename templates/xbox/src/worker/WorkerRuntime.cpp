@@ -39,6 +39,12 @@ public:
         isolate_->ThrowException(v8::Exception::Error(message));
     }
 
+    // すべてのオブジェクトで IsHostObject を照会させる。
+    // OffscreenCanvas は ObjectTemplate 由来ではない plain object のため、
+    // これが無いと V8 は IsHostObject を呼ばず、getContext 等の関数プロパティで
+    // 「could not be cloned」になる。
+    bool HasCustomHostObject(v8::Isolate*) override { return true; }
+
     // OffscreenCanvas をホストオブジェクトとして扱い WriteHostObject に回す。
     v8::Maybe<bool> IsHostObject(v8::Isolate*, v8::Local<v8::Object> object) override
     {

@@ -153,15 +153,18 @@ wgpu::Texture DawnContext::GetCurrentTexture()
     }
     wgpu::SurfaceTexture surface_texture = {};
     surface_.GetCurrentTexture(&surface_texture);
+    frame_texture_acquired_ = true;
     return surface_texture.texture;
 }
 
 void DawnContext::Present()
 {
-    // 未構成 (GPU 無し環境等) では no-op。毎フレームの検証エラーを避ける
-    if (surface_ && configured_) {
+    // 提示するのは「未構成でない」かつ「今フレーム GetCurrentTexture 済み」のときのみ。
+    // 取得なしで Present すると Dawn の検証エラーになる (描画しないフレームは提示しない)。
+    if (surface_ && configured_ && frame_texture_acquired_) {
         surface_.Present();
     }
+    frame_texture_acquired_ = false;
 }
 
 void DawnContext::Tick()

@@ -313,9 +313,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     }
 
     // 7. ゲームループ
-    v8::Isolate::Scope isolate_scope(runtime.isolate());
     MSG msg = {};
     int exit_code = 0;
+    // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
+    // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
+    {
+    v8::Isolate::Scope isolate_scope(runtime.isolate());
     while (g_running) {
         // Win32 メッセージ
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -370,6 +373,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
                 g_running = false;
             }
         }
+    }
+
     }
 
     // 8. 後始末 (v8::Global を持つ静的リストは V8 破棄前に必ず解放する)

@@ -216,6 +216,11 @@ void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, H
     InstallAudio(isolate, global, host);
     InstallWebGPU(isolate, global, host);   // navigator.gpu
     InstallGamepad(isolate, global, host);  // navigator.getGamepads
+
+    // TextEncoder/TextDecoder/queueMicrotask。bootstrap.js はメインコンテキスト
+    // でのみ実行されるため、worker を含む全コンテキストにはここで注入する
+    // (Vite バンドルの worker は評価時に TextDecoder を要求する)。
+    InstallPolyfills(isolate, isolate->GetCurrentContext());
 }
 
 } // namespace next2d

@@ -75,6 +75,10 @@ bool GetVideoFramePixels(v8::Isolate* isolate, v8::Local<v8::Object> obj,
 // blob: URL のバイト列をテキストとして取得する (Network.cpp)。
 bool ResolveObjectURL(const std::string& url, std::string* out_text);
 
+// TextEncoder/TextDecoder/queueMicrotask 等の JS ポリフィルを評価する (Polyfills.cpp)。
+// bootstrap.js はメインのみのため、worker を含む全コンテキストにはこちらで注入する。
+void InstallPolyfills(v8::Isolate* isolate, v8::Local<v8::Context> context);
+
 // 上記をまとめてインストールする
 void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host);
 

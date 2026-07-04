@@ -405,6 +405,15 @@ bool WorkerInstance::Start()
     if (!v8::Script::Compile(context, code, &origin).ToLocal(&script) ||
         script->Run(context).IsEmpty()) {
         std::cerr << "[Worker] script eval failed: " << ShortUrl(url_) << std::endl;
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value exception(isolate_, tc.Exception());
+            std::cerr << "[Worker]   exception: " << (*exception ? *exception : "?") << std::endl;
+            v8::Local<v8::Message> message = tc.Message();
+            if (!message.IsEmpty()) {
+                std::cerr << "[Worker]   at line "
+                          << message->GetLineNumber(context).FromMaybe(0) << std::endl;
+            }
+        }
         return false;
     }
     // NOTE: ここで PerformMicrotaskCheckpoint は呼ばない。Start は JS コールバック

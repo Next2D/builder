@@ -205,7 +205,9 @@ void WorkerSelfPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto* instance = static_cast<WorkerInstance*>(args.Data().As<v8::External>()->Value());
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
+    std::cerr << "[Worker] worker->main postMessage: serializing" << std::endl;
     auto bytes = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
+    std::cerr << "[Worker] worker->main postMessage: " << bytes.size() << " bytes" << std::endl;
     if (!bytes.empty()) {
         instance->PostToMain(std::move(bytes));
     }
@@ -238,7 +240,9 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto* instance = static_cast<WorkerInstance*>(args.Data().As<v8::External>()->Value());
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
+    std::cerr << "[Worker] main->worker postMessage: serializing" << std::endl;
     auto bytes = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
+    std::cerr << "[Worker] main->worker postMessage: " << bytes.size() << " bytes" << std::endl;
     if (!bytes.empty()) {
         instance->PostToWorker(std::move(bytes));
     }
@@ -310,7 +314,9 @@ bool WorkerInstance::Start()
         std::cerr << "[Worker] script eval failed: " << url_ << std::endl;
         return false;
     }
-    isolate_->PerformMicrotaskCheckpoint();
+    // NOTE: ここで PerformMicrotaskCheckpoint は呼ばない。Start は JS コールバック
+    // (new Worker) の最中に呼ばれるため、JS 実行中のチェックポイントは V8 の規約違反。
+    // マイクロタスクはメインループの PumpMicrotasks で処理される。
     std::cerr << "[Worker] script evaluated" << std::endl;
     return true;
 }
@@ -336,9 +342,12 @@ void WorkerInstance::DeliverToWorker(double now_ms)
     while (!to_worker_.empty()) {
         WorkerMessage m = std::move(to_worker_.front());
         to_worker_.pop_front();
+        std::cerr << "[Worker] deliver main->worker (" << m.data.size() << " bytes)" << std::endl;
         v8::Local<v8::Value> data;
         if (DeserializeMessage(isolate_, ctx, m.data).ToLocal(&data)) {
+            std::cerr << "[Worker] deserialized, dispatching to worker onmessage" << std::endl;
             DispatchMessage(isolate_, ctx, ctx->Global(), data);
+            std::cerr << "[Worker] worker onmessage done" << std::endl;
         }
     }
 
@@ -360,9 +369,12 @@ void WorkerInstance::DeliverToMain()
     while (!to_main_.empty()) {
         WorkerMessage m = std::move(to_main_.front());
         to_main_.pop_front();
+        std::cerr << "[Worker] deliver worker->main (" << m.data.size() << " bytes)" << std::endl;
         v8::Local<v8::Value> data;
         if (DeserializeMessage(isolate_, main_ctx, m.data).ToLocal(&data)) {
+            std::cerr << "[Worker] deserialized, dispatching to main onmessage" << std::endl;
             DispatchMessage(isolate_, main_ctx, worker_obj, data);
+            std::cerr << "[Worker] main onmessage done" << std::endl;
         }
     }
 }

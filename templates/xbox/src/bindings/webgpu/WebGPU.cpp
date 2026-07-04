@@ -63,15 +63,25 @@ static void Buffer_GetMappedRange(const v8::FunctionCallbackInfo<v8::Value>& arg
         : (buffer.GetSize() - offset);
 
     void* ptr = buffer.GetMappedRange(offset, static_cast<size_t>(size));
-    if (!ptr) {
+    if (ptr) {
+        // 書き込み可能マップ: マップ領域を指す非所有 ArrayBuffer (unmap まで有効)
+        std::unique_ptr<v8::BackingStore> store = v8::ArrayBuffer::NewBackingStore(
+            ptr, static_cast<size_t>(size),
+            [](void*, size_t, void*) {}, nullptr);
+        args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, std::move(store)));
+        return;
+    }
+
+    // MapMode::Read でマップされたバッファは非 const 版が nullptr を返す仕様。
+    // GetConstMappedRange から所有コピーを返す (読み戻し copyTextureToBuffer 等の経路)。
+    const void* cptr = buffer.GetConstMappedRange(offset, static_cast<size_t>(size));
+    if (!cptr) {
         args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, 0));
         return;
     }
-    // マップ領域を指す非所有 ArrayBuffer (unmap まで有効)
-    std::unique_ptr<v8::BackingStore> store = v8::ArrayBuffer::NewBackingStore(
-        ptr, static_cast<size_t>(size),
-        [](void*, size_t, void*) {}, nullptr);
-    args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, std::move(store)));
+    v8::Local<v8::ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, static_cast<size_t>(size));
+    memcpy(ab->GetBackingStore()->Data(), cptr, static_cast<size_t>(size));
+    args.GetReturnValue().Set(ab);
 }
 
 static void Buffer_Unmap(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -1234,6 +1244,13 @@ static void SetFlag(v8::Isolate* isolate, v8::Local<v8::Object> obj, const char*
 } // namespace webgpu
 
 // Bindings.h から呼ばれる公開関数
+// V8 破棄前に呼ぶ。テンプレートの v8::Global (static map) を解放する。
+// (放置すると static デストラクタが V8 破棄後に走りアクセス違反になる)
+void ShutdownWebGPU()
+{
+    webgpu::g_templates.clear();
+}
+
 void InstallWebGPU(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host)
 {
     using namespace next2d::webgpu;

@@ -44,6 +44,9 @@ void PumpAudioEvents(v8::Isolate* isolate);
 // V8 破棄前に呼ぶ。音声の再生追跡リスト (v8::Global) を解放する。
 void ShutdownAudioEvents();
 
+// V8 破棄前に呼ぶ。WebGPU テンプレートの v8::Global (static) を解放する。
+void ShutdownWebGPU();
+
 // window / document / navigator / screen 等の DOM 相当スタブと canvas 生成
 void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host);
 

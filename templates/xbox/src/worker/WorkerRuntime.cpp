@@ -22,6 +22,77 @@ using v8util::ToStdString;
 // ===========================================================================
 namespace {
 
+// ログ用: data:/blob: URL は長大になるため先頭だけに切り詰める
+std::string ShortUrl(const std::string& url)
+{
+    if (url.size() <= 64) {
+        return url;
+    }
+    return url.substr(0, 64) + "... (" + std::to_string(url.size()) + " chars)";
+}
+
+// base64 デコード (data: URL 用)。不正文字があれば false。
+bool DecodeBase64(const std::string& in, std::string* out)
+{
+    auto val6 = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    out->clear();
+    out->reserve(in.size() * 3 / 4);
+    int val = 0;
+    int bits = -8;
+    for (unsigned char c : in) {
+        if (c == '=') {
+            break;
+        }
+        if (c == '\r' || c == '\n' || c == ' ') {
+            continue;
+        }
+        const int d = val6(c);
+        if (d < 0) {
+            return false;
+        }
+        val = (val << 6) | d;
+        bits += 6;
+        if (bits >= 0) {
+            out->push_back(static_cast<char>((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return true;
+}
+
+// %xx パーセントデコード (非 base64 の data: URL 用)
+std::string PercentDecode(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            const auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(s[i + 1]);
+            const int lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
 bool IsOffscreen(v8::Isolate* isolate, v8::Local<v8::Object> obj)
 {
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
@@ -258,7 +329,7 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 bool WorkerInstance::Start()
 {
-    std::cerr << "[Worker] start: " << url_ << std::endl;
+    std::cerr << "[Worker] start: " << ShortUrl(url_) << std::endl;
     v8::HandleScope handle_scope(isolate_);
 
     v8::Local<v8::Context> context = v8::Context::New(isolate_);
@@ -293,19 +364,35 @@ bool WorkerInstance::Start()
     runtime_->InstallOnGlobal(global);
 
     // ワーカースクリプトを読み込んで評価 (クラシック。ESM worker は «EXTEND»)。
-    // Vite の `?worker&inline` は blob: URL(= URL.createObjectURL(new Blob([code]))) を渡すため、
-    // まず object URL レジストリ、次に assets を参照する。
+    // Vite の `?worker&inline` は data:application/javascript;base64,... を渡す
+    // (バージョンによっては blob: URL)。data: / blob: / assets の順で解決する。
     HostContext* host = HostContext::From(isolate_);
     std::string source;
-    if (url_.rfind("blob:", 0) == 0) {
+    if (url_.rfind("data:", 0) == 0) {
+        const auto comma = url_.find(',');
+        if (comma == std::string::npos) {
+            std::cerr << "[Worker] malformed data url: " << ShortUrl(url_) << std::endl;
+            return false;
+        }
+        const std::string meta = url_.substr(5, comma - 5);   // 例: application/javascript;base64
+        const std::string payload = url_.substr(comma + 1);
+        if (meta.find(";base64") != std::string::npos) {
+            if (!DecodeBase64(payload, &source)) {
+                std::cerr << "[Worker] base64 decode failed: " << ShortUrl(url_) << std::endl;
+                return false;
+            }
+        } else {
+            source = PercentDecode(payload);
+        }
+    } else if (url_.rfind("blob:", 0) == 0) {
         if (!ResolveObjectURL(url_, &source)) {
-            std::cerr << "[Worker] blob url not found: " << url_ << std::endl;
+            std::cerr << "[Worker] blob url not found: " << ShortUrl(url_) << std::endl;
             return false;
         }
     } else {
         auto src = host->assets->ReadText(url_);
         if (!src) {
-            std::cerr << "[Worker] script not found: " << url_ << std::endl;
+            std::cerr << "[Worker] script not found: " << ShortUrl(url_) << std::endl;
             return false;
         }
         source = std::move(*src);
@@ -317,7 +404,7 @@ bool WorkerInstance::Start()
     v8::Local<v8::Script> script;
     if (!v8::Script::Compile(context, code, &origin).ToLocal(&script) ||
         script->Run(context).IsEmpty()) {
-        std::cerr << "[Worker] script eval failed: " << url_ << std::endl;
+        std::cerr << "[Worker] script eval failed: " << ShortUrl(url_) << std::endl;
         return false;
     }
     // NOTE: ここで PerformMicrotaskCheckpoint は呼ばない。Start は JS コールバック

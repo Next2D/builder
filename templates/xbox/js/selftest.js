@@ -15,7 +15,7 @@
  */
 (function () {
 
-    const results = { pass: 0, fail: 0, skip: 0 };
+    const results = { "pass": 0, "fail": 0, "skip": 0 };
     const failures = [];
 
     function tap(status, name, detail) {
@@ -27,16 +27,16 @@
         console.log("[selftest] " + line);
     }
 
-    function pass(name) { results.pass++; tap("ok", name); }
+    function pass(name) { results.pass++; tap("ok", name) }
     function fail(name, e) {
         results.fail++;
         const msg = e && e.message ? e.message : String(e);
         failures.push(name + ": " + msg);
         tap("fail", name, msg);
     }
-    function skip(name, why) { results.skip++; tap("skip", name, why); }
+    function skip(name, why) { results.skip++; tap("skip", name, why) }
 
-    function assert(cond, msg) { if (!cond) throw new Error(msg || "assertion failed"); }
+    function assert(cond, msg) { if (!cond) { throw new Error(msg || "assertion failed") } }
 
     function withTimeout(promise, ms, what) {
         return Promise.race([
@@ -109,18 +109,18 @@
             const order = [];
             await new Promise((resolve) => {
                 setTimeout(() => order.push("t10"), 10);
-                setTimeout(() => { order.push("t30"); resolve(); }, 30);
+                setTimeout(() => { order.push("t30"); resolve() }, 30);
                 Promise.resolve().then(() => order.push("micro"));
                 order.push("sync");
             });
             assert(order[0] === "sync" && order[1] === "micro",
-                   "microtask order: " + order.join(","));
+                "microtask order: " + order.join(","));
             assert(order.indexOf("t10") < order.indexOf("t30"), "timer order");
 
             let ticks = 0;
             await new Promise((resolve) => {
                 const id = setInterval(() => {
-                    if (++ticks >= 2) { clearInterval(id); resolve(); }
+                    if (++ticks >= 2) { clearInterval(id); resolve() }
                 }, 5);
             });
             assert(ticks === 2, "interval stopped after clearInterval");
@@ -135,13 +135,13 @@
 
         await test("EventTarget: addEventListener / dispatchEvent", () => {
             let got = null;
-            const handler = (e) => { got = e; };
+            const handler = (e) => { got = e };
             window.addEventListener("selftest-event", handler);
-            window.dispatchEvent({ type: "selftest-event", value: 42 });
+            window.dispatchEvent({ "type": "selftest-event", "value": 42 });
             assert(got && got.value === 42, "listener called");
             window.removeEventListener("selftest-event", handler);
             got = null;
-            window.dispatchEvent({ type: "selftest-event" });
+            window.dispatchEvent({ "type": "selftest-event" });
             assert(got === null, "listener removed");
         });
 
@@ -150,7 +150,7 @@
         await test("createImageBitmap: PNG デコード (WIC)", async () => {
             bitmap = await createImageBitmap(TEST_PNG.buffer);
             assert(bitmap.width === 2 && bitmap.height === 2,
-                   "2x2 png -> " + bitmap.width + "x" + bitmap.height);
+                "2x2 png -> " + bitmap.width + "x" + bitmap.height);
         });
 
         // ==================== Canvas2D ====================
@@ -207,7 +207,7 @@
             ctx.fillText("A", 4, 24);
             const d = ctx.getImageData(0, 0, 64, 32).data;
             let opaque = 0;
-            for (let i = 3; i < d.length; i += 4) if (d[i] > 128) opaque++;
+            for (let i = 3; i < d.length; i += 4) { if (d[i] > 128) { opaque++ } }
             assert(opaque > 5, "glyph pixels=" + opaque);
         });
 
@@ -224,10 +224,10 @@
         // ==================== ネットワーク (Blob / URL / XHR) ====================
         let blobUrl = null;
         await test("Blob / URL.createObjectURL / revokeObjectURL", () => {
-            const blob = new Blob(["self.__marker = 1;"], { type: "text/javascript" });
+            const blob = new Blob(["self.__marker = 1;"], { "type": "text/javascript" });
             blobUrl = URL.createObjectURL(blob);
             assert(typeof blobUrl === "string" && blobUrl.indexOf("blob:") === 0,
-                   "url=" + blobUrl);
+                "url=" + blobUrl);
         });
 
         await softTest("XMLHttpRequest: アセット読込 (assets/app)", async () => {
@@ -245,17 +245,17 @@
             const src = "self.onmessage = function(e) { " +
                         "  self.postMessage({ echo: e.data.value * 2, arr: e.data.arr }); " +
                         "};";
-            const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+            const url = URL.createObjectURL(new Blob([src], { "type": "text/javascript" }));
             const worker = new Worker(url);
             const reply = await new Promise((resolve, reject) => {
                 worker.onmessage = (e) => resolve(e.data);
                 worker.onerror = (e) => reject(new Error("worker error: " + (e && e.message)));
-                worker.postMessage({ value: 21, arr: new Float32Array([1.5, 2.5]) });
+                worker.postMessage({ "value": 21, "arr": new Float32Array([1.5, 2.5]) });
             });
             assert(reply.echo === 42, "echo=" + reply.echo);
             assert(reply.arr instanceof Float32Array && reply.arr[1] === 2.5,
-                   "structured clone TypedArray");
-            if (worker.terminate) worker.terminate();
+                "structured clone TypedArray");
+            if (worker.terminate) { worker.terminate() }
         });
 
         await test("OffscreenCanvas: transferControlToOffscreen + Worker 転送", async () => {
@@ -267,15 +267,15 @@
                         "  var c = e.data.canvas; " +
                         "  self.postMessage({ w: c ? c.width : -1 }); " +
                         "};";
-            const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+            const url = URL.createObjectURL(new Blob([src], { "type": "text/javascript" }));
             const worker = new Worker(url);
             const reply = await new Promise((resolve, reject) => {
                 worker.onmessage = (e) => resolve(e.data);
-                worker.onerror = (e) => reject(new Error("worker error"));
-                worker.postMessage({ canvas: off }, [off]);
+                worker.onerror = (_e) => reject(new Error("worker error"));
+                worker.postMessage({ "canvas": off }, [off]);
             });
             assert(reply.w === 8, "transferred canvas width=" + reply.w);
-            if (worker.terminate) worker.terminate();
+            if (worker.terminate) { worker.terminate() }
         });
 
         // ==================== WebGPU ====================
@@ -289,13 +289,13 @@
             device = await adapter.requestDevice();
             assert(device, "device");
             assert(device.limits && device.limits.maxTextureDimension2D >= 4096,
-                   "maxTextureDimension2D=" + (device.limits && device.limits.maxTextureDimension2D));
+                "maxTextureDimension2D=" + (device.limits && device.limits.maxTextureDimension2D));
         });
 
         await test("WebGPU: writeBuffer -> copyBufferToBuffer -> mapAsync 読み戻し", async () => {
             assert(device, "needs device");
-            const src = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-            const dst = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const src = device.createBuffer({ "size": 16, "usage": GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+            const dst = device.createBuffer({ "size": 16, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
             device.queue.writeBuffer(src, 0, new Uint32Array([1, 2, 3, 4]));
             const enc = device.createCommandEncoder();
             enc.copyBufferToBuffer(src, 0, dst, 0, 16);
@@ -309,17 +309,17 @@
         await test("WebGPU: copyExternalImageToTexture -> copyTextureToBuffer 読み戻し", async () => {
             assert(device && bitmap, "needs device+bitmap");
             const tex = device.createTexture({
-                size: { width: 2, height: 2 },
-                format: "rgba8unorm",
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT
+                "size": { "width": 2, "height": 2 },
+                "format": "rgba8unorm",
+                "usage": GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT
             });
             device.queue.copyExternalImageToTexture(
-                { source: bitmap }, { texture: tex }, { width: 2, height: 2 });
+                { "source": bitmap }, { "texture": tex }, { "width": 2, "height": 2 });
             // bytesPerRow は 256 アライン必須
-            const buf = device.createBuffer({ size: 256 * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const buf = device.createBuffer({ "size": 256 * 2, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
             const enc = device.createCommandEncoder();
             enc.copyTextureToBuffer(
-                { texture: tex }, { buffer: buf, bytesPerRow: 256 }, { width: 2, height: 2 });
+                { "texture": tex }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 2, "height": 2 });
             device.queue.submit([enc.finish()]);
             await buf.mapAsync(GPUMapMode.READ);
             const px = new Uint8Array(buf.getMappedRange().slice(0));
@@ -330,7 +330,7 @@
 
         await test("WebGPU: dynamic offset 付き uniform で描画 (塗りの中核経路)", async () => {
             assert(device, "needs device");
-            const shader = device.createShaderModule({ code: `
+            const shader = device.createShaderModule({ "code": `
                 struct U { color: vec4f };
                 @group(0) @binding(0) var<uniform> u: U;
                 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -339,96 +339,96 @@
                 }
                 @fragment fn fs() -> @location(0) vec4f { return u.color; }
             ` });
-            const bgl = device.createBindGroupLayout({ entries: [{
-                binding: 0, visibility: GPUShaderStage.FRAGMENT,
-                buffer: { type: "uniform", hasDynamicOffset: true }
+            const bgl = device.createBindGroupLayout({ "entries": [{
+                "binding": 0, "visibility": GPUShaderStage.FRAGMENT,
+                "buffer": { "type": "uniform", "hasDynamicOffset": true }
             }] });
             const pipeline = device.createRenderPipeline({
-                layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
-                vertex: { module: shader, entryPoint: "vs" },
-                fragment: { module: shader, entryPoint: "fs",
-                            targets: [{ format: "rgba8unorm" }] },
-                primitive: { topology: "triangle-list" }
+                "layout": device.createPipelineLayout({ "bindGroupLayouts": [bgl] }),
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs",
+                    "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" }
             });
             // offset 0 = 赤 / offset 256 = 緑。dynamic offset 256 で緑が描かれるべき。
-            const ubo = device.createBuffer({ size: 512, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const ubo = device.createBuffer({ "size": 512, "usage": GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
             device.queue.writeBuffer(ubo, 0, new Float32Array([1, 0, 0, 1]));
             device.queue.writeBuffer(ubo, 256, new Float32Array([0, 1, 0, 1]));
-            const bindGroup = device.createBindGroup({ layout: bgl, entries: [{
-                binding: 0, resource: { buffer: ubo, offset: 0, size: 16 }
+            const bindGroup = device.createBindGroup({ "layout": bgl, "entries": [{
+                "binding": 0, "resource": { "buffer": ubo, "offset": 0, "size": 16 }
             }] });
             const target = device.createTexture({
-                size: { width: 4, height: 4 }, format: "rgba8unorm",
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+                "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
             });
             const enc = device.createCommandEncoder();
-            const pass = enc.beginRenderPass({ colorAttachments: [{
-                view: target.createView(), loadOp: "clear", storeOp: "store",
-                clearValue: [0, 0, 0, 0]
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": target.createView(), "loadOp": "clear", "storeOp": "store",
+                "clearValue": [0, 0, 0, 0]
             }] });
             pass.setPipeline(pipeline);
             pass.setBindGroup(0, bindGroup, [256]);   // ← dynamic offset
             pass.draw(3);
             pass.end();
-            const buf = device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const buf = device.createBuffer({ "size": 256 * 4, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
             const enc2 = device.createCommandEncoder();
-            enc2.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: 256 }, { width: 4, height: 4 });
+            enc2.copyTextureToBuffer({ "texture": target }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 4, "height": 4 });
             device.queue.submit([enc.finish(), enc2.finish()]);
             await buf.mapAsync(GPUMapMode.READ);
             const px = new Uint8Array(buf.getMappedRange().slice(0));
             buf.unmap();
             assert(px[1] === 255 && px[0] === 0,
-                   "dynamic offset 256 -> green, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
+                "dynamic offset 256 -> green, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
         });
 
         await test("WebGPU: stencil8 パイプライン + setStencilReference (マスク経路)", async () => {
             assert(device, "needs device");
-            const shader = device.createShaderModule({ code: `
+            const shader = device.createShaderModule({ "code": `
                 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
                     var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
                     return vec4f(p[i], 0, 1);
                 }
                 @fragment fn fs() -> @location(0) vec4f { return vec4f(0, 0, 1, 1); }
             ` });
-            const layout = device.createPipelineLayout({ bindGroupLayouts: [] });
+            const layout = device.createPipelineLayout({ "bindGroupLayouts": [] });
             // 1st: ステンシルへ replace 書き込み (色は書かない設定でも良いが簡略化)
             const writePipe = device.createRenderPipeline({
-                layout, vertex: { module: shader, entryPoint: "vs" },
-                fragment: { module: shader, entryPoint: "fs", targets: [{ format: "rgba8unorm" }] },
-                primitive: { topology: "triangle-list" },
-                depthStencil: {
-                    format: "stencil8",
-                    stencilFront: { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
-                    stencilBack:  { compare: "always", failOp: "keep", depthFailOp: "keep", passOp: "replace" },
-                    stencilReadMask: 0xff, stencilWriteMask: 0xff
+                layout, "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" },
+                "depthStencil": {
+                    "format": "stencil8",
+                    "stencilFront": { "compare": "always", "failOp": "keep", "depthFailOp": "keep", "passOp": "replace" },
+                    "stencilBack":  { "compare": "always", "failOp": "keep", "depthFailOp": "keep", "passOp": "replace" },
+                    "stencilReadMask": 0xff, "stencilWriteMask": 0xff
                 }
             });
             // 2nd: equal 比較で描画 (マスク内のみ)
             const testPipe = device.createRenderPipeline({
-                layout, vertex: { module: shader, entryPoint: "vs" },
-                fragment: { module: shader, entryPoint: "fs", targets: [{ format: "rgba8unorm" }] },
-                primitive: { topology: "triangle-list" },
-                depthStencil: {
-                    format: "stencil8",
-                    stencilFront: { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
-                    stencilBack:  { compare: "equal", failOp: "keep", depthFailOp: "keep", passOp: "keep" },
-                    stencilReadMask: 0xff, stencilWriteMask: 0x00
+                layout, "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" },
+                "depthStencil": {
+                    "format": "stencil8",
+                    "stencilFront": { "compare": "equal", "failOp": "keep", "depthFailOp": "keep", "passOp": "keep" },
+                    "stencilBack":  { "compare": "equal", "failOp": "keep", "depthFailOp": "keep", "passOp": "keep" },
+                    "stencilReadMask": 0xff, "stencilWriteMask": 0x00
                 }
             });
             const color = device.createTexture({
-                size: { width: 4, height: 4 }, format: "rgba8unorm",
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+                "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
             });
             const stencil = device.createTexture({
-                size: { width: 4, height: 4 }, format: "stencil8",
-                usage: GPUTextureUsage.RENDER_ATTACHMENT
+                "size": { "width": 4, "height": 4 }, "format": "stencil8",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT
             });
             const enc = device.createCommandEncoder();
             const p1 = enc.beginRenderPass({
-                colorAttachments: [{ view: color.createView(), loadOp: "clear", storeOp: "store", clearValue: [0,0,0,0] }],
-                depthStencilAttachment: {
-                    view: stencil.createView(),
-                    stencilLoadOp: "clear", stencilStoreOp: "store", stencilClearValue: 0
+                "colorAttachments": [{ "view": color.createView(), "loadOp": "clear", "storeOp": "store", "clearValue": [0,0,0,0] }],
+                "depthStencilAttachment": {
+                    "view": stencil.createView(),
+                    "stencilLoadOp": "clear", "stencilStoreOp": "store", "stencilClearValue": 0
                 }
             });
             p1.setPipeline(writePipe);
@@ -436,18 +436,18 @@
             p1.draw(3);
             p1.end();
             const p2 = enc.beginRenderPass({
-                colorAttachments: [{ view: color.createView(), loadOp: "load", storeOp: "store" }],
-                depthStencilAttachment: {
-                    view: stencil.createView(),
-                    stencilLoadOp: "load", stencilStoreOp: "store"
+                "colorAttachments": [{ "view": color.createView(), "loadOp": "load", "storeOp": "store" }],
+                "depthStencilAttachment": {
+                    "view": stencil.createView(),
+                    "stencilLoadOp": "load", "stencilStoreOp": "store"
                 }
             });
             p2.setPipeline(testPipe);
             p2.setStencilReference(1);   // ref==stencil(1) -> 描画される
             p2.draw(3);
             p2.end();
-            const buf = device.createBuffer({ size: 256 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-            enc.copyTextureToBuffer({ texture: color }, { buffer: buf, bytesPerRow: 256 }, { width: 4, height: 4 });
+            const buf = device.createBuffer({ "size": 256 * 4, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyTextureToBuffer({ "texture": color }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 4, "height": 4 });
             device.queue.submit([enc.finish()]);
             await buf.mapAsync(GPUMapMode.READ);
             const px = new Uint8Array(buf.getMappedRange().slice(0));
@@ -481,8 +481,8 @@
         // ==================== 入力 / その他 ====================
         await test("Gamepad: navigator.getGamepads()", () => {
             const pads = navigator.getGamepads();
-            assert(Array.isArray(pads) || (pads && typeof pads.length === "number"),
-                   "returns array-like");
+            assert(Array.isArray(pads) || pads && typeof pads.length === "number",
+                "returns array-like");
         });
 
         await softTest("clipboard: writeText / readText 往復", async () => {

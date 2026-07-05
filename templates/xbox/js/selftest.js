@@ -175,6 +175,20 @@
             assert(document.getElementById("selftest-main") === null, "removed from tree");
         });
 
+        await test("DOM: history / location (framework gotoView パス)", () => {
+            // framework の gotoView は SPA 設定時に history.pushState を呼ぶ
+            assert(typeof history === "object" && typeof history.pushState === "function",
+                "history.pushState");
+            const beforePath = location.pathname;
+            history.pushState("", "", location.origin + "/selftest-view?q=1");
+            assert(location.pathname === "/selftest-view", "pushState -> location.pathname");
+            assert(location.search === "?q=1", "pushState -> location.search");
+            history.replaceState("", "", beforePath);
+            assert(location.pathname === beforePath, "replaceState で復元");
+            assert(typeof location.origin === "string" && location.origin.length > 0,
+                "location.origin");
+        });
+
         await test("DOM: 未処理 Promise 拒否が握り潰されない (レポータ設置済み)", async () => {
             // SetPromiseRejectCallback の存在自体は JS から観測できないため、
             // 拒否→後付けハンドラの一連が例外なく動くことのみ確認する

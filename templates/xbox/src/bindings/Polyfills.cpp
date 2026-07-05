@@ -83,6 +83,56 @@ const char kPolyfills2[] = R"JS(
             reload() { /* no-op */ }
         };
     }
+
+    // history (framework の gotoView が SPA 設定時に history.pushState を呼ぶ)。
+    // pushState/replaceState は location の pathname/search/hash にも反映する
+    if (typeof global.history === "undefined") {
+        const applyUrl = (url) => {
+            if (typeof url !== "string" || url === "") {
+                return;
+            }
+            let rest = url;
+            const origin = global.location.origin;
+            if (rest.indexOf(origin) === 0) {
+                rest = rest.slice(origin.length);
+            }
+            if (rest === "" || rest[0] !== "/") {
+                rest = "/" + rest;
+            }
+            let hash = "";
+            const hi = rest.indexOf("#");
+            if (hi >= 0) {
+                hash = rest.slice(hi);
+                rest = rest.slice(0, hi);
+            }
+            let search = "";
+            const qi = rest.indexOf("?");
+            if (qi >= 0) {
+                search = rest.slice(qi);
+                rest = rest.slice(0, qi);
+            }
+            global.location.pathname = rest;
+            global.location.search = search;
+            global.location.hash = hash;
+            global.location.href = origin + rest + search + hash;
+        };
+        global.history = {
+            "state": null,
+            "length": 1,
+            pushState(state, _title, url) {
+                this.state = state;
+                this.length++;
+                applyUrl(url);
+            },
+            replaceState(state, _title, url) {
+                this.state = state;
+                applyUrl(url);
+            },
+            back() { /* no-op */ },
+            forward() { /* no-op */ },
+            go() { /* no-op */ }
+        };
+    }
 })(globalThis);
 )JS";
 

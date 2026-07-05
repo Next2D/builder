@@ -41,6 +41,7 @@ FILES=(
     src/bindings/Console.cpp
     src/bindings/Timers.cpp
     src/bindings/EventTarget.cpp
+    src/bindings/Polyfills.cpp
     src/bindings/Network.cpp
     src/bindings/Fetch.cpp
     src/bindings/Canvas.cpp

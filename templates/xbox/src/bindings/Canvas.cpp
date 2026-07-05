@@ -135,6 +135,9 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
                                           int width, int height)
 {
     v8::Local<v8::Object> canvas = v8::Object::New(isolate);
+    // player の canvasSetPositionService は children[0].localName === "canvas" を確認する
+    SetValue(isolate, canvas, "tagName", Str(isolate, "CANVAS"));
+    SetValue(isolate, canvas, "localName", Str(isolate, "canvas"));
     SetValue(isolate, canvas, "width",
              v8::Integer::New(isolate, width ? width : host->viewport_width));
     SetValue(isolate, canvas, "height",

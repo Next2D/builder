@@ -145,6 +145,46 @@
             assert(got === null, "listener removed");
         });
 
+        await test("DOM: player boot パス (body/parentElement/getElementById)", () => {
+            // @next2d/player の起動シーケンスが要求する DOM API を検証する
+            const div = document.createElement("div");
+            div.id = "selftest-main";
+            div.tabIndex = -1;
+            document.body.appendChild(div);
+            assert(div.parentElement === document.body, "parentElement === body");
+            assert(div.parentElement.tagName === "BODY", "body.tagName === BODY");
+            div.setAttribute("style", "display:flex;width:640px;height:480px;");
+            assert(div.clientWidth === 640 && div.clientHeight === 480,
+                "clientWidth/Height from style attr");
+            div.innerHTML = "<style></style><div id=\"loading\"></div>";
+            while (div.firstChild) { div.removeChild(div.firstChild) }
+
+            const canvas = document.createElement("canvas");
+            div.appendChild(canvas);
+            assert(div.children[0] === canvas, "children[0] === canvas");
+            assert(canvas.localName === "canvas", "canvas.localName");
+            assert(canvas.parentElement === div, "canvas.parentElement");
+
+            assert(document.getElementById("selftest-main") === div, "getElementById");
+            assert(typeof Event === "function", "Event constructor");
+            let fired = false;
+            div.addEventListener("selftest-dom", () => { fired = true });
+            div.dispatchEvent(new Event("selftest-dom"));
+            assert(fired, "element dispatchEvent");
+            div.remove();
+            assert(document.getElementById("selftest-main") === null, "removed from tree");
+        });
+
+        await test("DOM: 未処理 Promise 拒否が握り潰されない (レポータ設置済み)", async () => {
+            // SetPromiseRejectCallback の存在自体は JS から観測できないため、
+            // 拒否→後付けハンドラの一連が例外なく動くことのみ確認する
+            const p = Promise.reject(new Error("selftest-rejection (expected log)"));
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            let caught = false;
+            await p.catch(() => { caught = true });
+            assert(caught, "late handler attached");
+        });
+
         // ==================== 画像 ====================
         let bitmap = null;
         await test("createImageBitmap: PNG デコード (WIC)", async () => {

@@ -86,6 +86,35 @@ bool V8Runtime::Initialize(HostContext* host)
     // 例外時に未処理を潰さないよう、明示的に MicrotasksPolicy を制御する
     isolate_->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
 
+    // 未処理の Promise 拒否を stderr へ報告する。framework の boot は async のため、
+    // この報告が無いと例外がどこにも出ずゲームが無音で停止する (実際に発生した)。
+    isolate_->SetPromiseRejectCallback([](v8::PromiseRejectMessage message) {
+        if (message.GetEvent() != v8::kPromiseRejectWithNoHandler) {
+            return;   // 後からハンドラが付く分などは報告しない
+        }
+        v8::Isolate* isolate = v8::Isolate::GetCurrent();
+        v8::HandleScope hs(isolate);
+        v8::Local<v8::Value> value = message.GetValue();
+        std::string text = "(no value)";
+        std::string stack;
+        if (!value.IsEmpty()) {
+            text = v8util::ToStdString(isolate, value);
+            v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+            if (!ctx.IsEmpty() && value->IsObject()) {
+                v8::Local<v8::Value> s;
+                if (value.As<v8::Object>()
+                        ->Get(ctx, v8util::Str(isolate, "stack")).ToLocal(&s) &&
+                    s->IsString()) {
+                    stack = v8util::ToStdString(isolate, s);
+                }
+            }
+        }
+        std::cerr << "[V8] Unhandled promise rejection: " << text << std::endl;
+        if (!stack.empty() && stack != text) {
+            std::cerr << stack << std::endl;
+        }
+    });
+
     v8::Isolate::Scope isolate_scope(isolate_);
     v8::HandleScope handle_scope(isolate_);
 

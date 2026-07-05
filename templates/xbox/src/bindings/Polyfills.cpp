@@ -456,12 +456,271 @@ const char kPolyfills5[] = R"JS(
 })(globalThis);
 )JS";
 
+// section 6: DOM 要素ツリー (parentElement / children / getElementById / Event)。
+// player の boot は document.body.appendChild(div) 後に div.parentElement.tagName を
+// 参照し、無いと throw する (async 起動フロー内のため無報告で停止していた)。
+// canvas/video はネイティブ実装 (C++) をそのまま使い、他タグを JS で本格化する。
+const char kPolyfills6[] = R"JS(
+(function (global) {
+    "use strict";
+    var doc = global.document;
+    if (!doc || doc.__domUpgraded) {
+        return;
+    }
+    doc.__domUpgraded = true;
+
+    if (typeof global.Event !== "function") {
+        var Ev = function (type, init) {
+            init = init || {};
+            this.type = String(type);
+            this.bubbles = !!init.bubbles;
+            this.cancelable = !!init.cancelable;
+            this.defaultPrevented = false;
+            this.target = null;
+            this.currentTarget = null;
+        };
+        Ev.prototype.preventDefault = function () {
+            if (this.cancelable) { this.defaultPrevented = true; }
+        };
+        Ev.prototype.stopPropagation = function () {};
+        Ev.prototype.stopImmediatePropagation = function () {};
+        global.Event = Ev;
+    }
+    if (typeof global.CustomEvent !== "function") {
+        global.CustomEvent = function (type, init) {
+            var e = new global.Event(type, init);
+            e.detail = init && init.detail !== undefined ? init.detail : null;
+            return e;
+        };
+    }
+
+    function styleSize(el, key) {
+        var v = el.style && el.style[key];
+        var n = parseFloat(v);
+        if (isFinite(n) && n > 0) { return n; }
+        var attrs = el.__attrs;
+        if (attrs && typeof attrs.style === "string") {
+            var m = attrs.style.match(
+                new RegExp("(?:^|;)\\s*" + key + "\\s*:\\s*([0-9.]+)px")
+            );
+            if (m) { return parseFloat(m[1]); }
+        }
+        if (el.tagName === "BODY" || el.tagName === "HTML") {
+            return key === "width" ? global.innerWidth : global.innerHeight;
+        }
+        return 0;
+    }
+
+    // el を DOM 要素相当へ拡張する。addEventListener はネイティブ実装
+    // (__listeners: ホストの入力配送先) が既にある場合は温存する。
+    function upgrade(el, tag) {
+        tag = String(tag || "div").toLowerCase();
+        el.tagName = tag.toUpperCase();
+        el.localName = tag;
+        if (el.id === undefined) { el.id = ""; }
+        if (!el.style) { el.style = {}; }
+        if (!el.__attrs) { el.__attrs = {}; }
+        el.children = [];
+        el.childNodes = el.children;
+        el.parentElement = null;
+        el.parentNode = null;
+        el.dataset = {};
+
+        Object.defineProperty(el, "firstChild", {
+            get: function () { return this.children.length ? this.children[0] : null; },
+            configurable: true
+        });
+        Object.defineProperty(el, "lastChild", {
+            get: function () {
+                var c = this.children;
+                return c.length ? c[c.length - 1] : null;
+            },
+            configurable: true
+        });
+        Object.defineProperty(el, "clientWidth", {
+            get: function () { return styleSize(this, "width"); },
+            configurable: true
+        });
+        Object.defineProperty(el, "clientHeight", {
+            get: function () { return styleSize(this, "height"); },
+            configurable: true
+        });
+
+        var html = "";
+        Object.defineProperty(el, "innerHTML", {
+            get: function () { return html; },
+            set: function (v) { html = String(v); this.children.length = 0; },
+            configurable: true
+        });
+
+        el.appendChild = function (child) {
+            if (child.parentElement && child.parentElement.children) {
+                var cs = child.parentElement.children;
+                var i = cs.indexOf(child);
+                if (i >= 0) { cs.splice(i, 1); }
+            }
+            this.children.push(child);
+            child.parentElement = this;
+            child.parentNode = this;
+            return child;
+        };
+        el.removeChild = function (child) {
+            var i = this.children.indexOf(child);
+            if (i >= 0) { this.children.splice(i, 1); }
+            child.parentElement = null;
+            child.parentNode = null;
+            return child;
+        };
+        el.insertBefore = function (child, ref) {
+            var i = ref ? this.children.indexOf(ref) : -1;
+            if (i < 0) { return this.appendChild(child); }
+            this.children.splice(i, 0, child);
+            child.parentElement = this;
+            child.parentNode = this;
+            return child;
+        };
+        el.contains = function (node) {
+            if (node === this) { return true; }
+            for (var i = 0; i < this.children.length; i++) {
+                var c = this.children[i];
+                if (c === node || (c.contains && c.contains(node))) { return true; }
+            }
+            return false;
+        };
+        el.remove = function () {
+            if (this.parentElement) { this.parentElement.removeChild(this); }
+        };
+        el.setAttribute = function (name, value) {
+            this.__attrs[name] = String(value);
+            if (name === "id") { this.id = String(value); }
+        };
+        el.getAttribute = function (name) {
+            return this.__attrs[name] !== undefined ? this.__attrs[name] : null;
+        };
+        el.removeAttribute = function (name) { delete this.__attrs[name]; };
+        el.getBoundingClientRect = function () {
+            var w = this.clientWidth;
+            var h = this.clientHeight;
+            return { x: 0, y: 0, top: 0, left: 0, right: w, bottom: h, width: w, height: h };
+        };
+        el.focus = function () {};
+        el.blur = function () {};
+
+        if (typeof el.addEventListener !== "function") {
+            var listeners = {};
+            el.addEventListener = function (type, fn) {
+                (listeners[type] || (listeners[type] = [])).push(fn);
+            };
+            el.removeEventListener = function (type, fn) {
+                var a = listeners[type];
+                if (!a) { return; }
+                var i = a.indexOf(fn);
+                if (i >= 0) { a.splice(i, 1); }
+            };
+            el.dispatchEvent = function (ev) {
+                ev.target = ev.target || this;
+                ev.currentTarget = this;
+                var a = listeners[ev.type];
+                if (a) {
+                    for (var i = 0; i < a.length; i++) {
+                        try { a[i].call(this, ev); } catch (e) {
+                            if (global.console) { global.console.error(e); }
+                        }
+                    }
+                }
+                var on = this["on" + ev.type];
+                if (typeof on === "function") {
+                    try { on.call(this, ev); } catch (e2) {
+                        if (global.console) { global.console.error(e2); }
+                    }
+                }
+                return !ev.defaultPrevented;
+            };
+        }
+        return el;
+    }
+
+    var nativeCreate = doc.createElement.bind(doc);
+    doc.createElement = function (tag) {
+        var t = String(tag).toLowerCase();
+        if (t === "canvas" || t === "video") {
+            var n = nativeCreate(t);
+            if (!n.localName) {
+                n.localName = t;
+                n.tagName = t.toUpperCase();
+            }
+            if (n.parentElement === undefined) {
+                n.parentElement = null;
+                n.parentNode = null;
+            }
+            return n;
+        }
+        return upgrade({}, t);
+    };
+
+    // body / documentElement (同一オブジェクト)。ネイティブの addEventListener
+    // は upgrade 内で温存される。
+    var body = doc.body;
+    if (body) {
+        upgrade(body, "body");
+        Object.defineProperty(body, "clientWidth", {
+            get: function () { return global.innerWidth; },
+            configurable: true
+        });
+        Object.defineProperty(body, "clientHeight", {
+            get: function () { return global.innerHeight; },
+            configurable: true
+        });
+    }
+
+    doc.getElementById = function (id) {
+        id = String(id);
+        var find = function (el) {
+            if (el.id === id) { return el; }
+            var cs = el.children || [];
+            for (var i = 0; i < cs.length; i++) {
+                var r = find(cs[i]);
+                if (r) { return r; }
+            }
+            return null;
+        };
+        return body ? find(body) : null;
+    };
+
+    // window.addEventListener("resize", ...) 用 (main コンテキストの global)
+    if (typeof global.addEventListener !== "function") {
+        var winListeners = {};
+        global.addEventListener = function (type, fn) {
+            (winListeners[type] || (winListeners[type] = [])).push(fn);
+        };
+        global.removeEventListener = function (type, fn) {
+            var a = winListeners[type];
+            if (!a) { return; }
+            var i = a.indexOf(fn);
+            if (i >= 0) { a.splice(i, 1); }
+        };
+        global.dispatchEvent = function (ev) {
+            var a = winListeners[ev.type];
+            if (a) {
+                for (var i = 0; i < a.length; i++) {
+                    try { a[i].call(global, ev); } catch (e) {
+                        if (global.console) { global.console.error(e); }
+                    }
+                }
+            }
+            return true;
+        };
+    }
+})(globalThis);
+)JS";
+
 const char* const kPolyfillSections[] = {
     kPolyfills1,
     kPolyfills2,
     kPolyfills3,
     kPolyfills4,
     kPolyfills5,
+    kPolyfills6,
 };
 
 } // namespace

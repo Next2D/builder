@@ -377,8 +377,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
     }
 
-    // 8. 後始末 (v8::Global を持つ静的リスト/マップ/Worker は V8 破棄前に必ず解放する)
-    workers.Shutdown();   // WorkerInstance の Global<Context> 等 (スタック巻き戻しでは Isolate 破棄後になり fail-fast)
+    // 8. 後始末: v8::Global を保持するものは Isolate 破棄前に必ず明示解放する。
+    //    (スタック変数はスコープ終了 = runtime.Dispose() の後に巻き戻されるため、
+    //     デストラクタ任せにすると破棄済み Isolate への Global::Reset で fail-fast する)
+    workers.Shutdown();      // WorkerInstance の Global<Context> / EventLoop
+    event_loop.Shutdown();   // main の setTimeout/rAF コールバック (Global<Function>)
     ShutdownAudioEvents();
     ShutdownWebGPU();
     host.main_canvas.Reset();

@@ -50,6 +50,14 @@ public:
     // 保留タスクが残っているか (終了判定用)
     bool HasPendingWork() const;
 
+    // 全タイマー/rAF コールバック (v8::Global) を解放する。Isolate::Dispose より
+    // 前に必ず呼ぶこと (スタック巻き戻しでの破棄は Isolate 破棄後になり fail-fast)。
+    void Shutdown() {
+        timers_.clear();
+        raf_callbacks_.clear();
+        raf_cancelled_.clear();
+    }
+
 private:
     struct TimerEntry {
         v8::Global<v8::Function> callback;

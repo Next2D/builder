@@ -40,6 +40,21 @@ if(NOT V8_ROOT OR NOT EXISTS "${V8_ROOT}")
         "詳細は README.md の『V8 の用意』を参照。")
 endif()
 
+# find_path/find_library の結果は CMakeCache に永続化されるため、
+# V8_ROOT の変更 (バージョン更新等) や参照先の消滅に追随しない。
+# 古い/無効な検出結果はここで破棄して再探索させる。
+if(DEFINED CACHE{NEXT2D_V8_ROOT_LAST} AND NOT "$CACHE{NEXT2D_V8_ROOT_LAST}" STREQUAL "${V8_ROOT}")
+    unset(V8_INCLUDE_DIR CACHE)
+    unset(V8_MONOLITH_LIB CACHE)
+endif()
+if(V8_INCLUDE_DIR AND NOT EXISTS "${V8_INCLUDE_DIR}/v8.h")
+    unset(V8_INCLUDE_DIR CACHE)
+endif()
+if(V8_MONOLITH_LIB AND NOT EXISTS "${V8_MONOLITH_LIB}")
+    unset(V8_MONOLITH_LIB CACHE)
+endif()
+set(NEXT2D_V8_ROOT_LAST "${V8_ROOT}" CACHE INTERNAL "直近の構成で使った V8_ROOT")
+
 find_path(V8_INCLUDE_DIR
     NAMES v8.h
     PATHS "${V8_ROOT}/include"

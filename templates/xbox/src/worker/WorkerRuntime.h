@@ -88,6 +88,11 @@ public:
 
     bool HasWorkers() const { return !workers_.empty(); }
 
+    // 全 WorkerInstance を破棄する。WorkerInstance は v8::Global (context_ /
+    // main_worker_object 等) を保持するため、Isolate::Dispose より前に必ず呼ぶこと
+    // (呼ばずにスタック巻き戻しで破棄されると Isolate 破棄後の Global::Reset で fail-fast)。
+    void Shutdown() { workers_.clear(); }
+
 private:
     v8::Isolate* isolate_;
     HostContext* host_;

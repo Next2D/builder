@@ -661,7 +661,7 @@ const XBOX_V8_VERSION: string = "13.7.152.19";
  * @type {string}
  * @constant
  */
-const XBOX_V8_REVISION: string = "r2";
+const XBOX_V8_REVISION: string = "r3";
 
 /**
  * @description ゲーム側の `xbox/` へスキャフォールドしないテンプレート内ファイル。

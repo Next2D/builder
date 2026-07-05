@@ -53,6 +53,16 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     platform_ = v8::platform::NewDefaultPlatform();
     v8::V8::InitializePlatform(platform_.get());
     v8::V8::Initialize();
+
+    // WebAssembly (DrumBrake) はメモリ境界検査を guard page + trap handler で行うため、
+    // embedder が trap handler を有効化する必要がある (d8/Chrome も起動時に行う)。
+    // 未設定のまま wasm を実行するとインタープリタ初期化で fail-fast する。
+    // コンソール実機で VEH が使えない場合は、V8 を v8_drumbrake_bounds_checks=true
+    // (明示境界チェック) でビルドし直すこと。
+    if (!v8::V8::EnableWebAssemblyTrapHandler(true)) {
+        std::cerr << "warning: EnableWebAssemblyTrapHandler failed"
+                  << " - WebAssembly may not work" << std::endl;
+    }
 }
 
 void V8Runtime::ShutdownProcess()

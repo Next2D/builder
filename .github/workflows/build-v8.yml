@@ -80,15 +80,19 @@ jobs:
           rem v8_enable_sandbox=false : sandbox は libc++ ハードニング必須のため
           rem                           use_custom_libcxx=false と両立しない (BUILD.gn の assert)。
           rem                           ホストは自明に信頼済みのゲームJSのみ実行するため無効で問題ない。
-          rem WebAssembly 対応 (r2): ゲームが wasm を使うため wasm 有効 + DrumBrake
+          rem WebAssembly 対応 (r3): ゲームが wasm を使うため wasm 有効 + DrumBrake
           rem   (V8 の wasm インタープリタ。JIT 禁止のコンソール向け機能) を組み込む。
           rem   - wasm はビルド時に turbofan を要求するため v8_jitless ビルドは使えない
           rem     (JS の JIT 無効化は実行時の --jitless フラグで行う)
           rem   - 実行時は --jitless --wasm-jitless で JS=Ignition / wasm=DrumBrake 解釈実行
+          rem   - v8_drumbrake_bounds_checks=true (明示境界チェック): 既定の guard page +
+          rem     trap handler + 特殊呼出規約 builtin 方式は MSVC 環境 (r2) で
+          rem     InterpreterHandle 構築時に fail-fast したため明示チェック方式を採用。
+          rem     コンソール実機 (VEH 制約) とも整合する構成。
           rem icu_use_data_file=false : icudtl.dat の同梱を不要にする
           rem treat_warnings_as_errors=false : use_custom_libcxx=false では MSVC STL の
           rem                                  ヘッダ警告が -Werror で停止するため無効化
-          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false treat_warnings_as_errors=false v8_enable_drumbrake=true target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
+          call gn gen out\x64.release --args="v8_monolithic=true v8_use_external_startup_data=false is_component_build=false use_custom_libcxx=false icu_use_data_file=false treat_warnings_as_errors=false v8_enable_drumbrake=true v8_drumbrake_bounds_checks=true target_cpu=\"x64\" is_debug=false v8_enable_pointer_compression=true v8_enable_sandbox=false"
           if errorlevel 1 exit /b 1
           call ninja -C out\x64.release v8_monolith
           if errorlevel 1 (
@@ -117,17 +121,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v8-${{ inputs.v8_version }}-windows-x64-r2"
+          $tag = "v8-${{ inputs.v8_version }}-windows-x64-r3"
           $zip = "v8-monolith-${{ inputs.v8_version }}-windows-x64.zip"
           $notes = @"
           Prebuilt V8 monolith for the Next2D Xbox host (windows-x64).
 
-          - V8 ``${{ inputs.v8_version }}`` / VS2022 (windows-2022 runner) / r2
+          - V8 ``${{ inputs.v8_version }}`` / VS2022 (windows-2022 runner) / r3
           - gn args: monolithic, no external startup data, use_custom_libcxx=false,
             icu_use_data_file=false, pointer compression enabled, sandbox disabled
             (requires the bundled hardened libc++, conflicts with MSVC linking),
             **WebAssembly + DrumBrake enabled** (the wasm interpreter for JIT-prohibited
-            consoles; the host runs V8 with --jitless --wasm-jitless)
+            consoles, explicit bounds checks; the host runs V8 with --jitless --wasm-jitless)
           - Layout: ``include/`` + ``lib/v8_monolith.lib`` (pass the extracted dir to ``--v8-root``)
 
           ``npx @next2d/builder --platform xbox`` downloads this automatically when

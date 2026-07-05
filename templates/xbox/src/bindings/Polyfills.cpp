@@ -4,6 +4,9 @@
 // TextEncoder/TextDecoder 等が存在せず、Vite がバンドルした worker スクリプトが
 // 評価時に ReferenceError で落ちる。ここで C++ から全コンテキストに注入する。
 // (bootstrap.js 側は typeof ガード付きなので二重定義にはならない)
+//
+// NOTE: MSVC は 1 つの文字列リテラルが約 16KB までのため (C2026)、
+//       ポリフィルは独立した IIFE のセクション配列に分割して順に評価する。
 #include "Bindings.h"
 
 #include "v8/V8Util.h"
@@ -12,16 +15,24 @@ namespace next2d {
 
 namespace {
 
-const char kPolyfillsJs[] = R"JS(
+// section 1: base (queueMicrotask)
+const char kPolyfills1[] = R"JS(
 (function (global) {
     "use strict";
+
 
     if (typeof global.queueMicrotask !== "function") {
         global.queueMicrotask = function (callback) {
             Promise.resolve().then(callback);
         };
     }
+})(globalThis);
+)JS";
 
+// section 2: TextEncoder / location
+const char kPolyfills2[] = R"JS(
+(function (global) {
+    "use strict";
     if (typeof global.TextEncoder === "undefined") {
         global.TextEncoder = class TextEncoder {
             get encoding() { return "utf-8"; }
@@ -72,7 +83,13 @@ const char kPolyfillsJs[] = R"JS(
             reload() { /* no-op */ }
         };
     }
+})(globalThis);
+)JS";
 
+// section 3: atob / btoa
+const char kPolyfills3[] = R"JS(
+(function (global) {
+    "use strict";
     // atob / btoa (indexedDB のバイナリ値永続化にも使用)
     const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     if (typeof global.btoa !== "function") {
@@ -113,7 +130,13 @@ const char kPolyfillsJs[] = R"JS(
             return out;
         };
     }
+})(globalThis);
+)JS";
 
+// section 4: localStorage / sessionStorage / alert / confirm
+const char kPolyfills4[] = R"JS(
+(function (global) {
+    "use strict";
     // localStorage / sessionStorage。
     // 永続化はホストの __next2d_storage_load/save (名前付きファイル I/O) に委ねる。
     if (typeof global.localStorage === "undefined") {
@@ -156,7 +179,13 @@ const char kPolyfillsJs[] = R"JS(
     if (typeof global.confirm !== "function") {
         global.confirm = function () { return true; };
     }
+})(globalThis);
+)JS";
 
+// section 5: indexedDB / TextDecoder
+const char kPolyfills5[] = R"JS(
+(function (global) {
+    "use strict";
     // indexedDB (最小実装・ファイル永続化)。
     // ゲームの典型用途 (open → objectStore → get/put/delete/getAll) をカバーする。
     // 値は JSON 化可能なもの + ArrayBuffer/TypedArray (base64 でタグ付け永続化)。
@@ -427,16 +456,26 @@ const char kPolyfillsJs[] = R"JS(
 })(globalThis);
 )JS";
 
+const char* const kPolyfillSections[] = {
+    kPolyfills1,
+    kPolyfills2,
+    kPolyfills3,
+    kPolyfills4,
+    kPolyfills5,
+};
+
 } // namespace
 
 void InstallPolyfills(v8::Isolate* isolate, v8::Local<v8::Context> context)
 {
     v8::Context::Scope cs(context);
-    v8::TryCatch tc(isolate);
-    v8::Local<v8::String> src = v8util::Str(isolate, kPolyfillsJs);
-    v8::Local<v8::Script> script;
-    if (v8::Script::Compile(context, src).ToLocal(&script)) {
-        (void) script->Run(context);
+    for (const char* source : kPolyfillSections) {
+        v8::TryCatch tc(isolate);
+        v8::Local<v8::String> src = v8util::Str(isolate, source);
+        v8::Local<v8::Script> script;
+        if (v8::Script::Compile(context, src).ToLocal(&script)) {
+            (void) script->Run(context);
+        }
     }
 }
 

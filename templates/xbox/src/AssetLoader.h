@@ -20,6 +20,10 @@ public:
     // 相対 URL/パスを assets/app 基準の絶対パスへ解決する。
     std::string Resolve(const std::string& url) const;
 
+    // URL を assets/app 基準の相対キー(フォワードスラッシュ)へ正規化する。
+    // 埋め込み pak のキーと一致させるために使う。
+    std::string RelativeKey(const std::string& url) const;
+
     // バイナリ読み込み。存在しなければ nullopt。
     std::optional<std::vector<uint8_t>> ReadBinary(const std::string& url) const;
 

@@ -786,6 +786,124 @@ const copyXboxResources = (): Promise<void> =>
 };
 
 /**
+ * @description ディレクトリを再帰的に走査し、各ファイルの
+ *              [posix 相対キー, 絶対パス] を集める。
+ *              Walk a directory recursively, collecting [posixRelKey, absPath] pairs.
+ *
+ * @param  {string} rootDir 走査ルート
+ * @param  {string} [prefix] キーへ付与する接頭辞 (例 "" / "assets/")
+ * @return {Array<[string, string]>}
+ * @method
+ * @public
+ */
+const walkFiles = (rootDir: string, prefix: string = ""): [string, string][] =>
+{
+    const out: [string, string][] = [];
+    if (!fs.existsSync(rootDir)) {
+        return out;
+    }
+    for (const entry of fs.readdirSync(rootDir, { "withFileTypes": true })) {
+        const abs: string = path.join(rootDir, entry.name);
+        const key: string = prefix ? `${prefix}${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+            out.push(...walkFiles(abs, `${key}/`));
+        } else if (entry.isFile()) {
+            out.push([key, abs]);
+        }
+    }
+    return out;
+};
+
+/**
+ * @description Xbox ホストの assets/app とホストスクリプト(js/bootstrap.js 等)を
+ *              単一の pak バイナリへまとめ、`assets.pak` と RCDATA 参照用の
+ *              `assets.rc` を xbox/ 直下へ生成する。CMake が assets.rc を検出すると
+ *              これらを exe 内リソースへ埋め込み、平文 JS/HTML を配布物に残さない。
+ *              環境変数 `NEXT2D_XBOX_NO_EMBED` が設定されている場合は埋め込みを無効化し、
+ *              既存の生成物を削除して隣接ファイル読み込みへ戻す。
+ *
+ *              pak フォーマット (リトルエンディアン uint32):
+ *                magic "N2DA" / version(=1) / count / [keyLen,key,dataLen,data]...
+ *              キーは assets/app 基準の posix 相対パス、または "js/bootstrap.js"。
+ *              host 側 EmbeddedAssets.cpp の ParseEmbeddedPak と対になる。
+ *
+ * @return {Promise}
+ * @method
+ * @public
+ */
+const embedXboxAssets = (): Promise<void> =>
+{
+    return new Promise<void>((resolve, reject): void =>
+    {
+        const xboxDir: string   = `${process.cwd()}/${XBOX_DIR_NAME}`;
+        const pakPath: string   = `${xboxDir}/assets.pak`;
+        const rcPath: string    = `${xboxDir}/assets.rc`;
+
+        // 明示的に無効化された場合は生成物を消してフォールバックへ戻す。
+        if (process.env.NEXT2D_XBOX_NO_EMBED) {
+            try {
+                fs.rmSync(pakPath, { "force": true });
+                fs.rmSync(rcPath, { "force": true });
+            } catch { /* ignore */ }
+            console.log(pc.yellow("Xbox asset embedding disabled (NEXT2D_XBOX_NO_EMBED)."));
+            return resolve();
+        }
+
+        try {
+            // 収集: assets/app 一式 (キーは app 基準) + host スクリプト (js/ 基準)。
+            const entries: [string, string][] = [];
+            entries.push(...walkFiles(`${xboxDir}/assets/app`, ""));
+            const bootstrap: string = `${xboxDir}/js/bootstrap.js`;
+            if (fs.existsSync(bootstrap)) {
+                entries.push(["js/bootstrap.js", bootstrap]);
+            }
+            const selftest: string = `${xboxDir}/js/selftest.js`;
+            if (fs.existsSync(selftest)) {
+                entries.push(["js/selftest.js", selftest]);
+            }
+
+            if (entries.length === 0) {
+                return reject("No Xbox assets found to embed (assets/app is empty).");
+            }
+
+            // pak バイナリを組み立てる。
+            const chunks: Buffer[] = [];
+            const header: Buffer = Buffer.alloc(12);
+            header.write("N2DA", 0, "ascii");
+            header.writeUInt32LE(1, 4);                 // version
+            header.writeUInt32LE(entries.length, 8);    // count
+            chunks.push(header);
+
+            for (const [key, abs] of entries) {
+                const keyBuf: Buffer = Buffer.from(key, "utf8");
+                const dataBuf: Buffer = fs.readFileSync(abs);
+                const meta: Buffer = Buffer.alloc(4);
+                meta.writeUInt32LE(keyBuf.length, 0);
+                chunks.push(meta, keyBuf);
+                const meta2: Buffer = Buffer.alloc(4);
+                meta2.writeUInt32LE(dataBuf.length, 0);
+                chunks.push(meta2, dataBuf);
+            }
+
+            fs.writeFileSync(pakPath, Buffer.concat(chunks));
+
+            // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む。
+            // パスは rc ファイル位置 (xbox/) からの相対。
+            fs.writeFileSync(rcPath, 'N2DASSETS RCDATA "assets.pak"\n', "utf8");
+
+            const total: number = chunks.reduce((n, b): number => n + b.length, 0);
+            console.log(pc.green(
+                `Embedded ${entries.length} Xbox asset file(s) into assets.pak `
+                + `(${(total / 1024 / 1024).toFixed(2)} MB).`
+            ));
+            resolve();
+        } catch (error) {
+            reject(`Failed to embed Xbox assets. ${error}`);
+        }
+    });
+};
+
+/**
  * @description Xbox ビルドに使う V8 のパスを解決する。優先順:
  *              1. `--v8-root` 引数
  *              2. 環境変数 `V8_ROOT`
@@ -866,6 +984,8 @@ const buildXbox = async (): Promise<void> =>
     await injectGameConfig();
     // ビルド済みWeb資材を配置
     await copyXboxResources();
+    // assets/app + host スクリプトを exe 埋め込み用 pak (+ rc) へまとめる
+    await embedXboxAssets();
 
     /**
      * GDK ビルドは Windows + Visual Studio + Microsoft GDK が必須。

@@ -2,6 +2,7 @@
 
 #include "V8Util.h"
 #include "HostContext.h"
+#include "EmbeddedAssets.h"
 #include "bindings/Bindings.h"
 
 #include <filesystem>
@@ -188,10 +189,17 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         return cached->second.Get(isolate_);
     }
 
-    std::string source = ReadTextFile(abs);
-    if (source.empty() && !fs::exists(abs)) {
-        v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
-        return v8::MaybeLocal<v8::Module>();
+    // 埋め込みモード優先: exe 内に格納された assets/app を先に探す (平文 JS を置かない)。
+    // 埋め込みが無い開発ビルドでは nullptr が返り、従来どおりファイルから読む。
+    std::string source;
+    if (const auto* embedded = GetEmbeddedAssetByAbsPath(abs)) {
+        source.assign(embedded->begin(), embedded->end());
+    } else {
+        source = ReadTextFile(abs);
+        if (source.empty() && !fs::exists(abs)) {
+            v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
+            return v8::MaybeLocal<v8::Module>();
+        }
     }
 
     // «診断» Tween(Job) の凍結調査: app.js の Job 更新コードへトレースを注入する。

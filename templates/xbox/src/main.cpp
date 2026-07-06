@@ -11,6 +11,7 @@
 
 #include "HostContext.h"
 #include "AssetLoader.h"
+#include "EmbeddedAssets.h"
 #include "EventLoop.h"
 #include "gpu/DawnContext.h"
 #include "platform/GamepadManager.h"
@@ -260,6 +261,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     const fs::path bootstrap_js = exe_dir / "js" / "bootstrap.js";
     const fs::path selftest_js = exe_dir / "js" / "selftest.js";
 
+    // 埋め込みアセット (exe 内 RCDATA "N2DASSETS") を初期化する。存在すれば
+    // assets/app 一式と js/bootstrap.js を exe 内から読み、隣接平文 JS は不要になる。
+    // 無ければ全読み込みはファイルへフォールバックする (開発ビルド)。
+    if (InitEmbeddedAssets()) {
+        SetEmbeddedAssetsRoot(assets_app.string());
+        std::cerr << "[Assets] using embedded pak" << std::endl;
+    }
+
     // 2. HostContext と論理ビューポート
     HostContext host;
     host.viewport_width = 1920;
@@ -335,7 +344,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
     // 6. bootstrap.js -> アプリ本体(ESM) の順で読み込み
     {
-        const std::string boot = ReadFile(bootstrap_js);
+        // 埋め込み pak を優先し、無ければ隣接ファイルから読む host スクリプトローダ。
+        const auto load_host_script = [&](const std::string& key, const fs::path& file) {
+            if (const auto* embedded = GetEmbeddedAsset(key)) {
+                return std::string(embedded->begin(), embedded->end());
+            }
+            return ReadFile(file);
+        };
+
+        const std::string boot = load_host_script("js/bootstrap.js", bootstrap_js);
         if (boot.empty()) {
             std::cerr << "bootstrap.js not found: " << bootstrap_js << std::endl;
         } else if (!runtime.RunScript(boot, "js/bootstrap.js")) {
@@ -343,7 +360,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         }
 
         if (selftest) {
-            const std::string script = ReadFile(selftest_js);
+            const std::string script = load_host_script("js/selftest.js", selftest_js);
             if (script.empty()) {
                 std::cerr << "selftest.js not found: " << selftest_js << std::endl;
                 return 1;

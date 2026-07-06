@@ -1,4 +1,5 @@
 #include "AssetLoader.h"
+#include "EmbeddedAssets.h"
 
 #include <filesystem>
 #include <fstream>
@@ -14,9 +15,10 @@ AssetLoader::AssetLoader(std::string root)
 {
 }
 
-std::string AssetLoader::Resolve(const std::string& url) const
+std::string AssetLoader::RelativeKey(const std::string& url) const
 {
-    // 先頭の "/" や "./"、絶対 URL のオリジンを剥がして assets/app 基準に寄せる。
+    // 先頭の "/" や "./"、絶対 URL のオリジンを剥がして assets/app 基準の相対パスにする。
+    // 埋め込み pak のキー(フォワードスラッシュ相対)と一致させるためのもの。
     std::string path = url;
 
     // スキーム付き (file://, http://localhost/...) はパス部だけ取り出す
@@ -39,7 +41,16 @@ std::string AssetLoader::Resolve(const std::string& url) const
         path = path.substr(2);
     }
 
-    return (fs::path(root_) / path).string();
+    // バックスラッシュはフォワードスラッシュへ正規化 (pak キーと一致させる)。
+    for (char& c : path) {
+        if (c == '\\') c = '/';
+    }
+    return path;
+}
+
+std::string AssetLoader::Resolve(const std::string& url) const
+{
+    return (fs::path(root_) / RelativeKey(url)).string();
 }
 
 // base64 デコード (data: URI 用)。Image.cpp の同等実装と同じ仕様。
@@ -120,6 +131,11 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
         return PercentDecode(payload);
     }
 
+    // 埋め込みモード優先: exe 内 pak に同じ相対キーがあれば実ファイルより先に返す。
+    if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
+        return *embedded;
+    }
+
     const std::string path = Resolve(url);
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
     if (!ifs) {
@@ -137,6 +153,10 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
 
 std::optional<std::string> AssetLoader::ReadText(const std::string& url) const
 {
+    if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
+        return std::string(embedded->begin(), embedded->end());
+    }
+
     const std::string path = Resolve(url);
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) {
@@ -150,22 +170,29 @@ std::optional<std::string> AssetLoader::ReadText(const std::string& url) const
 std::optional<std::string> AssetLoader::ResolveEntryModule() const
 {
     // vite が出力する index.html から <script type="module" src="..."> を抽出する。
-    const fs::path index = fs::path(root_) / "index.html";
-    std::ifstream ifs(index, std::ios::binary);
-    if (!ifs) {
-        return std::nullopt;
+    // 埋め込みモードでは pak から、無ければ実ファイルから読む。
+    std::string html;
+    if (const auto* embedded = GetEmbeddedAsset("index.html")) {
+        html.assign(embedded->begin(), embedded->end());
+    } else {
+        const fs::path index = fs::path(root_) / "index.html";
+        std::ifstream ifs(index, std::ios::binary);
+        if (!ifs) {
+            return std::nullopt;
+        }
+        std::ostringstream oss;
+        oss << ifs.rdbuf();
+        html = oss.str();
     }
-    std::ostringstream oss;
-    oss << ifs.rdbuf();
-    const std::string html = oss.str();
 
     // type="module" を含む <script ... src="..."> を優先して拾う。
+    // 返す値は assets/app 基準の絶対パス。モジュールローダ側で埋め込み/実ファイルを解決する。
     std::regex module_re(
         R"(<script[^>]*type=["']module["'][^>]*src=["']([^"']+)["'])",
         std::regex::icase);
     std::smatch m;
     if (std::regex_search(html, m, module_re)) {
-        return (fs::path(root_) / Resolve(m[1].str()).substr(root_.size() + 1)).string();
+        return Resolve(m[1].str());
     }
 
     // 逆順 (src が先) も試す
@@ -173,7 +200,7 @@ std::optional<std::string> AssetLoader::ResolveEntryModule() const
         R"(<script[^>]*src=["']([^"']+)["'][^>]*type=["']module["'])",
         std::regex::icase);
     if (std::regex_search(html, m, module_re2)) {
-        return (fs::path(root_) / Resolve(m[1].str()).substr(root_.size() + 1)).string();
+        return Resolve(m[1].str());
     }
 
     return std::nullopt;

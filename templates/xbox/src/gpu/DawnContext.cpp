@@ -137,11 +137,10 @@ void DawnContext::Configure(uint32_t width, uint32_t height)
     wgpu::SurfaceConfiguration config = {};
     config.device      = device_;
     config.format      = format_;
+    // RenderAttachment のみ。CopySrc を足すと swapchain の flip 提示最適化が無効化され
+    // 提示ごとにコピーが挟まって重くなるため、描画確認が済んだ今は付けない
+    // (以前は DebugProbeSurface の黒画面調査用に付けていた)。
     config.usage       = wgpu::TextureUsage::RenderAttachment;
-    if (can_copy_src_) {
-        // 黒画面デバッグ用の surface 読み戻し (DebugProbeSurface) を可能にする
-        config.usage |= wgpu::TextureUsage::CopySrc;
-    }
     config.width       = width_;
     config.height      = height_;
     config.presentMode = wgpu::PresentMode::Fifo;
@@ -231,17 +230,9 @@ void DawnContext::Present()
     // 取得なしで Present すると Dawn の検証エラーになる (描画しないフレームは提示しない)。
     if (surface_ && configured_ && frame_texture_acquired_) {
         ++present_count_;
-        if (present_count_ <= 3 || present_count_ == 60 || present_count_ % 300 == 0) {
-            DebugProbeSurface();
-        }
         surface_.Present();
     } else {
         ++present_skipped_;
-        if (present_skipped_ <= 3 || present_skipped_ % 300 == 0) {
-            std::cerr << "[GPU] present skipped #" << present_skipped_
-                      << " (configured=" << configured_
-                      << " acquired=" << frame_texture_acquired_ << ")" << std::endl;
-        }
     }
     frame_texture_acquired_ = false;
     current_texture_ = nullptr;

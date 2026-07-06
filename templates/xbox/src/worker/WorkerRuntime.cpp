@@ -503,35 +503,17 @@ bool WorkerInstance::Start()
     }
     std::cerr << "[Worker] source resolved (" << source.size() << " bytes)" << std::endl;
 
-    // «診断» レンダラ worker のフレームサイクル (frameStarted / mainTexture) を追跡する。
-    // 黒画面問題: getCurrentTexture がフレーム 3 回目以降呼ばれなくなる現象の原因特定用。
-    // minify 後も this.プロパティ名は保持されるためパターンは安定。見つからなければ無変更。
+    // «自己修復» CommandController.execute() は try/catch を持たないため、描画中の例外が
+    // 1 度起きると this.state が "active" のまま固まり、以後 onmessage は queue に積むだけで
+    // execute を再開せず worker が永久停止する。元の execute をリネームし、例外を捕捉して
+    // state を戻すラッパを被せて凍結を防ぐ (例外は [rendererr] で出力)。安全網として残す。
     if (source.find("getCurrentTexture") != std::string::npos) {
         const auto patch = [&source](const std::string& from, const std::string& to) {
             const auto pos = source.find(from);
             if (pos != std::string::npos) {
                 source.replace(pos, from.size(), to);
-            } else {
-                std::cerr << "[Worker] trace patch not applied: " << from.substr(0, 40) << std::endl;
             }
         };
-        source.insert(0,
-            "var __n2dT={};function __n2dTrace(k,s){var n=(__n2dT[k]=(__n2dT[k]||0)+1);"
-            "if(n<=30||n%300===0)console.info(\"[trace]\",k,\"#\"+n,s||\"\")}\n");
-        patch("clearTransferBounds(){this.beginFrame()}",
-              "clearTransferBounds(){__n2dTrace(\"CTB\",\"fs=\"+this.frameStarted+\" mt=\"+!!this.mainTexture);this.beginFrame()}");
-        patch("ensureMainTexture(){this.mainTexture||",
-              "ensureMainTexture(){__n2dTrace(\"EMT\",\"mt=\"+!!this.mainTexture+\" rc=\"+this.$needsReconfigure);this.mainTexture||");
-        patch("endFrame(){if(this.frameStarted){",
-              "endFrame(){__n2dTrace(\"EF\",\"fs=\"+this.frameStarted+\" enc=\"+!!this.commandEncoder);if(this.frameStarted){");
-        patch("transferMainCanvas(){if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)",
-              "transferMainCanvas(){__n2dTrace(\"TMC\",\"att=\"+!!(this.$mainAttachmentObject&&this.$mainAttachmentObject.texture));if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)");
-        // «診断/自己修復» CommandController.execute() は try/catch を持たないため、
-        // 描画中の例外が 1 度起きると this.state が "active" のまま固まり、
-        // 以後 onmessage は queue に積むだけで execute を再開せず worker が永久停止する
-        // (画面が ~15 フレームで凍結する現象の直接原因)。元の execute をリネームし、
-        // 例外を捕捉して message+stack を出力しつつ state を戻すラッパを被せる。
-        // これで「実際に何が throw しているか」を CI ログで確定でき、かつ凍結も防げる。
         patch("async execute(){for(this.state=\"active\"",
               "async execute(){try{await this.__n2dExec()}catch(__ee){"
               "var __n=(globalThis.__rerr=(globalThis.__rerr||0)+1);"

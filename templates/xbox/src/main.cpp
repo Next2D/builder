@@ -44,6 +44,21 @@ void FireEvent(const char* type, const std::function<void(v8::Isolate*, v8::Loca
     if (!g_runtime || !g_host) {
         return;
     }
+    // 診断: 入力イベントが JS 配送層まで到達しているかを一度だけ next2d-error.log に残す
+    // (先頭12件)。GUI 実行では stderr が見えないため。main_canvas 未設定なら pointer が
+    // どこにも届かない。ここに [Input] 行が出れば Win32 配送とループは正常。
+    {
+        static int input_log = 0;
+        if (input_log < 12) {
+            ++input_log;
+            std::ofstream ofs("next2d-error.log", std::ios::app);
+            if (ofs) {
+                ofs << "[Input] fire " << type
+                    << " main_canvas=" << (g_host->main_canvas.IsEmpty() ? "EMPTY" : "set")
+                    << std::endl;
+            }
+        }
+    }
     v8::Isolate* isolate = g_runtime->isolate();
     v8::HandleScope hs(isolate);
     v8::Local<v8::Context> ctx = g_runtime->context();

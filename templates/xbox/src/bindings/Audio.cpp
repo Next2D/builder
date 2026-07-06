@@ -374,6 +374,23 @@ void AudioContextConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8util::SetMethod(isolate, self, "createBufferSource", CreateBufferSource);
     v8util::SetMethod(isolate, self, "createGain", CreateGain);
     v8util::SetMethod(isolate, self, "decodeAudioData", DecodeAudioData);
+
+    // state / resume / suspend / close: ブラウザの AudioContext はユーザージェスチャまで
+    // suspended だが、ホストの XAudio2 は常に有効なので "running" 固定。player の音声
+    // アンロック (初回 pointerup で ctx.resume()) が未実装だと TypeError で throw し、
+    // そのハンドラ(ミュート解除等)以降が中断する。解決済み Promise を返す no-op にする。
+    v8util::SetValue(isolate, self, "state", v8util::Str(isolate, "running"));
+    auto resolvedPromise = [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+        v8::Isolate* iso = a.GetIsolate();
+        v8::Local<v8::Context> c = iso->GetCurrentContext();
+        auto r = v8::Promise::Resolver::New(c).ToLocalChecked();
+        (void) r->Resolve(c, v8::Undefined(iso));
+        a.GetReturnValue().Set(r->GetPromise());
+    };
+    v8util::SetMethod(isolate, self, "resume", resolvedPromise);
+    v8util::SetMethod(isolate, self, "suspend", resolvedPromise);
+    v8util::SetMethod(isolate, self, "close", resolvedPromise);
+
     args.GetReturnValue().Set(self);
 }
 

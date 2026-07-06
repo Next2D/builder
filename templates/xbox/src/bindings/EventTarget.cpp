@@ -96,6 +96,15 @@ void DispatchEvent(v8::Isolate* isolate, v8::Local<v8::Object> target,
         return;
     }
     const std::string type = ToStdString(isolate, type_val);
+
+    // event.target / currentTarget を配送先に設定する。
+    // player のポインタハンドラは `let t = e.target; t && (…, t.setPointerCapture(…), …)`
+    // のように先頭で event.target をガードするため、未設定だと pointerdown/move が
+    // 丸ごと no-op になり「ボタンが全く反応しない」。DOM 準拠でここで設定する。
+    (void) event->Set(ctx, Str(isolate, "target"), target);
+    (void) event->Set(ctx, Str(isolate, "currentTarget"), target);
+    (void) event->Set(ctx, Str(isolate, "srcElement"), target);
+
     v8::Local<v8::Value> args1[1] = { event };
 
     // on<type> プロパティ

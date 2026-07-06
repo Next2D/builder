@@ -633,6 +633,112 @@
                 "resolve target has blue, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
         });
 
+        await softTest("WebGPU: MSAA ステンシルマスク (player clip 経路の忠実再現)", async () => {
+            assert(device, "needs device");
+            // player の mask: (1) writeMask=0 でステンシルへ形状を書く (resolveTarget なし)
+            //                (2) stencil compare=equal で内容を描く (resolveTarget あり)
+            // これが崩れるとマスクが効かず、隠されるべきレイヤーが全面に描かれる
+            const W = 8, H = 8;
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vsLeft(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    // 左半分を覆う矩形 (2 三角形)
+                    var p = array<vec2f, 6>(
+                        vec2f(-1,-1), vec2f(0,-1), vec2f(-1,1),
+                        vec2f(-1,1), vec2f(0,-1), vec2f(0,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @vertex fn vsFull(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+                @fragment fn fsBlue() -> @location(0) vec4f { return vec4f(0, 0, 1, 1); }
+            ` });
+            const msaaColor = device.createTexture({
+                "size": { "width": W, "height": H }, "format": "rgba8unorm",
+                "sampleCount": 4, "usage": GPUTextureUsage.RENDER_ATTACHMENT
+            });
+            const resolve = device.createTexture({
+                "size": { "width": W, "height": H }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+            });
+            const msaaStencil = device.createTexture({
+                "size": { "width": W, "height": H }, "format": "stencil8",
+                "sampleCount": 4, "usage": GPUTextureUsage.RENDER_ATTACHMENT
+            });
+            const clipPipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vsLeft" },
+                "fragment": { "module": shader, "entryPoint": "fs",
+                    "targets": [{ "format": "rgba8unorm", "writeMask": 0 }] },
+                "primitive": { "topology": "triangle-list" },
+                "multisample": { "count": 4 },
+                "depthStencil": {
+                    "format": "stencil8",
+                    "stencilFront": { "compare": "always", "passOp": "replace" },
+                    "stencilBack": { "compare": "always", "passOp": "replace" }
+                }
+            });
+            const drawPipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vsFull" },
+                "fragment": { "module": shader, "entryPoint": "fsBlue",
+                    "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" },
+                "multisample": { "count": 4 },
+                "depthStencil": {
+                    "format": "stencil8",
+                    "stencilFront": { "compare": "equal", "passOp": "keep" },
+                    "stencilBack": { "compare": "equal", "passOp": "keep" }
+                }
+            });
+            const enc = device.createCommandEncoder();
+            // pass 1: マスク形状 (左半分) をステンシルに書く。色は writeMask=0 で不変
+            const p1 = enc.beginRenderPass({
+                "colorAttachments": [{
+                    "view": msaaColor.createView(),
+                    "loadOp": "clear", "storeOp": "store", "clearValue": [0, 0, 0, 0]
+                }],
+                "depthStencilAttachment": {
+                    "view": msaaStencil.createView(),
+                    "stencilLoadOp": "clear", "stencilStoreOp": "store",
+                    "stencilClearValue": 0
+                }
+            });
+            p1.setPipeline(clipPipeline);
+            p1.setStencilReference(1);
+            p1.draw(6);
+            p1.end();
+            // pass 2: 全面に青を stencil==1 の場所だけ描き、resolve へ解決
+            const p2 = enc.beginRenderPass({
+                "colorAttachments": [{
+                    "view": msaaColor.createView(),
+                    "resolveTarget": resolve.createView(),
+                    "loadOp": "load", "storeOp": "store"
+                }],
+                "depthStencilAttachment": {
+                    "view": msaaStencil.createView(),
+                    "stencilLoadOp": "load", "stencilStoreOp": "store"
+                }
+            });
+            p2.setPipeline(drawPipeline);
+            p2.setStencilReference(1);
+            p2.draw(3);
+            p2.end();
+            const buf = device.createBuffer({ "size": 256 * H, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyTextureToBuffer({ "texture": resolve }, { "buffer": buf, "bytesPerRow": 256 }, { "width": W, "height": H });
+            device.queue.submit([enc.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const px = new Uint8Array(buf.getMappedRange().slice(0));
+            buf.unmap();
+            const at = (x, y) => y * 256 + x * 4;
+            const l = at(2, 4), r = at(6, 4);
+            assert(px[l + 2] === 255 && px[l + 3] === 255,
+                "マスク内 (左) は青: rgba=" + px[l] + "," + px[l + 1] + "," + px[l + 2] + "," + px[l + 3]);
+            assert(px[r + 3] === 0,
+                "マスク外 (右) は透明のまま: rgba=" + px[r] + "," + px[r + 1] + "," + px[r + 2] + "," + px[r + 3]);
+        });
+
         await softTest("WebGPU: stencil8 パイプライン + setStencilReference (マスク経路)", async () => {
             assert(device, "needs device");
             const shader = device.createShaderModule({ "code": `

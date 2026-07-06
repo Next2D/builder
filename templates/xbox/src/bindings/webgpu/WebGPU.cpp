@@ -230,6 +230,31 @@ static wgpu::Extent3D ParseExtent(v8::Isolate* isolate, v8::Local<v8::Value> val
     return extent;
 }
 
+// GPUOrigin3D は {x,y,z} オブジェクト or [x,y,z] 配列。ParseExtent とは
+// キー名が違う (width/height ではなく x/y/z、既定は 1 ではなく 0) ため専用に扱う。
+static wgpu::Origin3D ParseOrigin(v8::Isolate* isolate, v8::Local<v8::Value> value)
+{
+    wgpu::Origin3D origin = {0, 0, 0};
+    if (value->IsArray()) {
+        auto arr = value.As<v8::Array>();
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        auto get = [&](uint32_t i) -> uint32_t {
+            v8::Local<v8::Value> v;
+            return (i < arr->Length() && arr->Get(ctx, i).ToLocal(&v) && v->IsNumber())
+                ? static_cast<uint32_t>(v.As<v8::Number>()->Value()) : 0;
+        };
+        origin.x = get(0);
+        origin.y = get(1);
+        origin.z = get(2);
+    } else if (value->IsObject()) {
+        auto o = value.As<v8::Object>();
+        origin.x = U32(isolate, o, "x", 0);
+        origin.y = U32(isolate, o, "y", 0);
+        origin.z = U32(isolate, o, "z", 0);
+    }
+    return origin;
+}
+
 static void Queue_WriteTexture(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     v8::Isolate* isolate = args.GetIsolate();
@@ -240,6 +265,11 @@ static void Queue_WriteTexture(const v8::FunctionCallbackInfo<v8::Value>& args)
     wgpu::TexelCopyTextureInfo copy = {};
     copy.texture = Unwrap<wgpu::Texture>(Prop(isolate, dest, "texture").As<v8::Object>());
     copy.mipLevel = U32(isolate, dest, "mipLevel", 0);
+    // 宛先 origin (アトラスのセル位置など)。未指定なら (0,0,0)。
+    v8::Local<v8::Value> dst_origin = Prop(isolate, dest, "origin");
+    if (dst_origin->IsObject() || dst_origin->IsArray()) {
+        copy.origin = ParseOrigin(isolate, dst_origin);
+    }
 
     const void* data = nullptr;
     size_t length = 0;
@@ -599,8 +629,7 @@ static wgpu::TexelCopyTextureInfo ParseTexelCopyTexture(v8::Isolate* isolate, v8
     info.mipLevel = U32(isolate, o, "mipLevel", 0);
     v8::Local<v8::Value> origin = Prop(isolate, o, "origin");
     if (origin->IsObject() || origin->IsArray()) {
-        wgpu::Extent3D e = ParseExtent(isolate, origin);
-        info.origin = { e.width, e.height, e.depthOrArrayLayers };
+        info.origin = ParseOrigin(isolate, origin);
     }
     return info;
 }
@@ -915,7 +944,55 @@ struct RenderPipelineScratch {
     std::vector<wgpu::ColorTargetState> targets;
     std::vector<wgpu::BlendState> blends;
     std::string vs_entry, fs_entry;
+    // pipeline-overridable constants (WGSL の override 定数)。key 文字列は
+    // ConstantEntry.key が指すため CreateRenderPipeline 完了まで生存させる。
+    std::vector<std::string> vs_const_keys, fs_const_keys;
+    std::vector<wgpu::ConstantEntry> vs_constants, fs_constants;
 };
+
+// { "KEY": number|bool, ... } を wgpu::ConstantEntry 配列へ変換する。
+// player は WGSL の override(GRADIENT_TYPE / SPREAD_MODE / yFlipSign / フィルタ種別など)
+// を constants で指定してパイプラインを特殊化する。ここを読まないと全パイプラインが
+// WGSL の既定値でコンパイルされ、放射状グラデが線形に、spread が pad に、
+// フィルタ種別が既定分岐に潰れる (エラーは出ない)。
+static void ParsePipelineConstants(
+    v8::Isolate* isolate, v8::Local<v8::Object> stage,
+    std::vector<std::string>& keys, std::vector<wgpu::ConstantEntry>& entries)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    v8::Local<v8::Value> cv = Prop(isolate, stage, "constants");
+    if (!cv->IsObject()) {
+        return;
+    }
+    auto co = cv.As<v8::Object>();
+    v8::Local<v8::Array> names;
+    if (!co->GetOwnPropertyNames(ctx).ToLocal(&names)) {
+        return;
+    }
+    // 再確保で ConstantEntry.key の指す c_str が無効化されないよう上限で確保する。
+    keys.reserve(keys.size() + names->Length());
+    entries.reserve(entries.size() + names->Length());
+    for (uint32_t i = 0; i < names->Length(); ++i) {
+        v8::Local<v8::Value> k, val;
+        if (!names->Get(ctx, i).ToLocal(&k)) continue;
+        if (!co->Get(ctx, k).ToLocal(&val)) continue;
+        double num;
+        if (val->IsBoolean()) {
+            num = val.As<v8::Boolean>()->Value() ? 1.0 : 0.0;
+        } else if (val->IsNumber()) {
+            num = val.As<v8::Number>()->Value();
+        } else {
+            continue;
+        }
+        v8::String::Utf8Value ks(isolate, k);
+        if (!*ks) continue;
+        keys.emplace_back(*ks, static_cast<size_t>(ks.length()));
+        wgpu::ConstantEntry e = {};
+        e.key = wgpu::StringView(keys.back().c_str(), keys.back().size());
+        e.value = num;
+        entries.push_back(e);
+    }
+}
 
 static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
@@ -976,6 +1053,13 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
         }
         desc.vertex.bufferCount = scratch.vertex_buffers.size();
         desc.vertex.buffers = scratch.vertex_buffers.data();
+    }
+
+    // vertex.constants (override 定数)
+    ParsePipelineConstants(isolate, vertex, scratch.vs_const_keys, scratch.vs_constants);
+    if (!scratch.vs_constants.empty()) {
+        desc.vertex.constantCount = scratch.vs_constants.size();
+        desc.vertex.constants = scratch.vs_constants.data();
     }
 
     // primitive
@@ -1042,6 +1126,13 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
     if (ms->IsObject()) {
         auto m = ms.As<v8::Object>();
         desc.multisample.count = U32(isolate, m, "count", 1);
+        // alphaToCoverageEnabled: フラグメント alpha を MSAA カバレッジへ変換する。
+        // Next2D はベクタ図形の境界を塗り alpha に頼るため、これが無いと全図形の
+        // アンチエイリアスが失われて縁がジャギる (静かな品質劣化)。
+        desc.multisample.alphaToCoverageEnabled = Bool(isolate, m, "alphaToCoverageEnabled", false);
+        if (HasProp(isolate, m, "mask")) {
+            desc.multisample.mask = U32(isolate, m, "mask", 0xFFFFFFFF);
+        }
     }
 
     // fragment
@@ -1087,6 +1178,14 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
             fragment.targetCount = scratch.targets.size();
             fragment.targets = scratch.targets.data();
         }
+
+        // fragment.constants (override 定数: GRADIENT_TYPE/SPREAD_MODE/フィルタ種別など)
+        ParsePipelineConstants(isolate, f, scratch.fs_const_keys, scratch.fs_constants);
+        if (!scratch.fs_constants.empty()) {
+            fragment.constantCount = scratch.fs_constants.size();
+            fragment.constants = scratch.fs_constants.data();
+        }
+
         desc.fragment = &fragment;
     }
 

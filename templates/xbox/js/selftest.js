@@ -813,6 +813,117 @@
             assert(px[2] === 255, "stencil equal pass drew blue, got rgba=" + px[0] + "," + px[1] + "," + px[2]);
         });
 
+        await softTest("WebGPU: pipeline-overridable constants (override がパイプラインへ反映)", async () => {
+            assert(device, "needs device");
+            // player は override 定数 (GRADIENT_TYPE=linear/radial, SPREAD_MODE, フィルタ種別,
+            // yFlipSign) でシェーダを特殊化する。ホストが fragment/vertex.constants を読まないと
+            // 全パイプラインが WGSL 既定値でコンパイルされ、放射状グラデが線形に潰れる等になる。
+            // ここで override が実際に効くか (既定値でなく指定値でコンパイルされるか) を検証する。
+            const shader = device.createShaderModule({ "code": `
+                override SELECT : u32 = 0u;
+                override TINT : f32 = 0.25;
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f {
+                    if (SELECT == 1u) { return vec4f(0, TINT, 0, 1); }
+                    return vec4f(TINT, 0, 0, 1);
+                }
+            ` });
+            const mk = (constants) => device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs",
+                    "constants": constants,
+                    "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" }
+            });
+            const draw = async (pipeline) => {
+                const target = device.createTexture({
+                    "size": { "width": 2, "height": 2 }, "format": "rgba8unorm",
+                    "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+                const enc = device.createCommandEncoder();
+                const pass = enc.beginRenderPass({ "colorAttachments": [{
+                    "view": target.createView(), "loadOp": "clear", "storeOp": "store",
+                    "clearValue": [0, 0, 0, 1] }] });
+                pass.setPipeline(pipeline); pass.draw(3); pass.end();
+                // 2 行分: copyTextureToBuffer は size >= bytesPerRow*(h-1)+w*4 = 264 を要求する
+                const buf = device.createBuffer({ "size": 256 * 2, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+                enc.copyTextureToBuffer({ "texture": target }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 2, "height": 2 });
+                device.queue.submit([enc.finish()]);
+                await buf.mapAsync(GPUMapMode.READ);
+                const px = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap();
+                return [px[0], px[1], px[2]];
+            };
+            // constants が無視されると両方 SELECT=0/TINT=0.25 (既定) の赤~64 になり検証に落ちる。
+            const green = await draw(mk({ "SELECT": 1, "TINT": 0.75 }));
+            const red   = await draw(mk({ "SELECT": 0, "TINT": 1.0 }));
+            assert(green[1] > 150 && green[0] < 60,
+                "override SELECT=1/TINT=0.75 -> 緑: rgb=" + green.join(","));
+            assert(red[0] > 240 && red[1] < 40,
+                "override SELECT=0/TINT=1.0 -> 赤最大: rgb=" + red.join(","));
+        });
+
+        await softTest("WebGPU: multisample.alphaToCoverageEnabled (ベクタ縁 AA)", async () => {
+            assert(device, "needs device");
+            // Next2D はベクタ図形の境界を塗り alpha に頼り、MSAA カバレッジで AA する。
+            // このフィールドが無視されると縁がジャギる。alpha=0.5 で部分被覆になるかを検証。
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 0.5); }
+            ` });
+            const pipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" },
+                "multisample": { "count": 4, "alphaToCoverageEnabled": true }
+            });
+            const msaa = device.createTexture({ "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "sampleCount": 4, "usage": GPUTextureUsage.RENDER_ATTACHMENT });
+            const resolve = device.createTexture({ "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": msaa.createView(), "resolveTarget": resolve.createView(),
+                "loadOp": "clear", "storeOp": "store", "clearValue": [0, 0, 0, 1] }] });
+            pass.setPipeline(pipeline); pass.draw(3); pass.end();
+            const buf = device.createBuffer({ "size": 256 * 4, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyTextureToBuffer({ "texture": resolve }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 4, "height": 4 });
+            device.queue.submit([enc.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const px = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap();
+            // alpha 0.5 + alphaToCoverage -> ~2/4 サンプル被覆 -> resolve は中間の赤。
+            // フィールドが無視されると全サンプル被覆で赤=255 になり検証に落ちる。
+            assert(px[0] > 20 && px[0] < 235,
+                "alpha-to-coverage で部分被覆 (中間の赤): rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
+        });
+
+        await softTest("WebGPU: writeTexture 宛先 origin (アトラスのセル位置)", async () => {
+            assert(device, "needs device");
+            // player はアトラスの (node.x, node.y) へ writeTexture する。origin が無視されると
+            // 常に (0,0) に書かれてアトラスが破損する。origin(2,2) の書込みが右下に出るか検証。
+            const tex = device.createTexture({ "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
+            const red = new Uint8Array(2 * 2 * 4);
+            for (let i = 0; i < red.length; i += 4) { red[i] = 255; red[i + 3] = 255; }
+            device.queue.writeTexture({ "texture": tex, "origin": { "x": 2, "y": 2, "z": 0 } },
+                red, { "bytesPerRow": 2 * 4, "rowsPerImage": 2 }, { "width": 2, "height": 2 });
+            const buf = device.createBuffer({ "size": 256 * 4, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const enc = device.createCommandEncoder();
+            enc.copyTextureToBuffer({ "texture": tex }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 4, "height": 4 });
+            device.queue.submit([enc.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const px = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap();
+            const at = (x, y) => y * 256 + x * 4;
+            assert(px[at(3, 3)] === 255, "origin(2,2) の赤が右下(3,3)に存在: got=" + px[at(3, 3)]);
+            assert(px[at(0, 0)] === 0, "左上(0,0)は空 (origin が (0,0) に潰れていない): got=" + px[at(0, 0)]);
+        });
+
         // ==================== Audio ====================
         let audioCtx = null;
         await test("AudioContext: decodeAudioData (Media Foundation)", async () => {

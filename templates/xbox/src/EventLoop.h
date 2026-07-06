@@ -50,6 +50,10 @@ public:
     // 保留タスクが残っているか (終了判定用)
     bool HasPendingWork() const;
 
+    // 診断用: 登録中の rAF コールバック数 / タイマー数
+    size_t PendingAnimationFrameCount() const { return raf_callbacks_.size(); }
+    size_t PendingTimerCount() const { return timers_.size(); }
+
     // 全タイマー/rAF コールバック (v8::Global) を解放する。Isolate::Dispose より
     // 前に必ず呼ぶこと (スタック巻き戻しでの破棄は Isolate 破棄後になり fail-fast)。
     void Shutdown() {

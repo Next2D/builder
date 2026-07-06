@@ -4,7 +4,10 @@
 // bootstrap.js とアプリ本体(ESM)の読み込み -> ゲームループ、という流れ。
 #include <Windows.h>
 #include <windowsx.h>
+#include <timeapi.h>
 #include <XGameRuntime.h>
+
+#pragma comment(lib, "winmm.lib")
 
 #include "HostContext.h"
 #include "AssetLoader.h"
@@ -202,6 +205,10 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 {
+    // Sleep() の分解能を 1ms に上げる (フレームペーシング用。既定 15.6ms では
+    // 60Hz を刻めない)
+    timeBeginPeriod(1);
+
     // --selftest: アプリの代わりに js/selftest.js を実行し、全バインディングを
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。
     const bool selftest = cmd_line && wcsstr(cmd_line, L"--selftest") != nullptr;
@@ -362,6 +369,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
         // 提示
         dawn.Present();
+
+        // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える。
+        // Present はスキップ時にブロックしないため、これが無いとループが
+        // 数万回転/秒で空回りし、rAF 前提のゲーム/Tween のタイミングが崩れる。
+        {
+            const double frame_ms = event_loop.Now() - now;
+            if (frame_ms < 15.0) {
+                Sleep(static_cast<DWORD>(15.0 - frame_ms));
+            }
+        }
+
+        // 診断: ループ統計 (5 秒毎)
+        {
+            static uint64_t iteration = 0;
+            ++iteration;
+            if (iteration % 300 == 0) {
+                std::cerr << "[Loop] it=" << iteration
+                          << " rAF=" << event_loop.PendingAnimationFrameCount()
+                          << " timers=" << event_loop.PendingTimerCount() << std::endl;
+            }
+        }
 
         // selftest 完了検知: selftest.js が globalThis.__selftestExitCode を設定したら終了
         if (selftest) {

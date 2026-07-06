@@ -71,6 +71,16 @@ uint32_t EventLoop::RequestAnimationFrame(v8::Local<v8::Function> callback)
 
 void EventLoop::CancelAnimationFrame(uint32_t id)
 {
+    // 未実行分は即座に取り除く。raf_cancelled_ だけに頼ると、RunAnimationFrame の
+    // 実行中に登録されたコールバックへのキャンセルが同フレーム末尾の clear で失われ、
+    // キャンセル済みのはずの rAF が翌フレームに実行されてしまう (ticker/Tween の多重化)。
+    for (auto it = raf_callbacks_.begin(); it != raf_callbacks_.end(); ++it) {
+        if (it->first == id) {
+            raf_callbacks_.erase(it);
+            return;
+        }
+    }
+    // 実行中バッチ (RunAnimationFrame の current) 内のものはフラグで無効化する
     raf_cancelled_.push_back(id);
 }
 

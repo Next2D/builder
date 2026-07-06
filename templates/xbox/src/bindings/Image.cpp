@@ -2,6 +2,7 @@
 
 #include "HostContext.h"
 #include "AssetLoader.h"
+#include "EventTarget.h"
 #include "ImageSource.h"
 #include "platform/WicDecoder.h"
 #include "v8/V8Util.h"
@@ -10,6 +11,7 @@
 #include <objbase.h>
 
 #include <cstring>
+#include <iostream>
 #include <vector>
 
 namespace next2d {
@@ -19,7 +21,110 @@ using v8util::ToStdString;
 
 namespace {
 
-// Image コンストラクタ: src セッターで読み込み+デコードし onload を発火する。
+// base64 デコード (data: URL 用。Vite は小さい画像をインライン化する)
+bool ImageDecodeBase64(const std::string& in, std::vector<uint8_t>* out)
+{
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    out->clear();
+    out->reserve(in.size() / 4 * 3);
+    int buf = 0, bits = 0;
+    for (char c : in) {
+        if (c == '=' || c == '\r' || c == '\n') continue;
+        const int v = val(c);
+        if (v < 0) return false;
+        buf = buf << 6 | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out->push_back(static_cast<uint8_t>(buf >> bits & 0xFF));
+        }
+    }
+    return true;
+}
+
+// 遅延発火する load/error イベント (img.src = url; img.onload = fn の順でも拾えるよう
+// microtask で発火する。メインループの PerformMicrotaskCheckpoint が実行する)
+struct PendingImageEvent {
+    v8::Isolate* isolate;
+    v8::Global<v8::Object> image;
+    bool ok;
+};
+
+void FireImageEvent(void* data)
+{
+    auto* p = static_cast<PendingImageEvent*>(data);
+    v8::Isolate* isolate = p->isolate;
+    v8::HandleScope hs(isolate);
+    v8::Local<v8::Object> img = p->image.Get(isolate);
+    v8::Local<v8::Context> ctx = img->GetCreationContextChecked();
+    v8::Context::Scope cs(ctx);
+
+    v8::Local<v8::Object> ev = v8::Object::New(isolate);
+    v8util::SetValue(isolate, ev, "type", Str(isolate, p->ok ? "load" : "error"));
+    v8util::SetValue(isolate, ev, "target", img);
+    DispatchEvent(isolate, img, ev);
+
+    p->image.Reset();
+    delete p;
+}
+
+// src に指定された URL (assets 相対 / data:) を読み込み WIC でデコードする。
+// 成否イベントは microtask で発火する。
+void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const std::string& url)
+{
+    std::vector<uint8_t> input;
+    if (url.rfind("data:", 0) == 0) {
+        const auto comma = url.find(',');
+        if (comma != std::string::npos) {
+            const std::string meta = url.substr(5, comma - 5);
+            const std::string payload = url.substr(comma + 1);
+            if (meta.find(";base64") != std::string::npos) {
+                ImageDecodeBase64(payload, &input);
+            }
+        }
+    } else {
+        AssetLoader* assets = HostContext::From(isolate)->assets;
+        auto bytes = assets->ReadBinary(url);
+        if (bytes) {
+            input = std::move(*bytes);
+        }
+    }
+
+    auto* img = new DecodedImage();
+    const bool ok = !input.empty() && DecodeImageWithWIC(input, *img);
+    if (ok) {
+        self->SetInternalField(0, v8::External::New(isolate, img));
+        v8util::AttachWeak(isolate, self, img);
+        v8util::SetValue(isolate, self, "width",
+                         v8::Integer::NewFromUnsigned(isolate, img->width));
+        v8util::SetValue(isolate, self, "height",
+                         v8::Integer::NewFromUnsigned(isolate, img->height));
+        v8util::SetValue(isolate, self, "naturalWidth",
+                         v8::Integer::NewFromUnsigned(isolate, img->width));
+        v8util::SetValue(isolate, self, "naturalHeight",
+                         v8::Integer::NewFromUnsigned(isolate, img->height));
+        v8util::SetValue(isolate, self, "complete", v8::Boolean::New(isolate, true));
+    } else {
+        delete img;
+        std::cerr << "[Image] load failed: "
+                  << (url.size() > 96 ? url.substr(0, 96) + "..." : url) << std::endl;
+    }
+
+    auto* pending = new PendingImageEvent();
+    pending->isolate = isolate;
+    pending->image.Reset(isolate, self);
+    pending->ok = ok;
+    isolate->EnqueueMicrotask(FireImageEvent, pending);
+}
+
+// Image コンストラクタ: src セッターで読み込み+デコードし load イベントを発火する。
 void ImageConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     v8::Isolate* isolate = args.GetIsolate();
@@ -27,11 +132,46 @@ void ImageConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
         v8util::ThrowTypeError(isolate, "Image must be called with new");
         return;
     }
-    // 実体は通常オブジェクト。src セッターで decode をトリガする。
-    args.This()->Set(isolate->GetCurrentContext(),
-                     Str(isolate, "complete"),
-                     v8::Boolean::New(isolate, false)).Check();
-    args.GetReturnValue().Set(args.This());
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    v8::Local<v8::Object> self = args.This();
+
+    v8util::SetValue(isolate, self, "__isImageElement", v8::Boolean::New(isolate, true));
+    v8util::SetValue(isolate, self, "tagName", Str(isolate, "IMG"));
+    v8util::SetValue(isolate, self, "localName", Str(isolate, "img"));
+    v8util::SetValue(isolate, self, "complete", v8::Boolean::New(isolate, false));
+    v8util::SetValue(isolate, self, "width", v8::Integer::New(isolate, 0));
+    v8util::SetValue(isolate, self, "height", v8::Integer::New(isolate, 0));
+    v8util::SetValue(isolate, self, "naturalWidth", v8::Integer::New(isolate, 0));
+    v8util::SetValue(isolate, self, "naturalHeight", v8::Integer::New(isolate, 0));
+    InstallEventTarget(isolate, self);   // addEventListener("load"/"error")
+
+    self->SetNativeDataProperty(ctx, Str(isolate, "src"),
+        [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
+            v8::Local<v8::Value> v;
+            if (info.This()->Get(info.GetIsolate()->GetCurrentContext(),
+                Str(info.GetIsolate(), "__src")).ToLocal(&v) && !v->IsUndefined()) {
+                info.GetReturnValue().Set(v);
+            } else {
+                info.GetReturnValue().Set(Str(info.GetIsolate(), ""));
+            }
+        },
+        [](v8::Local<v8::Name>, v8::Local<v8::Value> value,
+           const v8::PropertyCallbackInfo<void>& info) {
+            v8::Isolate* iso = info.GetIsolate();
+            v8util::SetValue(iso, info.This(), "__src", value);
+            LoadImageFromSrc(iso, info.This(), ToStdString(iso, value));
+        }).Check();
+
+    // decode(): 読み込み済みなら resolve、未読み込みでも resolve (簡易)
+    v8util::SetMethod(isolate, self, "decode",
+        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+            v8::Isolate* iso = a.GetIsolate();
+            auto r = v8::Promise::Resolver::New(iso->GetCurrentContext()).ToLocalChecked();
+            r->Resolve(iso->GetCurrentContext(), v8::Undefined(iso)).Check();
+            a.GetReturnValue().Set(r->GetPromise());
+        });
+
+    args.GetReturnValue().Set(self);
 }
 
 // createImageBitmap(source) -> Promise<ImageBitmap>
@@ -167,6 +307,25 @@ bool GetImageSourcePixels(v8::Isolate* isolate, v8::Local<v8::Value> source,
         return true;
     }
 
+    // Image 要素 (new Image() + src): 読み込み完了後は内部フィールドに DecodedImage
+    v8::Local<v8::Value> is_image;
+    if (obj->Get(ctx, Str(isolate, "__isImageElement")).ToLocal(&is_image) &&
+        is_image->IsBoolean() && is_image.As<v8::Boolean>()->Value()) {
+        if (obj->InternalFieldCount() < 1) {
+            return false;
+        }
+        v8::Local<v8::Data> field = obj->GetInternalField(0);
+        if (!field->IsValue() || !field.As<v8::Value>()->IsExternal()) {
+            return false;   // 未読み込み
+        }
+        auto* img = static_cast<DecodedImage*>(
+            field.As<v8::Value>().As<v8::External>()->Value());
+        *out_rgba = img->rgba.data();
+        *out_width = img->width;
+        *out_height = img->height;
+        return true;
+    }
+
     // video 要素: 現在フレームを返す
     v8::Local<v8::Value> is_video;
     if (obj->Get(ctx, Str(isolate, "__isVideoElement")).ToLocal(&is_video) &&
@@ -192,6 +351,8 @@ void InstallImage(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContex
     v8::Local<v8::FunctionTemplate> image_tmpl =
         v8::FunctionTemplate::New(isolate, ImageConstructor);
     image_tmpl->SetClassName(Str(isolate, "Image"));
+    // 内部フィールド0: デコード済み DecodedImage* (src セッターが設定)
+    image_tmpl->InstanceTemplate()->SetInternalFieldCount(1);
     global->Set(ctx, Str(isolate, "Image"),
                 image_tmpl->GetFunction(ctx).ToLocalChecked()).Check();
 

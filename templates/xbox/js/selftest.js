@@ -207,6 +207,31 @@
                 "2x2 png -> " + bitmap.width + "x" + bitmap.height);
         });
 
+        await test("Image 要素: new Image + src(data:) -> load -> drawImage", async () => {
+            // player の ShapeLoadSrcUseCase と同じ利用パターン
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            const loaded = new Promise((resolve, reject) => {
+                img.addEventListener("load", resolve);
+                img.addEventListener("error", () => reject(new Error("image load error")));
+                setTimeout(() => reject(new Error("image load timeout")), 3000);
+            });
+            img.src = "data:image/png;base64," + btoa(String.fromCharCode.apply(null, TEST_PNG));
+            await loaded;
+            assert(img.complete === true, "complete = true");
+            assert(img.width === 2 && img.height === 2,
+                "size: " + img.width + "x" + img.height);
+            assert(img.naturalWidth === 2, "naturalWidth");
+
+            const c = new OffscreenCanvas(2, 2);
+            const ctx = c.getContext("2d", { "willReadFrequently": true });
+            ctx.drawImage(img, 0, 0, 2, 2);
+            const d = ctx.getImageData(0, 0, 2, 2).data;
+            assert(d[0] === 255 && d[1] === 0 && d[2] === 0 && d[3] === 255,
+                "(0,0) red: " + d[0] + "," + d[1] + "," + d[2] + "," + d[3]);
+            assert(d[5] === 255, "(1,0) green");
+        });
+
         // ==================== Canvas2D ====================
         await test("Canvas2D: fill / getImageData", () => {
             const c = new OffscreenCanvas(16, 16);

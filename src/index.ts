@@ -889,7 +889,7 @@ const embedXboxAssets = (): Promise<void> =>
 
             // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む。
             // パスは rc ファイル位置 (xbox/) からの相対。
-            fs.writeFileSync(rcPath, 'N2DASSETS RCDATA "assets.pak"\n', "utf8");
+            fs.writeFileSync(rcPath, "N2DASSETS RCDATA 'assets.pak'\n", "utf8");
 
             const total: number = chunks.reduce((n, b): number => n + b.length, 0);
             console.log(pc.green(

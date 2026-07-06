@@ -924,6 +924,173 @@
             assert(px[at(0, 0)] === 0, "左上(0,0)は空 (origin が (0,0) に潰れていない): got=" + px[at(0, 0)]);
         });
 
+        await softTest("WebGPU: compute pipeline + storage buffer 書き戻し (dispatchWorkgroups)", async () => {
+            assert(device, "needs device");
+            // Next2D の 2D ラスタライザは compute を使わないが、WebGPU の機能を特定用途に
+            // 絞らず全面的に利用可能にするため compute 経路を検証する。storage buffer への
+            // 書込みと compute.constants (override) の反映を 1 テストで確認する。
+            const shader = device.createShaderModule({ "code": `
+                override MUL : u32 = 1u;
+                @group(0) @binding(0) var<storage, read_write> outBuf : array<u32>;
+                @compute @workgroup_size(4) fn main(@builtin(global_invocation_id) gid : vec3u) {
+                    outBuf[gid.x] = gid.x * MUL;
+                }
+            ` });
+            const pipeline = device.createComputePipeline({
+                "layout": "auto",
+                "compute": { "module": shader, "entryPoint": "main", "constants": { "MUL": 3 } }
+            });
+            const N = 4;
+            const storage = device.createBuffer({ "size": N * 4,
+                "usage": GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+            const bindGroup = device.createBindGroup({
+                "layout": pipeline.getBindGroupLayout(0),
+                "entries": [{ "binding": 0, "resource": { "buffer": storage } }]
+            });
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.dispatchWorkgroups(1);
+            pass.end();
+            const readback = device.createBuffer({ "size": N * 4,
+                "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyBufferToBuffer(storage, 0, readback, 0, N * 4);
+            device.queue.submit([enc.finish()]);
+            await readback.mapAsync(GPUMapMode.READ);
+            const out = new Uint32Array(readback.getMappedRange().slice(0)); readback.unmap();
+            // MUL=3 override が効けば [0,3,6,9]。無視 (既定 1) なら [0,1,2,3] で落ちる。
+            assert(out[0] === 0 && out[1] === 3 && out[2] === 6 && out[3] === 9,
+                "compute storage 書込み + override MUL=3: got=" + Array.from(out).join(","));
+        });
+
+        await softTest("WebGPU: error scope (pushErrorScope/popErrorScope)", async () => {
+            assert(device, "needs device");
+            // 正常操作 → popErrorScope は null。不正操作 → validation error を捕捉。
+            device.pushErrorScope("validation");
+            device.createBuffer({ "size": 16, "usage": GPUBufferUsage.COPY_DST });
+            const noErr = await device.popErrorScope();
+            assert(noErr === null, "正常操作では error なし: got=" + noErr);
+            device.pushErrorScope("validation");
+            // MAP_READ | MAP_WRITE の同時指定は不正 (validation error)
+            device.createBuffer({ "size": 16, "usage": GPUBufferUsage.MAP_READ | GPUBufferUsage.MAP_WRITE });
+            const err = await device.popErrorScope();
+            assert(err !== null, "不正操作で validation error を捕捉 (null でない)");
+        });
+
+        await softTest("WebGPU: render bundle (createRenderBundleEncoder/executeBundles)", async () => {
+            assert(device, "needs device");
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(0, 1, 0, 1); }
+            ` });
+            const pipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" }
+            });
+            const bundleEnc = device.createRenderBundleEncoder({ "colorFormats": ["rgba8unorm"] });
+            bundleEnc.setPipeline(pipeline); bundleEnc.draw(3);
+            const bundle = bundleEnc.finish();
+            const target = device.createTexture({ "size": { "width": 2, "height": 2 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": target.createView(), "loadOp": "clear", "storeOp": "store", "clearValue": [0, 0, 0, 1] }] });
+            pass.executeBundles([bundle]); pass.end();
+            const buf = device.createBuffer({ "size": 256 * 2, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyTextureToBuffer({ "texture": target }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 2, "height": 2 });
+            device.queue.submit([enc.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const px = new Uint8Array(buf.getMappedRange().slice(0)); buf.unmap();
+            // bundle 経由の draw が実行されないと clearValue の黒のまま。
+            assert(px[1] > 240 && px[0] < 40, "render bundle 経由の緑描画: rgb=" + px[0] + "," + px[1] + "," + px[2]);
+        });
+
+        await softTest("WebGPU: occlusion query (createQuerySet/beginOcclusionQuery/resolveQuerySet)", async () => {
+            assert(device, "needs device");
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+            ` });
+            const pipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" }
+            });
+            const querySet = device.createQuerySet({ "type": "occlusion", "count": 1 });
+            assert(querySet.count === 1 && querySet.type === "occlusion",
+                "querySet メタ: count=" + querySet.count + " type=" + querySet.type);
+            const target = device.createTexture({ "size": { "width": 2, "height": 2 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT });
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": target.createView(), "loadOp": "clear", "storeOp": "store", "clearValue": [0, 0, 0, 1] }],
+                "occlusionQuerySet": querySet });
+            pass.setPipeline(pipeline);
+            pass.beginOcclusionQuery(0); pass.draw(3); pass.endOcclusionQuery();
+            pass.end();
+            const resolveBuf = device.createBuffer({ "size": 8, "usage": GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+            enc.resolveQuerySet(querySet, 0, 1, resolveBuf, 0);
+            const readBuf = device.createBuffer({ "size": 8, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            enc.copyBufferToBuffer(resolveBuf, 0, readBuf, 0, 8);
+            device.queue.submit([enc.finish()]);
+            await readBuf.mapAsync(GPUMapMode.READ);
+            const counts = new Uint32Array(readBuf.getMappedRange().slice(0)); readBuf.unmap();
+            // 全画面三角形を描いたので被覆サンプル数 > 0 (query 未対応なら 0 のまま)。
+            assert(counts[0] > 0, "occlusion query 被覆サンプル数 > 0: got=" + counts[0]);
+        });
+
+        await softTest("WebGPU: async pipeline + onSubmittedWorkDone", async () => {
+            assert(device, "needs device");
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vs() -> @builtin(position) vec4f { return vec4f(0, 0, 0, 1); }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(1, 0, 0, 1); }
+            ` });
+            const rp = await device.createRenderPipelineAsync({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs", "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "point-list" }
+            });
+            assert(rp && typeof rp.getBindGroupLayout === "function", "createRenderPipelineAsync が pipeline を返す");
+            const cs = device.createShaderModule({ "code": `
+                @group(0) @binding(0) var<storage, read_write> o : array<u32>;
+                @compute @workgroup_size(1) fn main() { o[0] = 1u; }
+            ` });
+            const cp = await device.createComputePipelineAsync({
+                "layout": "auto", "compute": { "module": cs, "entryPoint": "main" } });
+            assert(cp && typeof cp.getBindGroupLayout === "function", "createComputePipelineAsync が pipeline を返す");
+            device.queue.submit([]);
+            await device.queue.onSubmittedWorkDone();  // resolve すれば成功
+            assert(true, "onSubmittedWorkDone が resolve");
+        });
+
+        await softTest("WebGPU: debug marker / device.lost / device.destroy", async () => {
+            assert(device, "needs device");
+            // debug marker は結果に影響しないが呼べること (no-throw) を確認する。
+            const enc = device.createCommandEncoder();
+            enc.pushDebugGroup("group"); enc.insertDebugMarker("marker"); enc.popDebugGroup();
+            const target = device.createTexture({ "size": { "width": 2, "height": 2 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT });
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": target.createView(), "loadOp": "clear", "storeOp": "store", "clearValue": [0, 0, 0, 1] }] });
+            pass.pushDebugGroup("pass"); pass.insertDebugMarker("pm"); pass.popDebugGroup();
+            pass.end();
+            device.queue.submit([enc.finish()]);
+            // device.lost は Promise、destroy は関数として存在すること (device 共有中なので実際には呼ばない)。
+            assert(device.lost && typeof device.lost.then === "function", "device.lost は Promise");
+            assert(typeof device.destroy === "function", "device.destroy が存在");
+        });
+
         // ==================== Audio ====================
         let audioCtx = null;
         await test("AudioContext: decodeAudioData (Media Foundation)", async () => {

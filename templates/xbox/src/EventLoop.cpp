@@ -104,7 +104,7 @@ void EventLoop::PumpTimers()
 
         v8::TryCatch try_catch(isolate_);
         (void) fn->Call(ctx, global, 0, nullptr);
-        // 例外はコンソールに委譲 (V8Runtime のメッセージハンドラが拾う)
+        v8util::ReportCaught(isolate_, &try_catch, "setTimeout/setInterval callback");
 
         if (!it->second.repeat) {
             // 単発は実行後に破棄
@@ -149,6 +149,7 @@ void EventLoop::RunAnimationFrame(double timestamp_ms)
         v8::TryCatch try_catch(isolate_);
         v8::Local<v8::Value> args[1] = { arg };
         (void) fn->Call(ctx, global, 1, args);
+        v8util::ReportCaught(isolate_, &try_catch, "requestAnimationFrame callback");
     }
 
     raf_cancelled_.clear();

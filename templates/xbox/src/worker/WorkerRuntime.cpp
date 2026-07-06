@@ -317,6 +317,7 @@ void DispatchMessage(v8::Isolate* isolate, v8::Local<v8::Context> ctx,
     if (target->Get(ctx, Str(isolate, "onmessage")).ToLocal(&on) && on->IsFunction()) {
         v8::TryCatch tc(isolate);
         (void) on.As<v8::Function>()->Call(ctx, target, 1, args);
+        v8util::ReportCaught(isolate, &tc, "onmessage");
     }
     // __messageListeners 配列
     v8::Local<v8::Value> listeners;
@@ -328,6 +329,7 @@ void DispatchMessage(v8::Isolate* isolate, v8::Local<v8::Context> ctx,
             if (arr->Get(ctx, i).ToLocal(&fn) && fn->IsFunction()) {
                 v8::TryCatch tc(isolate);
                 (void) fn.As<v8::Function>()->Call(ctx, target, 1, args);
+                v8util::ReportCaught(isolate, &tc, "message listener");
             }
         }
     }

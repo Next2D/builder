@@ -63,6 +63,22 @@ void EventLoop::ClearTimer(uint32_t id)
 uint32_t EventLoop::RequestAnimationFrame(v8::Local<v8::Function> callback)
 {
     const uint32_t id = next_raf_id_++;
+
+    // 診断: 誰が rAF を登録しているか (関数名 + minify 後スクリプト位置)。
+    // 最初の 40 件 + 以後 300 件毎にサンプルし、凍結後も生きている登録元を特定する。
+    static uint64_t reg_count = 0;
+    ++reg_count;
+    if (reg_count <= 40 || reg_count % 300 == 0) {
+        const std::string name =
+            v8util::ToStdString(isolate_, callback->GetDebugName());
+        v8::Local<v8::Value> res = callback->GetScriptOrigin().ResourceName();
+        std::cerr << "[Loop] rAF register #" << reg_count
+                  << " fn=" << (name.empty() ? "(anon)" : name)
+                  << " at " << v8util::ToStdString(isolate_, res)
+                  << ":" << callback->GetScriptLineNumber() + 1
+                  << ":" << callback->GetScriptColumnNumber() + 1 << std::endl;
+    }
+
     v8::Global<v8::Function> global;
     global.Reset(isolate_, callback);
     raf_callbacks_.emplace_back(id, std::move(global));

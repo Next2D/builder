@@ -123,6 +123,17 @@ void DispatchEvent(v8::Isolate* isolate, v8::Local<v8::Object> target,
         if (lv.As<v8::Object>()->Get(ctx, Str(isolate, type.c_str())).ToLocal(&arrv) &&
             arrv->IsArray()) {
             auto arr = arrv.As<v8::Array>();
+            // 診断: pointer イベントで実際に発火したリスナ数を一度だけ記録する。
+            // 0 なら「リスナが配送先(main_canvas)に登録されていない」= 別要素に付いている。
+            // 1+ なら「リスナは走っている」= 以降はヒットテスト座標の問題。
+            if (type.rfind("pointer", 0) == 0) {
+                static int ptr_log = 0;
+                if (ptr_log < 6) {
+                    ++ptr_log;
+                    v8util::AppendErrorLog("[Input] dispatch " + type
+                        + " listeners=" + std::to_string(arr->Length()));
+                }
+            }
             for (uint32_t i = 0; i < arr->Length(); ++i) {
                 v8::Local<v8::Value> fn;
                 if (arr->Get(ctx, i).ToLocal(&fn) && fn->IsFunction()) {

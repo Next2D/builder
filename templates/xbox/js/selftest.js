@@ -427,6 +427,38 @@
             if (worker.terminate) { worker.terminate() }
         });
 
+        await test("Worker: ArrayBuffer transfer + ImageBitmap clone (render 経路)", async () => {
+            // player の render キューと同じく、大きな buffer は transfer で移譲し、
+            // ImageBitmap はホストオブジェクトとして複製して往復させる
+            const src = "self.onmessage = function(e) { " +
+                        "  var view = new Float32Array(e.data.buffer); " +
+                        "  self.postMessage({ " +
+                        "    sum: view[0] + view[1], " +
+                        "    len: e.data.buffer.byteLength, " +
+                        "    bmp: e.data.bmp, " +
+                        "    buffer: e.data.buffer " +
+                        "  }, [e.data.buffer]); " +
+                        "};";
+            const url = URL.createObjectURL(new Blob([src], { "type": "text/javascript" }));
+            const worker = new Worker(url);
+            const view = new Float32Array(1024);
+            view[0] = 1.5;
+            view[1] = 2.25;
+            const reply = await new Promise((resolve, reject) => {
+                worker.onmessage = (e) => resolve(e.data);
+                worker.onerror = (e) => reject(new Error("worker error: " + (e && e.message)));
+                worker.postMessage({ "buffer": view.buffer, "bmp": bitmap }, [view.buffer]);
+                assert(view.buffer.byteLength === 0, "送信側は detach される (transferable)");
+            });
+            assert(reply.sum === 3.75, "worker 側で中身が読める: " + reply.sum);
+            assert(reply.len === 4096, "worker 側 byteLength: " + reply.len);
+            assert(reply.buffer instanceof ArrayBuffer && reply.buffer.byteLength === 4096,
+                "worker→main への transfer 返却");
+            assert(reply.bmp && reply.bmp.width === 2 && reply.bmp.height === 2,
+                "ImageBitmap クローン往復");
+            if (worker.terminate) { worker.terminate() }
+        });
+
         await test("OffscreenCanvas: transferControlToOffscreen + Worker 転送", async () => {
             const canvas = document.createElement("canvas");
             canvas.width = 8; canvas.height = 8;

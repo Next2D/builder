@@ -4,6 +4,8 @@
 #include "EventLoop.h"
 #include "AssetLoader.h"
 #include "bindings/Bindings.h"
+#include "bindings/ImageSource.h"
+#include "platform/ImageTypes.h"
 #include "v8/V8Util.h"
 
 #include <cstdlib>
@@ -93,12 +95,35 @@ std::string PercentDecode(const std::string& s)
     return out;
 }
 
-bool IsOffscreen(v8::Isolate* isolate, v8::Local<v8::Object> obj)
+bool HasBoolMarker(v8::Isolate* isolate, v8::Local<v8::Object> obj, const char* name)
 {
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
     v8::Local<v8::Value> v;
-    return obj->Get(ctx, Str(isolate, "__isOffscreenCanvas")).ToLocal(&v) &&
+    return obj->Get(ctx, Str(isolate, name)).ToLocal(&v) &&
            v->IsBoolean() && v.As<v8::Boolean>()->Value();
+}
+
+bool IsOffscreen(v8::Isolate* isolate, v8::Local<v8::Object> obj)
+{
+    return HasBoolMarker(isolate, obj, "__isOffscreenCanvas");
+}
+
+bool IsImageBitmapObject(v8::Isolate* isolate, v8::Local<v8::Object> obj)
+{
+    return HasBoolMarker(isolate, obj, "__isImageBitmap");
+}
+
+// WriteHostObject / ReadHostObject のタグ
+constexpr uint32_t kHostObjectOffscreenCanvas = 1;
+constexpr uint32_t kHostObjectImageBitmap = 2;
+
+// メッセージトレース: 定常時のログ洪水を防ぐため、最初の 120 件のあとは
+// 200 件ごとに 1 回だけ出力する (render は 60fps で双方向に流れる)。
+bool TraceMessage()
+{
+    static uint64_t count = 0;
+    ++count;
+    return count <= 120 || count % 200 == 0;
 }
 
 class SerializerDelegate : public v8::ValueSerializer::Delegate {
@@ -116,20 +141,40 @@ public:
     // 「could not be cloned」になる。
     bool HasCustomHostObject(v8::Isolate*) override { return true; }
 
-    // OffscreenCanvas をホストオブジェクトとして扱い WriteHostObject に回す。
+    // OffscreenCanvas / ImageBitmap をホストオブジェクトとして WriteHostObject に回す。
     v8::Maybe<bool> IsHostObject(v8::Isolate*, v8::Local<v8::Object> object) override
     {
-        return v8::Just(IsOffscreen(isolate_, object));
+        return v8::Just(IsOffscreen(isolate_, object) ||
+                        IsImageBitmapObject(isolate_, object));
     }
 
     v8::Maybe<bool> WriteHostObject(v8::Isolate*, v8::Local<v8::Object> object) override
     {
         v8::Local<v8::Context> ctx = isolate_->GetCurrentContext();
+
+        // ImageBitmap: ピクセルごと複製する (render メッセージの imageBitmaps 用)
+        if (IsImageBitmapObject(isolate_, object)) {
+            const uint8_t* px = nullptr;
+            uint32_t w = 0, h = 0;
+            if (!GetImageSourcePixels(isolate_, object, &px, &w, &h) || !px) {
+                isolate_->ThrowException(v8::Exception::Error(
+                    Str(isolate_, "ImageBitmap clone failed")));
+                return v8::Nothing<bool>();
+            }
+            serializer->WriteUint32(kHostObjectImageBitmap);
+            serializer->WriteUint32(w);
+            serializer->WriteUint32(h);
+            serializer->WriteRawBytes(px, static_cast<size_t>(w) * h * 4);
+            return v8::Just(true);
+        }
+
+        // OffscreenCanvas
         // Get 失敗時に空 Local を触らないようフォールバックを入れる
         v8::Local<v8::Value> w = v8::Undefined(isolate_);
         v8::Local<v8::Value> h = v8::Undefined(isolate_);
         (void) object->Get(ctx, Str(isolate_, "width")).ToLocal(&w);
         (void) object->Get(ctx, Str(isolate_, "height")).ToLocal(&h);
+        serializer->WriteUint32(kHostObjectOffscreenCanvas);
         serializer->WriteUint32(w->IsNumber() ? static_cast<uint32_t>(w.As<v8::Number>()->Value()) : 0);
         serializer->WriteUint32(h->IsNumber() ? static_cast<uint32_t>(h.As<v8::Number>()->Value()) : 0);
         return v8::Just(true);
@@ -148,6 +193,26 @@ public:
 
     v8::MaybeLocal<v8::Object> ReadHostObject(v8::Isolate*) override
     {
+        uint32_t tag = 0;
+        if (!deserializer->ReadUint32(&tag)) {
+            return v8::MaybeLocal<v8::Object>();
+        }
+
+        if (tag == kHostObjectImageBitmap) {
+            uint32_t w = 0, h = 0;
+            const void* px = nullptr;
+            if (!deserializer->ReadUint32(&w) || !deserializer->ReadUint32(&h) ||
+                !deserializer->ReadRawBytes(static_cast<size_t>(w) * h * 4, &px)) {
+                return v8::MaybeLocal<v8::Object>();
+            }
+            auto* img = new DecodedImage();
+            img->width = w;
+            img->height = h;
+            img->rgba.assign(static_cast<const uint8_t*>(px),
+                             static_cast<const uint8_t*>(px) + static_cast<size_t>(w) * h * 4);
+            return WrapImageBitmap(isolate_, img);
+        }
+
         uint32_t w = 0, h = 0;
         deserializer->ReadUint32(&w);
         deserializer->ReadUint32(&h);
@@ -163,35 +228,68 @@ private:
 
 } // namespace
 
-std::vector<uint8_t> SerializeMessage(v8::Isolate* isolate, v8::Local<v8::Context> source_ctx,
-                                      v8::Local<v8::Value> message,
-                                      v8::Local<v8::Value> /*transfer_list*/)
+WorkerMessage SerializeMessage(v8::Isolate* isolate, v8::Local<v8::Context> source_ctx,
+                               v8::Local<v8::Value> message,
+                               v8::Local<v8::Value> transfer_list)
 {
     v8::Context::Scope scope(source_ctx);
     SerializerDelegate delegate(isolate);
     v8::ValueSerializer serializer(isolate, &delegate);
     delegate.serializer = &serializer;
 
+    // transfer_list の ArrayBuffer は中身を埋め込まず所有権を移譲する
+    // (player の render キューは数十 MB — 毎フレームのコピーは不可)。
+    std::vector<v8::Local<v8::ArrayBuffer>> transfer_abs;
+    if (!transfer_list.IsEmpty() && transfer_list->IsArray()) {
+        auto arr = transfer_list.As<v8::Array>();
+        for (uint32_t i = 0; i < arr->Length(); ++i) {
+            v8::Local<v8::Value> item;
+            if (arr->Get(source_ctx, i).ToLocal(&item) && item->IsArrayBuffer()) {
+                auto ab = item.As<v8::ArrayBuffer>();
+                if (ab->IsDetachable()) {
+                    serializer.TransferArrayBuffer(
+                        static_cast<uint32_t>(transfer_abs.size()), ab);
+                    transfer_abs.push_back(ab);
+                }
+            }
+        }
+    }
+
     serializer.WriteHeader();
-    // 通常の ArrayBuffer は値としてシリアライズされる (transfer は将来最適化)。
     if (serializer.WriteValue(source_ctx, message).IsNothing()) {
         return {};
     }
+
+    WorkerMessage result;
     std::pair<uint8_t*, size_t> buffer = serializer.Release();
-    std::vector<uint8_t> bytes(buffer.first, buffer.first + buffer.second);
+    result.data.assign(buffer.first, buffer.first + buffer.second);
     free(buffer.first);
-    return bytes;
+
+    // 成功後に detach (ブラウザの transferable と同じく送信側では使えなくなる)
+    for (auto& ab : transfer_abs) {
+        result.transfers.push_back(ab->GetBackingStore());
+        (void) ab->Detach(v8::Local<v8::Value>());
+    }
+    return result;
 }
 
 v8::MaybeLocal<v8::Value> DeserializeMessage(v8::Isolate* isolate,
                                              v8::Local<v8::Context> target_ctx,
-                                             const std::vector<uint8_t>& bytes)
+                                             const WorkerMessage& message)
 {
     v8::Context::Scope scope(target_ctx);
     HostContext* host = HostContext::From(isolate);
     DeserializerDelegate delegate(isolate, host);
-    v8::ValueDeserializer deserializer(isolate, bytes.data(), bytes.size(), &delegate);
+    v8::ValueDeserializer deserializer(isolate, message.data.data(),
+                                       message.data.size(), &delegate);
     delegate.deserializer = &deserializer;
+
+    // transfer された ArrayBuffer を同じ backing store で再装着する (ゼロコピー)
+    for (size_t i = 0; i < message.transfers.size(); ++i) {
+        v8::Local<v8::ArrayBuffer> ab =
+            v8::ArrayBuffer::New(isolate, message.transfers[i]);
+        deserializer.TransferArrayBuffer(static_cast<uint32_t>(i), ab);
+    }
 
     if (deserializer.ReadHeader(target_ctx).IsNothing()) {
         return v8::MaybeLocal<v8::Value>();
@@ -282,11 +380,13 @@ void WorkerSelfPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto* instance = static_cast<WorkerInstance*>(args.Data().As<v8::External>()->Value());
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
-    std::cerr << "[Worker] worker->main postMessage: serializing" << std::endl;
-    auto bytes = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
-    std::cerr << "[Worker] worker->main postMessage: " << bytes.size() << " bytes" << std::endl;
-    if (!bytes.empty()) {
-        instance->PostToMain(std::move(bytes));
+    auto message = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
+    if (TraceMessage()) {
+        std::cerr << "[Worker] worker->main postMessage: " << message.data.size()
+                  << " bytes (+" << message.transfers.size() << " transfers)" << std::endl;
+    }
+    if (!message.data.empty()) {
+        instance->PostToMain(std::move(message));
     }
 }
 
@@ -317,11 +417,13 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto* instance = static_cast<WorkerInstance*>(args.Data().As<v8::External>()->Value());
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
-    std::cerr << "[Worker] main->worker postMessage: serializing" << std::endl;
-    auto bytes = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
-    std::cerr << "[Worker] main->worker postMessage: " << bytes.size() << " bytes" << std::endl;
-    if (!bytes.empty()) {
-        instance->PostToWorker(std::move(bytes));
+    auto message = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
+    if (TraceMessage()) {
+        std::cerr << "[Worker] main->worker postMessage: " << message.data.size()
+                  << " bytes (+" << message.transfers.size() << " transfers)" << std::endl;
+    }
+    if (!message.data.empty()) {
+        instance->PostToWorker(std::move(message));
     }
 }
 
@@ -425,14 +527,14 @@ bool WorkerInstance::Start()
 
 void WorkerInstance::Terminate() { terminated_ = true; }
 
-void WorkerInstance::PostToWorker(std::vector<uint8_t> bytes)
+void WorkerInstance::PostToWorker(WorkerMessage message)
 {
-    to_worker_.push_back(WorkerMessage{std::move(bytes)});
+    to_worker_.push_back(std::move(message));
 }
 
-void WorkerInstance::PostToMain(std::vector<uint8_t> bytes)
+void WorkerInstance::PostToMain(WorkerMessage message)
 {
-    to_main_.push_back(WorkerMessage{std::move(bytes)});
+    to_main_.push_back(std::move(message));
 }
 
 void WorkerInstance::DeliverToWorker(double now_ms)
@@ -444,12 +546,19 @@ void WorkerInstance::DeliverToWorker(double now_ms)
     while (!to_worker_.empty()) {
         WorkerMessage m = std::move(to_worker_.front());
         to_worker_.pop_front();
-        std::cerr << "[Worker] deliver main->worker (" << m.data.size() << " bytes)" << std::endl;
+        const bool trace = TraceMessage();
+        if (trace) {
+            std::cerr << "[Worker] deliver main->worker (" << m.data.size() << " bytes)" << std::endl;
+        }
         v8::Local<v8::Value> data;
-        if (DeserializeMessage(isolate_, ctx, m.data).ToLocal(&data)) {
-            std::cerr << "[Worker] deserialized, dispatching to worker onmessage" << std::endl;
+        if (DeserializeMessage(isolate_, ctx, m).ToLocal(&data)) {
             DispatchMessage(isolate_, ctx, ctx->Global(), data);
-            std::cerr << "[Worker] worker onmessage done" << std::endl;
+            if (trace) {
+                std::cerr << "[Worker] worker onmessage done" << std::endl;
+            }
+        } else {
+            std::cerr << "[Worker] main->worker deserialize failed ("
+                      << m.data.size() << " bytes)" << std::endl;
         }
     }
 
@@ -471,12 +580,19 @@ void WorkerInstance::DeliverToMain()
     while (!to_main_.empty()) {
         WorkerMessage m = std::move(to_main_.front());
         to_main_.pop_front();
-        std::cerr << "[Worker] deliver worker->main (" << m.data.size() << " bytes)" << std::endl;
+        const bool trace = TraceMessage();
+        if (trace) {
+            std::cerr << "[Worker] deliver worker->main (" << m.data.size() << " bytes)" << std::endl;
+        }
         v8::Local<v8::Value> data;
-        if (DeserializeMessage(isolate_, main_ctx, m.data).ToLocal(&data)) {
-            std::cerr << "[Worker] deserialized, dispatching to main onmessage" << std::endl;
+        if (DeserializeMessage(isolate_, main_ctx, m).ToLocal(&data)) {
             DispatchMessage(isolate_, main_ctx, worker_obj, data);
-            std::cerr << "[Worker] main onmessage done" << std::endl;
+            if (trace) {
+                std::cerr << "[Worker] main onmessage done" << std::endl;
+            }
+        } else {
+            std::cerr << "[Worker] worker->main deserialize failed ("
+                      << m.data.size() << " bytes)" << std::endl;
         }
     }
 }

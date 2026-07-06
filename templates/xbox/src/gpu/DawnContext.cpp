@@ -196,12 +196,12 @@ void DawnContext::DebugProbeSurface()
     device_.GetQueue().Submit(1, &commands);
 
     bool done = false;
-    buffer.MapAsync(wgpu::MapMode::Read, 0, buf_desc.size,
+    wgpu::Future future = buffer.MapAsync(wgpu::MapMode::Read, 0, buf_desc.size,
         wgpu::CallbackMode::AllowProcessEvents,
         [&done](wgpu::MapAsyncStatus, wgpu::StringView) { done = true; });
-    for (int i = 0; i < 100000 && !done; ++i) {
-        instance_.ProcessEvents();
-    }
+    // GPU 完了待ちは TimedWaitAny で行う (ProcessEvents の空スピンでは
+    // GPU がフレーム描画中のとき完了前にループ上限へ達する)
+    instance_.WaitAny(future, 2'000'000'000);   // 2s
     if (!done) {
         std::cerr << "[GPU] surface probe: map timeout" << std::endl;
         return;

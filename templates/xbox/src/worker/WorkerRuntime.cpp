@@ -502,6 +502,31 @@ bool WorkerInstance::Start()
         source = std::move(*src);
     }
     std::cerr << "[Worker] source resolved (" << source.size() << " bytes)" << std::endl;
+
+    // «診断» レンダラ worker のフレームサイクル (frameStarted / mainTexture) を追跡する。
+    // 黒画面問題: getCurrentTexture がフレーム 3 回目以降呼ばれなくなる現象の原因特定用。
+    // minify 後も this.プロパティ名は保持されるためパターンは安定。見つからなければ無変更。
+    if (source.find("getCurrentTexture") != std::string::npos) {
+        const auto patch = [&source](const std::string& from, const std::string& to) {
+            const auto pos = source.find(from);
+            if (pos != std::string::npos) {
+                source.replace(pos, from.size(), to);
+            } else {
+                std::cerr << "[Worker] trace patch not applied: " << from.substr(0, 40) << std::endl;
+            }
+        };
+        source.insert(0,
+            "var __n2dT={};function __n2dTrace(k,s){var n=(__n2dT[k]=(__n2dT[k]||0)+1);"
+            "if(n<=30||n%300===0)console.info(\"[trace]\",k,\"#\"+n,s||\"\")}\n");
+        patch("clearTransferBounds(){this.beginFrame()}",
+              "clearTransferBounds(){__n2dTrace(\"CTB\",\"fs=\"+this.frameStarted+\" mt=\"+!!this.mainTexture);this.beginFrame()}");
+        patch("ensureMainTexture(){this.mainTexture||",
+              "ensureMainTexture(){__n2dTrace(\"EMT\",\"mt=\"+!!this.mainTexture+\" rc=\"+this.$needsReconfigure);this.mainTexture||");
+        patch("endFrame(){if(this.frameStarted){",
+              "endFrame(){__n2dTrace(\"EF\",\"fs=\"+this.frameStarted+\" enc=\"+!!this.commandEncoder);if(this.frameStarted){");
+        patch("transferMainCanvas(){if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)",
+              "transferMainCanvas(){__n2dTrace(\"TMC\",\"att=\"+!!(this.$mainAttachmentObject&&this.$mainAttachmentObject.texture));if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)");
+    }
     v8::TryCatch tc(isolate_);
     v8::ScriptOrigin origin(Str(isolate_, url_));
     v8::Local<v8::String> code = Str(isolate_, source);

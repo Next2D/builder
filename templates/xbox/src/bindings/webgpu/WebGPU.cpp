@@ -9,6 +9,7 @@
 #include "bindings/ImageSource.h"
 
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <vector>
 
@@ -323,6 +324,12 @@ static void Queue_Submit(const v8::FunctionCallbackInfo<v8::Value>& args)
             }
         }
     }
+    static uint64_t count = 0;
+    ++count;
+    if (count <= 10 || count % 300 == 0) {
+        std::cerr << "[GPU] queue.submit #" << count
+                  << " (" << buffers.size() << " cmd)" << std::endl;
+    }
     queue.Submit(buffers.size(), buffers.data());
 }
 
@@ -627,6 +634,11 @@ static void Ctx_Configure(const v8::FunctionCallbackInfo<v8::Value>& args)
     DawnContext* gpu = HostContext::From(isolate)->gpu;
     // device は既に DawnContext が保持。フォーマット/サイズのみ反映する。
     if (args.Length() > 0 && args[0]->IsObject()) {
+        static uint64_t count = 0;
+        ++count;
+        if (count <= 10 || count % 300 == 0) {
+            std::cerr << "[GPU] context.configure #" << count << std::endl;
+        }
         // width/height は canvas サイズを使用 (configure の size は任意)
         gpu->Configure(gpu->width(), gpu->height());
     }
@@ -636,6 +648,11 @@ static void Ctx_GetCurrentTexture(const v8::FunctionCallbackInfo<v8::Value>& arg
 {
     v8::Isolate* isolate = args.GetIsolate();
     DawnContext* gpu = HostContext::From(isolate)->gpu;
+    static uint64_t count = 0;
+    ++count;
+    if (count <= 10 || count % 300 == 0) {
+        std::cerr << "[GPU] getCurrentTexture #" << count << std::endl;
+    }
     args.GetReturnValue().Set(WrapTexture(isolate, gpu->GetCurrentTexture()));
 }
 

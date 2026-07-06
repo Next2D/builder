@@ -1347,6 +1347,11 @@ struct RenderPipelineScratch {
     // ConstantEntry.key が指すため CreateRenderPipeline 完了まで生存させる。
     std::vector<std::string> vs_const_keys, fs_const_keys;
     std::vector<wgpu::ConstantEntry> vs_constants, fs_constants;
+    // desc.depthStencil / desc.fragment はこれらのアドレスを指す。ディスクリプタ構築を
+    // ヘルパに切り出したため、ローカルだとヘルパ return でダングリング化する。scratch に
+    // 保持して CreateRenderPipeline[Async] が同期コピーするまで生存させる。
+    wgpu::DepthStencilState depth = {};
+    wgpu::FragmentState fragment = {};
 };
 
 // { "KEY": number|bool, ... } を wgpu::ConstantEntry 配列へ変換する。
@@ -1472,7 +1477,8 @@ static void FillRenderPipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Obj
     }
 
     // depthStencil (マスク処理は stencil8 + stencilFront/Back を使う)
-    wgpu::DepthStencilState depth = {};
+    // scratch.depth を参照 (アドレスを desc.depthStencil に格納するため寿命を延ばす)。
+    wgpu::DepthStencilState& depth = scratch.depth;
     v8::Local<v8::Value> dsv = Prop(isolate, d, "depthStencil");
     if (dsv->IsObject()) {
         auto ds = dsv.As<v8::Object>();
@@ -1532,7 +1538,8 @@ static void FillRenderPipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Obj
     }
 
     // fragment
-    wgpu::FragmentState fragment = {};
+    // scratch.fragment を参照 (アドレスを desc.fragment に格納するため寿命を延ばす)。
+    wgpu::FragmentState& fragment = scratch.fragment;
     v8::Local<v8::Value> fv = Prop(isolate, d, "fragment");
     if (fv->IsObject()) {
         auto f = fv.As<v8::Object>();

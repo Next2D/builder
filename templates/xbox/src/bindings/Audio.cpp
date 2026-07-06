@@ -5,6 +5,7 @@
 #include "EventTarget.h"
 #include "platform/AudioEngine.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <memory>
 #include <vector>
@@ -22,11 +23,6 @@ struct GainParam {
     std::shared_ptr<AudioVoice> voice;  // source.connect(gain) 時にリンクされる
 };
 
-void ReleaseGainParam(const v8::WeakCallbackInfo<GainParam>& info)
-{
-    delete info.GetParameter();
-}
-
 // 再生中(非ループ)の source ノード。毎フレーム IsFinished を見て "ended" を発火する。
 std::vector<v8::Global<v8::Object>>& PlayingSources()
 {
@@ -41,18 +37,11 @@ struct Holder {
 };
 
 template <typename T>
-void ReleaseHolder(const v8::WeakCallbackInfo<Holder<T>>& info)
-{
-    delete info.GetParameter();
-}
-
-template <typename T>
 void Attach(v8::Isolate* isolate, v8::Local<v8::Object> obj, std::shared_ptr<T> ptr)
 {
     auto* holder = new Holder<T>{std::move(ptr)};
     obj->SetInternalField(0, v8::External::New(isolate, holder));
-    auto* handle = new v8::Global<v8::Object>(isolate, obj);
-    handle->SetWeak(holder, ReleaseHolder<T>, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, obj, holder);
 }
 
 template <typename T>
@@ -198,8 +187,7 @@ void CreateGain(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Local<v8::Object> gain = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
     auto* param = new GainParam();
     gain->SetInternalField(0, v8::External::New(isolate, param));
-    auto* handle = new v8::Global<v8::Object>(isolate, gain);
-    handle->SetWeak(param, ReleaseGainParam, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, gain, param);
 
     gain->SetNativeDataProperty(ctx, Str(isolate, "value"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
@@ -225,6 +213,16 @@ void CreateGain(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 // 毎フレーム呼ばれ、再生終了した source ノードへ "ended" を発火する (main.cpp のループから)。
 } // namespace
+
+// V8 破棄前に呼ぶ。再生追跡リストの v8::Global を解放する。
+// (放置すると static デストラクタが V8 破棄後に走りアクセス違反になる)
+void ShutdownAudioEvents()
+{
+    for (auto& g : PlayingSources()) {
+        g.Reset();
+    }
+    PlayingSources().clear();
+}
 
 void PumpAudioEvents(v8::Isolate* isolate)
 {
@@ -285,6 +283,83 @@ void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
     resolver->Resolve(ctx, buffer).Check();
 }
 
+// --- Audio (HTMLAudioElement 最小実装) -------------------------------------
+// ゲームコードが `new Audio(url)` で効果音/BGM を再生する経路。
+// play/pause/paused/loop/volume/currentTime/preload をサポートする。
+// pause→play は先頭からの再生になる (位置レジュームは未対応の近似)。
+
+void AudioElementPlay(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    v8::Local<v8::Object> self = args.This();
+
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    auto voice = Get<AudioVoice>(self);
+    if (voice) {
+        bool loop = false;
+        double volume = 1.0;
+        v8::Local<v8::Value> v;
+        if (self->Get(ctx, Str(isolate, "loop")).ToLocal(&v)) {
+            loop = v->BooleanValue(isolate);
+        }
+        if (self->Get(ctx, Str(isolate, "volume")).ToLocal(&v) && v->IsNumber()) {
+            volume = v.As<v8::Number>()->Value();
+        }
+        voice->SetVolume(static_cast<float>(volume));
+        voice->Start(loop);
+    }
+    v8util::SetValue(isolate, self, "paused", v8::Boolean::New(isolate, false));
+    resolver->Resolve(ctx, v8::Undefined(isolate)).Check();
+}
+
+void AudioElementPause(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto voice = Get<AudioVoice>(args.This());
+    if (voice) {
+        voice->Stop();
+    }
+    v8util::SetValue(isolate, args.This(), "paused", v8::Boolean::New(isolate, true));
+}
+
+void AudioElementConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    if (!args.IsConstructCall()) {
+        v8util::ThrowTypeError(isolate, "Audio must be called with new");
+        return;
+    }
+    v8::Local<v8::Object> self = args.This();
+    Attach<AudioVoice>(isolate, self, nullptr);
+
+    // URL 指定があれば同期でロード+デコードして voice を作る (失敗時は無音の no-op)
+    if (args.Length() > 0 && args[0]->IsString()) {
+        const std::string src = ToStdString(isolate, args[0]);
+        v8util::SetValue(isolate, self, "src", args[0]);
+        HostContext* host = HostContext::From(isolate);
+        auto bytes = host->assets->ReadBinary(src);
+        if (bytes) {
+            auto pcm = std::make_shared<PcmBuffer>();
+            if (AudioEngine::Decode(*bytes, *pcm)) {
+                Attach<AudioVoice>(isolate, self, host->audio->CreateVoice(pcm));
+            }
+        }
+    }
+
+    v8util::SetValue(isolate, self, "loop", v8::Boolean::New(isolate, false));
+    v8util::SetValue(isolate, self, "volume", v8::Number::New(isolate, 1.0));
+    v8util::SetValue(isolate, self, "paused", v8::Boolean::New(isolate, true));
+    v8util::SetValue(isolate, self, "preload", Str(isolate, "auto"));
+    v8util::SetValue(isolate, self, "currentTime", v8::Number::New(isolate, 0));
+    v8util::SetMethod(isolate, self, "play", AudioElementPlay);
+    v8util::SetMethod(isolate, self, "pause", AudioElementPause);
+    InstallEventTarget(isolate, self);
+    args.GetReturnValue().Set(self);
+}
+
 // AudioContext コンストラクタ
 void AudioContextConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
@@ -315,6 +390,15 @@ void InstallAudio(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContex
 
     global->Set(ctx, Str(isolate, "AudioContext"), fn).Check();
     global->Set(ctx, Str(isolate, "webkitAudioContext"), fn).Check();
+
+    // Audio (HTMLAudioElement 最小): ゲームコードの `new Audio(url)` 用。
+    // インスタンスは内部フィールドに AudioVoice ホルダを持つ。
+    v8::Local<v8::FunctionTemplate> audio_tmpl =
+        v8::FunctionTemplate::New(isolate, AudioElementConstructor);
+    audio_tmpl->SetClassName(Str(isolate, "Audio"));
+    audio_tmpl->InstanceTemplate()->SetInternalFieldCount(1);
+    global->Set(ctx, Str(isolate, "Audio"),
+                audio_tmpl->GetFunction(ctx).ToLocalChecked()).Check();
 }
 
 } // namespace next2d

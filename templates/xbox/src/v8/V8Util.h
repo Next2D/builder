@@ -2,6 +2,7 @@
 #pragma once
 
 #include <v8.h>
+#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -51,6 +52,34 @@ inline void SetValue(v8::Isolate* isolate,
 inline void ThrowTypeError(v8::Isolate* isolate, std::string_view message)
 {
     isolate->ThrowException(v8::Exception::TypeError(Str(isolate, message)));
+}
+
+// TryCatch が例外を保持していれば stderr へ報告する。
+// rAF / タイマー / onmessage / イベントリスナーのコールバックは TryCatch で
+// 保護されるが、報告しないと例外が無音で消えて原因究明が不可能になる
+// (レンダラ worker が毎フレーム throw していても黒画面にしか見えない)。
+inline void ReportCaught(v8::Isolate* isolate, v8::TryCatch* tc, const char* where)
+{
+    if (!tc->HasCaught()) {
+        return;
+    }
+    v8::HandleScope hs(isolate);
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    const std::string text = ToStdString(isolate, tc->Exception());
+    std::cerr << "[JS] exception in " << where << ": " << text << std::endl;
+    v8::Local<v8::Value> stack;
+    if (!ctx.IsEmpty() && tc->StackTrace(ctx).ToLocal(&stack)) {
+        const std::string s = ToStdString(isolate, stack);
+        if (!s.empty() && s != text) {
+            std::cerr << s << std::endl;
+        }
+    }
+    v8::Local<v8::Message> message = tc->Message();
+    if (!message.IsEmpty() && !ctx.IsEmpty()) {
+        std::cerr << "  at "
+                  << ToStdString(isolate, message->GetScriptOrigin().ResourceName())
+                  << ":" << message->GetLineNumber(ctx).FromMaybe(0) << std::endl;
+    }
 }
 
 } // namespace next2d::v8util

@@ -135,6 +135,9 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
                                           int width, int height)
 {
     v8::Local<v8::Object> canvas = v8::Object::New(isolate);
+    // player の canvasSetPositionService は children[0].localName === "canvas" を確認する
+    SetValue(isolate, canvas, "tagName", Str(isolate, "CANVAS"));
+    SetValue(isolate, canvas, "localName", Str(isolate, "canvas"));
     SetValue(isolate, canvas, "width",
              v8::Integer::New(isolate, width ? width : host->viewport_width));
     SetValue(isolate, canvas, "height",
@@ -146,6 +149,48 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
     SetMethod(isolate, canvas, "transferControlToOffscreen", TransferControlToOffscreen);
     InstallEventTarget(isolate, canvas);   // pointer/wheel リスナを保持
     SetMethod(isolate, canvas, "getBoundingClientRect", GetBoundingClientRect);
+
+    // player の CanvasInitializeService が canvas.setAttribute("style", ...) を呼ぶ。
+    // 属性は __attrs に保存する (見た目の CSS はネイティブ描画では不要)。
+    SetMethod(isolate, canvas, "setAttribute",
+        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+            if (a.Length() < 2) return;
+            v8::Isolate* iso = a.GetIsolate();
+            v8::Local<v8::Context> c = iso->GetCurrentContext();
+            v8::Local<v8::Value> attrs;
+            v8::Local<v8::Object> store;
+            if (a.This()->Get(c, v8util::Str(iso, "__attrs")).ToLocal(&attrs) && attrs->IsObject()) {
+                store = attrs.As<v8::Object>();
+            } else {
+                store = v8::Object::New(iso);
+                v8util::SetValue(iso, a.This(), "__attrs", store);
+            }
+            store->Set(c, a[0], a[1]).Check();
+        });
+    SetMethod(isolate, canvas, "getAttribute",
+        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+            a.GetReturnValue().SetNull();
+            if (a.Length() < 1) return;
+            v8::Isolate* iso = a.GetIsolate();
+            v8::Local<v8::Context> c = iso->GetCurrentContext();
+            v8::Local<v8::Value> attrs;
+            if (a.This()->Get(c, v8util::Str(iso, "__attrs")).ToLocal(&attrs) && attrs->IsObject()) {
+                v8::Local<v8::Value> v;
+                if (attrs.As<v8::Object>()->Get(c, a[0]).ToLocal(&v) && !v->IsUndefined()) {
+                    a.GetReturnValue().Set(v);
+                }
+            }
+        });
+    SetMethod(isolate, canvas, "removeAttribute",
+        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+            if (a.Length() < 1) return;
+            v8::Isolate* iso = a.GetIsolate();
+            v8::Local<v8::Context> c = iso->GetCurrentContext();
+            v8::Local<v8::Value> attrs;
+            if (a.This()->Get(c, v8util::Str(iso, "__attrs")).ToLocal(&attrs) && attrs->IsObject()) {
+                (void) attrs.As<v8::Object>()->Delete(c, a[0]);
+            }
+        });
     // 主要 canvas を HostContext から参照できるよう記録 (WndProc の入力配送先)
     HostContext::From(isolate)->main_canvas.Reset(isolate, canvas);
     return canvas;

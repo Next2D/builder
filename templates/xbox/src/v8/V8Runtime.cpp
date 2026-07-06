@@ -43,16 +43,26 @@ V8Runtime::~V8Runtime()
 void V8Runtime::InitializeProcess(const char* exec_path)
 {
     // Xbox(GDK) / Nintendo Switch のリテール環境は動的コード生成(JIT)を禁止する。
-    // V8 を jitless (Ignition インタプリタのみ・TurboFan/Sparkplug/RWXページ無し) で動かす。
-    // prebuilt V8 (build-v8.yml) は v8_jitless=true + turbofan/wasm 無効でビルドされる。
-    // wasm/opt 系フラグはそのビルドに存在しないため渡さない (未知フラグ警告を避ける)。
-    v8::V8::SetFlagsFromString("--jitless");
+    // - JS: --jitless (Ignition インタプリタのみ・RWX ページ無し)
+    // - WebAssembly: --wasm-jitless (DrumBrake = V8 の wasm インタープリタ。
+    //   prebuilt V8 r2 は v8_enable_drumbrake=true でビルドされている)
+    v8::V8::SetFlagsFromString("--jitless --wasm-jitless");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);
     v8::V8::InitializeExternalStartupData(exec_path);
     platform_ = v8::platform::NewDefaultPlatform();
     v8::V8::InitializePlatform(platform_.get());
     v8::V8::Initialize();
+
+    // WebAssembly (DrumBrake) はメモリ境界検査を guard page + trap handler で行うため、
+    // embedder が trap handler を有効化する必要がある (d8/Chrome も起動時に行う)。
+    // 未設定のまま wasm を実行するとインタープリタ初期化で fail-fast する。
+    // コンソール実機で VEH が使えない場合は、V8 を v8_drumbrake_bounds_checks=true
+    // (明示境界チェック) でビルドし直すこと。
+    if (!v8::V8::EnableWebAssemblyTrapHandler(true)) {
+        std::cerr << "warning: EnableWebAssemblyTrapHandler failed"
+                  << " - WebAssembly may not work" << std::endl;
+    }
 }
 
 void V8Runtime::ShutdownProcess()
@@ -75,6 +85,35 @@ bool V8Runtime::Initialize(HostContext* host)
 
     // 例外時に未処理を潰さないよう、明示的に MicrotasksPolicy を制御する
     isolate_->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
+
+    // 未処理の Promise 拒否を stderr へ報告する。framework の boot は async のため、
+    // この報告が無いと例外がどこにも出ずゲームが無音で停止する (実際に発生した)。
+    isolate_->SetPromiseRejectCallback([](v8::PromiseRejectMessage message) {
+        if (message.GetEvent() != v8::kPromiseRejectWithNoHandler) {
+            return;   // 後からハンドラが付く分などは報告しない
+        }
+        v8::Isolate* isolate = v8::Isolate::GetCurrent();
+        v8::HandleScope hs(isolate);
+        v8::Local<v8::Value> value = message.GetValue();
+        std::string text = "(no value)";
+        std::string stack;
+        if (!value.IsEmpty()) {
+            text = v8util::ToStdString(isolate, value);
+            v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+            if (!ctx.IsEmpty() && value->IsObject()) {
+                v8::Local<v8::Value> s;
+                if (value.As<v8::Object>()
+                        ->Get(ctx, v8util::Str(isolate, "stack")).ToLocal(&s) &&
+                    s->IsString()) {
+                    stack = v8util::ToStdString(isolate, s);
+                }
+            }
+        }
+        std::cerr << "[V8] Unhandled promise rejection: " << text << std::endl;
+        if (!stack.empty() && stack != text) {
+            std::cerr << stack << std::endl;
+        }
+    });
 
     v8::Isolate::Scope isolate_scope(isolate_);
     v8::HandleScope handle_scope(isolate_);
@@ -149,10 +188,35 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         return cached->second.Get(isolate_);
     }
 
-    const std::string source = ReadTextFile(abs);
+    std::string source = ReadTextFile(abs);
     if (source.empty() && !fs::exists(abs)) {
         v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
         return v8::MaybeLocal<v8::Module>();
+    }
+
+    // «診断» Tween(Job) の凍結調査: app.js の Job 更新コードへトレースを注入する。
+    // rAF が 2 本 (ticker + 1 Job) のまま描画が止まる現象の currentTime/duration の
+    // 実値を観測する。パターン不一致なら無変更 (ログのみ)。
+    if (source.find("(e.currentTime=(t-e.startTime)/1e3,") != std::string::npos) {
+        const auto patch = [&source](const std::string& from, const std::string& to) {
+            const auto pos = source.find(from);
+            if (pos != std::string::npos) {
+                source.replace(pos, from.size(), to);
+            } else {
+                std::cerr << "[V8] job trace patch not applied: "
+                          << from.substr(0, 40) << std::endl;
+            }
+        };
+        patch("(e.currentTime=(t-e.startTime)/1e3,",
+              "(e.currentTime=(t-e.startTime)/1e3,"
+              "((globalThis.__jt=(globalThis.__jt||0)+1)<=60||globalThis.__jt%600===0)&&"
+              "console.info(\"[jobtrace] #\"+globalThis.__jt,"
+              "\"ct=\"+e.currentTime.toFixed(3),\"dur=\"+e.duration,"
+              "\"t=\"+t.toFixed(1),\"st=\"+e.startTime.toFixed(1)),");
+        patch("e.currentTime>=e.duration?(",
+              "e.currentTime>=e.duration?("
+              "console.info(\"[jobtrace] COMPLETE dur=\"+e.duration),");
+        std::cerr << "[V8] job trace patch applied to " << abs << std::endl;
     }
 
     v8::Local<v8::String> src = v8util::Str(isolate_, source);

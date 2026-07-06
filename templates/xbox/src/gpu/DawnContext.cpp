@@ -1,7 +1,6 @@
 #include "DawnContext.h"
 
 #include <Windows.h>
-#include <dawn/native/DawnNative.h>
 #include <iostream>
 
 namespace next2d {
@@ -114,12 +113,13 @@ bool DawnContext::AcquireDevice()
         return false;
     }
 
-    // surface の優先フォーマットを取得
+    // surface の優先フォーマットと CopySrc 可否 (デバッグ読み戻し用) を取得
     wgpu::SurfaceCapabilities caps = {};
     surface_.GetCapabilities(adapter_, &caps);
     if (caps.formatCount > 0) {
         format_ = caps.formats[0];
     }
+    can_copy_src_ = (caps.usages & wgpu::TextureUsage::CopySrc) == wgpu::TextureUsage::CopySrc;
 
     Configure(width_, height_);
     return true;
@@ -138,26 +138,113 @@ void DawnContext::Configure(uint32_t width, uint32_t height)
     config.device      = device_;
     config.format      = format_;
     config.usage       = wgpu::TextureUsage::RenderAttachment;
+    if (can_copy_src_) {
+        // 黒画面デバッグ用の surface 読み戻し (DebugProbeSurface) を可能にする
+        config.usage |= wgpu::TextureUsage::CopySrc;
+    }
     config.width       = width_;
     config.height      = height_;
     config.presentMode = wgpu::PresentMode::Fifo;
     config.alphaMode   = wgpu::CompositeAlphaMode::Opaque;
 
     surface_.Configure(&config);
+    configured_ = true;
 }
 
 wgpu::Texture DawnContext::GetCurrentTexture()
 {
+    if (!configured_) {
+        return nullptr;
+    }
     wgpu::SurfaceTexture surface_texture = {};
     surface_.GetCurrentTexture(&surface_texture);
+    frame_texture_acquired_ = true;
+    current_texture_ = surface_texture.texture;
     return surface_texture.texture;
+}
+
+// 提示直前の surface 中央行を読み戻し、非黒ピクセル数をログする (黒画面調査用)。
+// CI では目視できないため、これが「画面に何が出ているか」の唯一の証拠になる。
+void DawnContext::DebugProbeSurface()
+{
+    if (!can_copy_src_ || !current_texture_ || width_ == 0) {
+        std::cerr << "[GPU] surface probe unavailable (CopySrc="
+                  << (can_copy_src_ ? "yes" : "no") << ")" << std::endl;
+        return;
+    }
+
+    const uint32_t row_bytes = width_ * 4;
+    wgpu::BufferDescriptor buf_desc = {};
+    buf_desc.size  = (row_bytes + 3) & ~3u;
+    buf_desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
+    wgpu::Buffer buffer = device_.CreateBuffer(&buf_desc);
+
+    wgpu::TexelCopyTextureInfo src = {};
+    src.texture = current_texture_;
+    src.origin  = { 0, height_ / 2, 0 };
+
+    wgpu::TexelCopyBufferInfo dst = {};
+    dst.buffer = buffer;
+    dst.layout.offset = 0;
+    dst.layout.bytesPerRow = wgpu::kCopyStrideUndefined;   // 1 行コピーでは不要
+
+    wgpu::Extent3D extent = { width_, 1, 1 };
+
+    wgpu::CommandEncoder encoder = device_.CreateCommandEncoder();
+    encoder.CopyTextureToBuffer(&src, &dst, &extent);
+    wgpu::CommandBuffer commands = encoder.Finish();
+    device_.GetQueue().Submit(1, &commands);
+
+    bool done = false;
+    wgpu::Future future = buffer.MapAsync(wgpu::MapMode::Read, 0, buf_desc.size,
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus, wgpu::StringView) { done = true; });
+    // GPU 完了待ちは TimedWaitAny で行う (ProcessEvents の空スピンでは
+    // GPU がフレーム描画中のとき完了前にループ上限へ達する)
+    instance_.WaitAny(future, 2'000'000'000);   // 2s
+    if (!done) {
+        std::cerr << "[GPU] surface probe: map timeout" << std::endl;
+        return;
+    }
+
+    const auto* px = static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, buf_desc.size));
+    uint32_t non_black = 0;
+    for (uint32_t x = 0; px && x < width_; ++x) {
+        const uint8_t* p = px + static_cast<size_t>(x) * 4;
+        if (p[0] || p[1] || p[2]) {
+            ++non_black;
+        }
+    }
+    std::cerr << "[GPU] surface probe (present #" << present_count_
+              << "): non-black " << non_black << "/" << width_ << " px";
+    if (px && width_ > 1) {
+        const uint8_t* c = px + static_cast<size_t>(width_ / 2) * 4;
+        std::cerr << ", center=(" << +c[0] << "," << +c[1] << "," << +c[2] << "," << +c[3] << ")";
+    }
+    std::cerr << std::endl;
+    buffer.Unmap();
 }
 
 void DawnContext::Present()
 {
-    if (surface_) {
+    // 提示するのは「未構成でない」かつ「今フレーム GetCurrentTexture 済み」のときのみ。
+    // 取得なしで Present すると Dawn の検証エラーになる (描画しないフレームは提示しない)。
+    if (surface_ && configured_ && frame_texture_acquired_) {
+        ++present_count_;
+        if (present_count_ <= 3 || present_count_ == 60 || present_count_ % 300 == 0) {
+            DebugProbeSurface();
+        }
         surface_.Present();
+    } else {
+        ++present_skipped_;
+        if (present_skipped_ <= 3 || present_skipped_ % 300 == 0) {
+            std::cerr << "[GPU] present skipped #" << present_skipped_
+                      << " (configured=" << configured_
+                      << " acquired=" << frame_texture_acquired_ << ")" << std::endl;
+        }
     }
+    frame_texture_acquired_ = false;
+    current_texture_ = nullptr;
 }
 
 void DawnContext::Tick()

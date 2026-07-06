@@ -4,7 +4,10 @@
 // bootstrap.js とアプリ本体(ESM)の読み込み -> ゲームループ、という流れ。
 #include <Windows.h>
 #include <windowsx.h>
+#include <timeapi.h>
 #include <XGameRuntime.h>
+
+#pragma comment(lib, "winmm.lib")
 
 #include "HostContext.h"
 #include "AssetLoader.h"
@@ -190,6 +193,18 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
     wc.lpszClassName = L"Next2DXboxHostWindow";
     RegisterClassExW(&wc);
 
+    // ウィンドウが画面(作業領域)より大きいと画面外にはみ出し、提示が
+    // 見切れる/非等倍でスケールされて歪む (CI の低解像度ディスプレイで
+    // 1920x1080 ウィンドウ → 描画が縦長になっていた)。作業領域に収まるよう
+    // クランプする。実機コンソールでは作業領域=全画面のため 1920x1080 のまま。
+    RECT wa = {};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+        const int maxW = wa.right - wa.left;
+        const int maxH = wa.bottom - wa.top;
+        if (maxW > 0 && width  > maxW) { width  = maxW; }
+        if (maxH > 0 && height > maxH) { height = maxH; }
+    }
+
     // コンソールでは全画面相当。PC(GDK) 検証ではウィンドウ。
     const DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
     return CreateWindowExW(
@@ -202,14 +217,27 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 {
+    // Sleep() の分解能を 1ms に上げる (フレームペーシング用。既定 15.6ms では
+    // 60Hz を刻めない)
+    timeBeginPeriod(1);
+
     // --selftest: アプリの代わりに js/selftest.js を実行し、全バインディングを
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。
     const bool selftest = cmd_line && wcsstr(cmd_line, L"--selftest") != nullptr;
 
-    // 1. GDK ランタイム初期化
-    if (FAILED(XGameRuntimeInitialize())) {
+    // 1. GDK ランタイム初期化。
+    // デスクトップでは Gaming Services 未導入の環境 (CI ランナー等) でも
+    // 起動できるよう、失敗を警告に留めて続行する (本ホストは XUser 等を未使用)。
+    // コンソールでは必須のため失敗したら終了する。
+    bool xgame_initialized = SUCCEEDED(XGameRuntimeInitialize());
+    if (!xgame_initialized) {
+#if NEXT2D_XBOX_CONSOLE
         std::cerr << "XGameRuntimeInitialize failed" << std::endl;
         return 1;
+#else
+        std::cerr << "warning: XGameRuntimeInitialize failed (Gaming Services not installed?)"
+                  << " - continuing on desktop" << std::endl;
+#endif
     }
 
     const fs::path exe_dir = ExeDir();
@@ -228,6 +256,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     if (!hwnd) {
         std::cerr << "CreateWindow failed" << std::endl;
         return 1;
+    }
+
+    // ウィンドウは要求サイズより小さく作られ得る (作業領域クランプ / DPI /
+    // CI の低解像度ディスプレイ)。surface・canvas・screen は全て viewport_* から
+    // 派生するため、ここで「実クライアント矩形」を採用して一致させる。これを
+    // 怠ると surface(1920x1080) を実ウィンドウ(例 1024x768)へ非等倍提示して
+    // 画面が縦長に歪む。V8 バインディング設置(screen/innerWidth/dpr)と
+    // Dawn 初期化の前に確定させる必要がある。
+    {
+        RECT rc = {};
+        if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0) {
+            host.viewport_width  = rc.right;
+            host.viewport_height = rc.bottom;
+        }
+        std::cerr << "[Win] client rect: " << host.viewport_width
+                  << "x" << host.viewport_height << std::endl;
     }
 
     // 4. V8 プロセス初期化 + Isolate/Context + バインディング
@@ -255,7 +299,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     host.workers = &workers;
     g_dawn = &dawn;
 
-    dawn.Initialize(hwnd, host.viewport_width, host.viewport_height);
+    // GPU 無し環境 (CI 等) では Dawn 初期化に失敗し得るが、CPU 側の機能と
+    // selftest は動かせるため続行する (Present 等は内部でゲートされる)
+    if (!dawn.Initialize(hwnd, host.viewport_width, host.viewport_height)) {
+        std::cerr << "warning: Dawn initialization failed - continuing without GPU" << std::endl;
+    }
     gamepad.Initialize();
     audio.Initialize();
 
@@ -300,9 +348,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     }
 
     // 7. ゲームループ
-    v8::Isolate::Scope isolate_scope(runtime.isolate());
     MSG msg = {};
     int exit_code = 0;
+    // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
+    // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
+    {
+    v8::Isolate::Scope isolate_scope(runtime.isolate());
     while (g_running) {
         // Win32 メッセージ
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -347,6 +398,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         // 提示
         dawn.Present();
 
+        // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える。
+        // Present はスキップ時にブロックしないため、これが無いとループが
+        // 数万回転/秒で空回りし、rAF 前提のゲーム/Tween のタイミングが崩れる。
+        {
+            const double frame_ms = event_loop.Now() - now;
+            if (frame_ms < 15.0) {
+                Sleep(static_cast<DWORD>(15.0 - frame_ms));
+            }
+        }
+
+        // 診断: ループ統計 (5 秒毎)
+        {
+            static uint64_t iteration = 0;
+            ++iteration;
+            if (iteration % 300 == 0) {
+                std::cerr << "[Loop] it=" << iteration
+                          << " rAF=" << event_loop.PendingAnimationFrameCount()
+                          << " timers=" << event_loop.PendingTimerCount() << std::endl;
+            }
+        }
+
         // selftest 完了検知: selftest.js が globalThis.__selftestExitCode を設定したら終了
         if (selftest) {
             v8::Local<v8::Value> code;
@@ -359,10 +431,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         }
     }
 
-    // 8. 後始末
+    }
+
+    // 8. 後始末: v8::Global を保持するものは Isolate 破棄前に必ず明示解放する。
+    //    (スタック変数はスコープ終了 = runtime.Dispose() の後に巻き戻されるため、
+    //     デストラクタ任せにすると破棄済み Isolate への Global::Reset で fail-fast する)
+    workers.Shutdown();      // WorkerInstance の Global<Context> / EventLoop
+    event_loop.Shutdown();   // main の setTimeout/rAF コールバック (Global<Function>)
+    ShutdownAudioEvents();
+    ShutdownWebGPU();
     host.main_canvas.Reset();
     runtime.Dispose();
     V8Runtime::ShutdownProcess();
-    XGameRuntimeUninitialize();
+    if (xgame_initialized) {
+        XGameRuntimeUninitialize();
+    }
     return exit_code;
 }

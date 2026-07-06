@@ -63,6 +63,22 @@ void EventLoop::ClearTimer(uint32_t id)
 uint32_t EventLoop::RequestAnimationFrame(v8::Local<v8::Function> callback)
 {
     const uint32_t id = next_raf_id_++;
+
+    // 診断: 誰が rAF を登録しているか (関数名 + minify 後スクリプト位置)。
+    // 最初の 40 件 + 以後 300 件毎にサンプルし、凍結後も生きている登録元を特定する。
+    static uint64_t reg_count = 0;
+    ++reg_count;
+    if (reg_count <= 40 || reg_count % 300 == 0) {
+        const std::string name =
+            v8util::ToStdString(isolate_, callback->GetDebugName());
+        v8::Local<v8::Value> res = callback->GetScriptOrigin().ResourceName();
+        std::cerr << "[Loop] rAF register #" << reg_count
+                  << " fn=" << (name.empty() ? "(anon)" : name)
+                  << " at " << v8util::ToStdString(isolate_, res)
+                  << ":" << callback->GetScriptLineNumber() + 1
+                  << ":" << callback->GetScriptColumnNumber() + 1 << std::endl;
+    }
+
     v8::Global<v8::Function> global;
     global.Reset(isolate_, callback);
     raf_callbacks_.emplace_back(id, std::move(global));
@@ -71,6 +87,16 @@ uint32_t EventLoop::RequestAnimationFrame(v8::Local<v8::Function> callback)
 
 void EventLoop::CancelAnimationFrame(uint32_t id)
 {
+    // 未実行分は即座に取り除く。raf_cancelled_ だけに頼ると、RunAnimationFrame の
+    // 実行中に登録されたコールバックへのキャンセルが同フレーム末尾の clear で失われ、
+    // キャンセル済みのはずの rAF が翌フレームに実行されてしまう (ticker/Tween の多重化)。
+    for (auto it = raf_callbacks_.begin(); it != raf_callbacks_.end(); ++it) {
+        if (it->first == id) {
+            raf_callbacks_.erase(it);
+            return;
+        }
+    }
+    // 実行中バッチ (RunAnimationFrame の current) 内のものはフラグで無効化する
     raf_cancelled_.push_back(id);
 }
 
@@ -104,7 +130,7 @@ void EventLoop::PumpTimers()
 
         v8::TryCatch try_catch(isolate_);
         (void) fn->Call(ctx, global, 0, nullptr);
-        // 例外はコンソールに委譲 (V8Runtime のメッセージハンドラが拾う)
+        v8util::ReportCaught(isolate_, &try_catch, "setTimeout/setInterval callback");
 
         if (!it->second.repeat) {
             // 単発は実行後に破棄
@@ -149,6 +175,7 @@ void EventLoop::RunAnimationFrame(double timestamp_ms)
         v8::TryCatch try_catch(isolate_);
         v8::Local<v8::Value> args[1] = { arg };
         (void) fn->Call(ctx, global, 1, args);
+        v8util::ReportCaught(isolate_, &try_catch, "requestAnimationFrame callback");
     }
 
     raf_cancelled_.clear();

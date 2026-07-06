@@ -9,6 +9,7 @@
 #include "bindings/ImageSource.h"
 
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <vector>
 
@@ -24,7 +25,8 @@ struct Templates {
     v8::Global<v8::ObjectTemplate> adapter, device, queue, buffer, texture,
         textureView, sampler, shaderModule, bindGroupLayout, bindGroup,
         pipelineLayout, renderPipeline, commandEncoder, renderPass,
-        commandBuffer, canvasContext;
+        commandBuffer, canvasContext, computePipeline, computePass,
+        querySet, renderBundle, renderBundleEncoder;
 };
 
 static std::map<v8::Isolate*, Templates> g_templates;
@@ -47,6 +49,9 @@ static v8::Local<v8::Object> WrapTexture(v8::Isolate*, wgpu::Texture);
 static v8::Local<v8::Object> WrapTextureView(v8::Isolate*, wgpu::TextureView);
 static v8::Local<v8::Object> WrapEncoder(v8::Isolate*, wgpu::CommandEncoder);
 static v8::Local<v8::Object> WrapPipeline(v8::Isolate*, wgpu::RenderPipeline);
+static v8::Local<v8::Object> WrapComputePipeline(v8::Isolate*, wgpu::ComputePipeline);
+static v8::Local<v8::Object> WrapQuerySet(v8::Isolate*, wgpu::QuerySet);
+static v8::Local<v8::Object> WrapRenderBundle(v8::Isolate*, wgpu::RenderBundle);
 
 // ---------------------------------------------------------------------------
 // GPUBuffer
@@ -63,15 +68,25 @@ static void Buffer_GetMappedRange(const v8::FunctionCallbackInfo<v8::Value>& arg
         : (buffer.GetSize() - offset);
 
     void* ptr = buffer.GetMappedRange(offset, static_cast<size_t>(size));
-    if (!ptr) {
+    if (ptr) {
+        // 書き込み可能マップ: マップ領域を指す非所有 ArrayBuffer (unmap まで有効)
+        std::unique_ptr<v8::BackingStore> store = v8::ArrayBuffer::NewBackingStore(
+            ptr, static_cast<size_t>(size),
+            [](void*, size_t, void*) {}, nullptr);
+        args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, std::move(store)));
+        return;
+    }
+
+    // MapMode::Read でマップされたバッファは非 const 版が nullptr を返す仕様。
+    // GetConstMappedRange から所有コピーを返す (読み戻し copyTextureToBuffer 等の経路)。
+    const void* cptr = buffer.GetConstMappedRange(offset, static_cast<size_t>(size));
+    if (!cptr) {
         args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, 0));
         return;
     }
-    // マップ領域を指す非所有 ArrayBuffer (unmap まで有効)
-    std::unique_ptr<v8::BackingStore> store = v8::ArrayBuffer::NewBackingStore(
-        ptr, static_cast<size_t>(size),
-        [](void*, size_t, void*) {}, nullptr);
-    args.GetReturnValue().Set(v8::ArrayBuffer::New(isolate, std::move(store)));
+    v8::Local<v8::ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, static_cast<size_t>(size));
+    memcpy(ab->GetBackingStore()->Data(), cptr, static_cast<size_t>(size));
+    args.GetReturnValue().Set(ab);
 }
 
 static void Buffer_Unmap(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -219,6 +234,55 @@ static wgpu::Extent3D ParseExtent(v8::Isolate* isolate, v8::Local<v8::Value> val
     return extent;
 }
 
+// GPUOrigin3D は {x,y,z} オブジェクト or [x,y,z] 配列。ParseExtent とは
+// キー名が違う (width/height ではなく x/y/z、既定は 1 ではなく 0) ため専用に扱う。
+static wgpu::Origin3D ParseOrigin(v8::Isolate* isolate, v8::Local<v8::Value> value)
+{
+    wgpu::Origin3D origin = {0, 0, 0};
+    if (value->IsArray()) {
+        auto arr = value.As<v8::Array>();
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        auto get = [&](uint32_t i) -> uint32_t {
+            v8::Local<v8::Value> v;
+            return (i < arr->Length() && arr->Get(ctx, i).ToLocal(&v) && v->IsNumber())
+                ? static_cast<uint32_t>(v.As<v8::Number>()->Value()) : 0;
+        };
+        origin.x = get(0);
+        origin.y = get(1);
+        origin.z = get(2);
+    } else if (value->IsObject()) {
+        auto o = value.As<v8::Object>();
+        origin.x = U32(isolate, o, "x", 0);
+        origin.y = U32(isolate, o, "y", 0);
+        origin.z = U32(isolate, o, "z", 0);
+    }
+    return origin;
+}
+
+static wgpu::ErrorFilter ToErrorFilter(std::string_view s)
+{
+    if (s == "out-of-memory") return wgpu::ErrorFilter::OutOfMemory;
+    if (s == "internal")      return wgpu::ErrorFilter::Internal;
+    return wgpu::ErrorFilter::Validation;
+}
+
+static wgpu::QueryType ToQueryType(std::string_view s)
+{
+    if (s == "timestamp") return wgpu::QueryType::Timestamp;
+    return wgpu::QueryType::Occlusion;
+}
+
+// wgpu::ErrorType -> WebGPU の GPUError 種別文字列
+static const char* ErrorTypeName(wgpu::ErrorType t)
+{
+    switch (t) {
+        case wgpu::ErrorType::Validation:  return "validation";
+        case wgpu::ErrorType::OutOfMemory: return "out-of-memory";
+        case wgpu::ErrorType::Internal:    return "internal";
+        default:                           return "unknown";
+    }
+}
+
 static void Queue_WriteTexture(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     v8::Isolate* isolate = args.GetIsolate();
@@ -229,6 +293,11 @@ static void Queue_WriteTexture(const v8::FunctionCallbackInfo<v8::Value>& args)
     wgpu::TexelCopyTextureInfo copy = {};
     copy.texture = Unwrap<wgpu::Texture>(Prop(isolate, dest, "texture").As<v8::Object>());
     copy.mipLevel = U32(isolate, dest, "mipLevel", 0);
+    // 宛先 origin (アトラスのセル位置など)。未指定なら (0,0,0)。
+    v8::Local<v8::Value> dst_origin = Prop(isolate, dest, "origin");
+    if (dst_origin->IsObject() || dst_origin->IsArray()) {
+        copy.origin = ParseOrigin(isolate, dst_origin);
+    }
 
     const void* data = nullptr;
     size_t length = 0;
@@ -312,6 +381,12 @@ static void Queue_Submit(const v8::FunctionCallbackInfo<v8::Value>& args)
                 buffers.push_back(Unwrap<wgpu::CommandBuffer>(v.As<v8::Object>()));
             }
         }
+    }
+    static uint64_t count = 0;
+    ++count;
+    if (count <= 10 || count % 300 == 0) {
+        std::cerr << "[GPU] queue.submit #" << count
+                  << " (" << buffers.size() << " cmd)" << std::endl;
     }
     queue.Submit(buffers.size(), buffers.data());
 }
@@ -460,6 +535,58 @@ static void Pass_End(const v8::FunctionCallbackInfo<v8::Value>& args)
     Unwrap<wgpu::RenderPassEncoder>(args.This()).End();
 }
 
+static void Pass_BeginOcclusionQuery(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& pass = Unwrap<wgpu::RenderPassEncoder>(args.This());
+    uint32_t index = args.Length() > 0 && args[0]->IsNumber()
+        ? static_cast<uint32_t>(args[0].As<v8::Number>()->Value()) : 0;
+    pass.BeginOcclusionQuery(index);
+}
+
+static void Pass_EndOcclusionQuery(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::RenderPassEncoder>(args.This()).EndOcclusionQuery();
+}
+
+static void Pass_ExecuteBundles(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& pass = Unwrap<wgpu::RenderPassEncoder>(args.This());
+    std::vector<wgpu::RenderBundle> bundles;
+    if (args.Length() > 0 && args[0]->IsArray()) {
+        auto arr = args[0].As<v8::Array>();
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        for (uint32_t i = 0; i < arr->Length(); ++i) {
+            v8::Local<v8::Value> v;
+            if (arr->Get(ctx, i).ToLocal(&v) && v->IsObject())
+                bundles.push_back(Unwrap<wgpu::RenderBundle>(v.As<v8::Object>()));
+        }
+    }
+    pass.ExecuteBundles(bundles.size(), bundles.data());
+}
+
+// pushDebugGroup / popDebugGroup / insertDebugMarker (render pass)
+static void Pass_PushDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::RenderPassEncoder>(args.This()).PushDebugGroup(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
+static void Pass_PopDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::RenderPassEncoder>(args.This()).PopDebugGroup();
+}
+
+static void Pass_InsertDebugMarker(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::RenderPassEncoder>(args.This()).InsertDebugMarker(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
 static v8::Local<v8::Object> WrapRenderPass(v8::Isolate* isolate, wgpu::RenderPassEncoder pass)
 {
     v8::Local<v8::Object> obj = WrapWith(isolate, Tmpl(isolate).renderPass, std::move(pass));
@@ -474,7 +601,117 @@ static v8::Local<v8::Object> WrapRenderPass(v8::Isolate* isolate, wgpu::RenderPa
     SetMethod(isolate, obj, "draw", Pass_Draw);
     SetMethod(isolate, obj, "drawIndexed", Pass_DrawIndexed);
     SetMethod(isolate, obj, "drawIndirect", Pass_DrawIndirect);
+    SetMethod(isolate, obj, "beginOcclusionQuery", Pass_BeginOcclusionQuery);
+    SetMethod(isolate, obj, "endOcclusionQuery", Pass_EndOcclusionQuery);
+    SetMethod(isolate, obj, "executeBundles", Pass_ExecuteBundles);
+    SetMethod(isolate, obj, "pushDebugGroup", Pass_PushDebugGroup);
+    SetMethod(isolate, obj, "popDebugGroup", Pass_PopDebugGroup);
+    SetMethod(isolate, obj, "insertDebugMarker", Pass_InsertDebugMarker);
     SetMethod(isolate, obj, "end", Pass_End);
+    return obj;
+}
+
+// ---------------------------------------------------------------------------
+// GPUComputePassEncoder
+// compute シェーダ経路 (createComputePipeline / beginComputePass / dispatch)。
+// Next2D の 2D ラスタライザは未使用だが、WebGPU の機能を特定用途に絞らず
+// 全面的に利用可能にするため実装する。汎用 GPGPU / storage buffer 出力に対応。
+// ---------------------------------------------------------------------------
+static void CPass_SetPipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::ComputePassEncoder>(args.This()).SetPipeline(
+        Unwrap<wgpu::ComputePipeline>(args[0].As<v8::Object>()));
+}
+
+static void CPass_SetBindGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& pass = Unwrap<wgpu::ComputePassEncoder>(args.This());
+    uint32_t index = static_cast<uint32_t>(args[0].As<v8::Number>()->Value());
+    if (args.Length() < 2 || !args[1]->IsObject()) {
+        pass.SetBindGroup(index, nullptr);
+        return;
+    }
+    auto& group = Unwrap<wgpu::BindGroup>(args[1].As<v8::Object>());
+
+    // dynamicOffsets (render pass と同じく Array<number> / Uint32Array)
+    std::vector<uint32_t> offsets;
+    if (args.Length() > 2 && !args[2]->IsNullOrUndefined()) {
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        if (args[2]->IsArray()) {
+            auto arr = args[2].As<v8::Array>();
+            offsets.reserve(arr->Length());
+            for (uint32_t i = 0; i < arr->Length(); ++i) {
+                v8::Local<v8::Value> v;
+                if (arr->Get(ctx, i).ToLocal(&v) && v->IsNumber())
+                    offsets.push_back(static_cast<uint32_t>(v.As<v8::Number>()->Value()));
+            }
+        } else if (args[2]->IsUint32Array()) {
+            auto ta = args[2].As<v8::Uint32Array>();
+            offsets.resize(ta->Length());
+            ta->CopyContents(offsets.data(), offsets.size() * sizeof(uint32_t));
+        }
+    }
+    pass.SetBindGroup(index, group,
+                      static_cast<uint32_t>(offsets.size()),
+                      offsets.empty() ? nullptr : offsets.data());
+}
+
+static void CPass_DispatchWorkgroups(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& pass = Unwrap<wgpu::ComputePassEncoder>(args.This());
+    auto n = [&](int i, uint32_t fb) {
+        return (i < args.Length() && args[i]->IsNumber())
+            ? static_cast<uint32_t>(args[i].As<v8::Number>()->Value()) : fb; };
+    pass.DispatchWorkgroups(n(0, 1), n(1, 1), n(2, 1));
+}
+
+static void CPass_DispatchWorkgroupsIndirect(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& pass = Unwrap<wgpu::ComputePassEncoder>(args.This());
+    auto& buffer = Unwrap<wgpu::Buffer>(args[0].As<v8::Object>());
+    uint64_t offset = args.Length() > 1 && args[1]->IsNumber()
+        ? static_cast<uint64_t>(args[1].As<v8::Number>()->Value()) : 0;
+    pass.DispatchWorkgroupsIndirect(buffer, offset);
+}
+
+static void CPass_End(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::ComputePassEncoder>(args.This()).End();
+}
+
+static void CPass_PushDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::ComputePassEncoder>(args.This()).PushDebugGroup(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
+static void CPass_PopDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::ComputePassEncoder>(args.This()).PopDebugGroup();
+}
+
+static void CPass_InsertDebugMarker(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::ComputePassEncoder>(args.This()).InsertDebugMarker(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
+static v8::Local<v8::Object> WrapComputePass(v8::Isolate* isolate, wgpu::ComputePassEncoder pass)
+{
+    v8::Local<v8::Object> obj = WrapWith(isolate, Tmpl(isolate).computePass, std::move(pass));
+    SetMethod(isolate, obj, "setPipeline", CPass_SetPipeline);
+    SetMethod(isolate, obj, "setBindGroup", CPass_SetBindGroup);
+    SetMethod(isolate, obj, "dispatchWorkgroups", CPass_DispatchWorkgroups);
+    SetMethod(isolate, obj, "dispatchWorkgroupsIndirect", CPass_DispatchWorkgroupsIndirect);
+    SetMethod(isolate, obj, "pushDebugGroup", CPass_PushDebugGroup);
+    SetMethod(isolate, obj, "popDebugGroup", CPass_PopDebugGroup);
+    SetMethod(isolate, obj, "insertDebugMarker", CPass_InsertDebugMarker);
+    SetMethod(isolate, obj, "end", CPass_End);
     return obj;
 }
 
@@ -501,6 +738,13 @@ static void Encoder_BeginRenderPass(const v8::FunctionCallbackInfo<v8::Value>& a
             att.loadOp = ToLoadOp(webgpu::Str(isolate, o, "loadOp"));
             att.storeOp = ToStoreOp(webgpu::Str(isolate, o, "storeOp"));
             att.depthSlice = wgpu::kDepthSliceUndefined;
+            // MSAA 解決先。player は全描画を MSAA テクスチャへ行い resolveTarget で
+            // 本体テクスチャに解決する。未対応だと描画結果がどこにも現れない (黒画面)。
+            v8::Local<v8::Value> rt = Prop(isolate, o, "resolveTarget");
+            if (rt->IsObject()) {
+                att.resolveTarget =
+                    Unwrap<wgpu::TextureView>(rt.As<v8::Object>());
+            }
             v8::Local<v8::Value> cv = Prop(isolate, o, "clearValue");
             if (cv->IsArray()) {
                 auto c = cv.As<v8::Array>();
@@ -544,8 +788,36 @@ static void Encoder_BeginRenderPass(const v8::FunctionCallbackInfo<v8::Value>& a
         pass_desc.depthStencilAttachment = &depth;
     }
 
+    // occlusionQuerySet: beginOcclusionQuery/endOcclusionQuery で被覆サンプル数を計測する
+    v8::Local<v8::Value> oqs = Prop(isolate, desc, "occlusionQuerySet");
+    if (oqs->IsObject()) {
+        pass_desc.occlusionQuerySet = Unwrap<wgpu::QuerySet>(oqs.As<v8::Object>());
+    }
+
+    // timestampWrites: { querySet, beginningOfPassWriteIndex?, endOfPassWriteIndex? }
+    // (timestamp-query フィーチャ有効時のみ有効。未有効なら player/検証側で未使用)
+    wgpu::PassTimestampWrites ts = {};
+    v8::Local<v8::Value> tsv = Prop(isolate, desc, "timestampWrites");
+    if (tsv->IsObject()) {
+        auto t = tsv.As<v8::Object>();
+        ts.querySet = Unwrap<wgpu::QuerySet>(Prop(isolate, t, "querySet").As<v8::Object>());
+        ts.beginningOfPassWriteIndex = U32(isolate, t, "beginningOfPassWriteIndex", wgpu::kQuerySetIndexUndefined);
+        ts.endOfPassWriteIndex = U32(isolate, t, "endOfPassWriteIndex", wgpu::kQuerySetIndexUndefined);
+        pass_desc.timestampWrites = &ts;
+    }
+
     args.GetReturnValue().Set(
         WrapRenderPass(isolate, encoder.BeginRenderPass(&pass_desc)));
+}
+
+static void Encoder_BeginComputePass(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& encoder = Unwrap<wgpu::CommandEncoder>(args.This());
+    // descriptor は任意 (timestampWrites 等は未使用)。既定で開始する。
+    wgpu::ComputePassDescriptor desc = {};
+    args.GetReturnValue().Set(
+        WrapComputePass(isolate, encoder.BeginComputePass(&desc)));
 }
 
 static void Encoder_Finish(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -575,8 +847,7 @@ static wgpu::TexelCopyTextureInfo ParseTexelCopyTexture(v8::Isolate* isolate, v8
     info.mipLevel = U32(isolate, o, "mipLevel", 0);
     v8::Local<v8::Value> origin = Prop(isolate, o, "origin");
     if (origin->IsObject() || origin->IsArray()) {
-        wgpu::Extent3D e = ParseExtent(isolate, origin);
-        info.origin = { e.width, e.height, e.depthOrArrayLayers };
+        info.origin = ParseOrigin(isolate, origin);
     }
     return info;
 }
@@ -608,6 +879,187 @@ static void Encoder_CopyTextureToBuffer(const v8::FunctionCallbackInfo<v8::Value
     encoder.CopyTextureToBuffer(&src, &dst, &size);
 }
 
+static void Encoder_ResolveQuerySet(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& encoder = Unwrap<wgpu::CommandEncoder>(args.This());
+    auto& qs = Unwrap<wgpu::QuerySet>(args[0].As<v8::Object>());
+    uint32_t first = static_cast<uint32_t>(args[1].As<v8::Number>()->Value());
+    uint32_t count = static_cast<uint32_t>(args[2].As<v8::Number>()->Value());
+    auto& dst = Unwrap<wgpu::Buffer>(args[3].As<v8::Object>());
+    uint64_t dst_off = args.Length() > 4 && args[4]->IsNumber()
+        ? static_cast<uint64_t>(args[4].As<v8::Number>()->Value()) : 0;
+    (void) isolate;
+    encoder.ResolveQuerySet(qs, first, count, dst, dst_off);
+}
+
+static void Encoder_WriteTimestamp(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& encoder = Unwrap<wgpu::CommandEncoder>(args.This());
+    auto& qs = Unwrap<wgpu::QuerySet>(args[0].As<v8::Object>());
+    uint32_t index = static_cast<uint32_t>(args[1].As<v8::Number>()->Value());
+    encoder.WriteTimestamp(qs, index);
+}
+
+static void Encoder_PushDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::CommandEncoder>(args.This()).PushDebugGroup(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
+static void Encoder_PopDebugGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::CommandEncoder>(args.This()).PopDebugGroup();
+}
+
+static void Encoder_InsertDebugMarker(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    std::string label = args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "";
+    Unwrap<wgpu::CommandEncoder>(args.This()).InsertDebugMarker(
+        wgpu::StringView(label.c_str(), label.size()));
+}
+
+// ---------------------------------------------------------------------------
+// GPURenderBundleEncoder (createRenderBundleEncoder -> finish -> GPURenderBundle)
+// ---------------------------------------------------------------------------
+static void RBEncoder_SetPipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::RenderBundleEncoder>(args.This()).SetPipeline(
+        Unwrap<wgpu::RenderPipeline>(args[0].As<v8::Object>()));
+}
+
+static void RBEncoder_SetBindGroup(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    uint32_t index = static_cast<uint32_t>(args[0].As<v8::Number>()->Value());
+    if (args.Length() < 2 || !args[1]->IsObject()) {
+        enc.SetBindGroup(index, nullptr);
+        return;
+    }
+    auto& group = Unwrap<wgpu::BindGroup>(args[1].As<v8::Object>());
+    std::vector<uint32_t> offsets;
+    if (args.Length() > 2 && !args[2]->IsNullOrUndefined()) {
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        if (args[2]->IsArray()) {
+            auto arr = args[2].As<v8::Array>();
+            offsets.reserve(arr->Length());
+            for (uint32_t i = 0; i < arr->Length(); ++i) {
+                v8::Local<v8::Value> v;
+                if (arr->Get(ctx, i).ToLocal(&v) && v->IsNumber())
+                    offsets.push_back(static_cast<uint32_t>(v.As<v8::Number>()->Value()));
+            }
+        } else if (args[2]->IsUint32Array()) {
+            auto ta = args[2].As<v8::Uint32Array>();
+            offsets.resize(ta->Length());
+            ta->CopyContents(offsets.data(), offsets.size() * sizeof(uint32_t));
+        }
+    }
+    enc.SetBindGroup(index, group, static_cast<uint32_t>(offsets.size()),
+                     offsets.empty() ? nullptr : offsets.data());
+}
+
+static void RBEncoder_SetVertexBuffer(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    uint32_t slot = static_cast<uint32_t>(args[0].As<v8::Number>()->Value());
+    auto& buffer = Unwrap<wgpu::Buffer>(args[1].As<v8::Object>());
+    uint64_t offset = args.Length() > 2 && args[2]->IsNumber()
+        ? static_cast<uint64_t>(args[2].As<v8::Number>()->Value()) : 0;
+    uint64_t size = args.Length() > 3 && args[3]->IsNumber()
+        ? static_cast<uint64_t>(args[3].As<v8::Number>()->Value()) : wgpu::kWholeSize;
+    enc.SetVertexBuffer(slot, buffer, offset, size);
+}
+
+static void RBEncoder_SetIndexBuffer(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    auto& buffer = Unwrap<wgpu::Buffer>(args[0].As<v8::Object>());
+    wgpu::IndexFormat format = ToIndexFormat(v8util::ToStdString(isolate, args[1]));
+    uint64_t offset = args.Length() > 2 && args[2]->IsNumber()
+        ? static_cast<uint64_t>(args[2].As<v8::Number>()->Value()) : 0;
+    uint64_t size = args.Length() > 3 && args[3]->IsNumber()
+        ? static_cast<uint64_t>(args[3].As<v8::Number>()->Value()) : wgpu::kWholeSize;
+    enc.SetIndexBuffer(buffer, format, offset, size);
+}
+
+static void RBEncoder_Draw(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    auto n = [&](int i, uint32_t fb) {
+        return (i < args.Length() && args[i]->IsNumber())
+            ? static_cast<uint32_t>(args[i].As<v8::Number>()->Value()) : fb; };
+    enc.Draw(n(0, 0), n(1, 1), n(2, 0), n(3, 0));
+}
+
+static void RBEncoder_DrawIndexed(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    auto n = [&](int i, uint32_t fb) {
+        return (i < args.Length() && args[i]->IsNumber())
+            ? static_cast<uint32_t>(args[i].As<v8::Number>()->Value()) : fb; };
+    enc.DrawIndexed(n(0, 0), n(1, 1), n(2, 0), n(3, 0), n(4, 0));
+}
+
+static void RBEncoder_DrawIndirect(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    auto& buffer = Unwrap<wgpu::Buffer>(args[0].As<v8::Object>());
+    uint64_t offset = args.Length() > 1 && args[1]->IsNumber()
+        ? static_cast<uint64_t>(args[1].As<v8::Number>()->Value()) : 0;
+    enc.DrawIndirect(buffer, offset);
+}
+
+static void RBEncoder_Finish(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& enc = Unwrap<wgpu::RenderBundleEncoder>(args.This());
+    wgpu::RenderBundleDescriptor desc = {};
+    args.GetReturnValue().Set(WrapRenderBundle(isolate, enc.Finish(&desc)));
+}
+
+static v8::Local<v8::Object> WrapRenderBundleEncoder(v8::Isolate* isolate, wgpu::RenderBundleEncoder enc)
+{
+    auto obj = WrapWith(isolate, Tmpl(isolate).renderBundleEncoder, std::move(enc));
+    SetMethod(isolate, obj, "setPipeline", RBEncoder_SetPipeline);
+    SetMethod(isolate, obj, "setBindGroup", RBEncoder_SetBindGroup);
+    SetMethod(isolate, obj, "setVertexBuffer", RBEncoder_SetVertexBuffer);
+    SetMethod(isolate, obj, "setIndexBuffer", RBEncoder_SetIndexBuffer);
+    SetMethod(isolate, obj, "draw", RBEncoder_Draw);
+    SetMethod(isolate, obj, "drawIndexed", RBEncoder_DrawIndexed);
+    SetMethod(isolate, obj, "drawIndirect", RBEncoder_DrawIndirect);
+    SetMethod(isolate, obj, "finish", RBEncoder_Finish);
+    return obj;
+}
+
+static v8::Local<v8::Object> WrapRenderBundle(v8::Isolate* isolate, wgpu::RenderBundle bundle)
+{
+    return WrapWith(isolate, Tmpl(isolate).renderBundle, std::move(bundle));
+}
+
+// ---------------------------------------------------------------------------
+// GPUQuerySet
+// ---------------------------------------------------------------------------
+static void QuerySet_Destroy(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::QuerySet>(args.This()).Destroy();
+}
+
+static v8::Local<v8::Object> WrapQuerySet(v8::Isolate* isolate, wgpu::QuerySet qs)
+{
+    auto obj = WrapWith(isolate, Tmpl(isolate).querySet, std::move(qs));
+    auto& q = Unwrap<wgpu::QuerySet>(obj);
+    SetValue(isolate, obj, "count", v8::Integer::NewFromUnsigned(isolate, q.GetCount()));
+    SetValue(isolate, obj, "type",
+        Str(isolate, q.GetType() == wgpu::QueryType::Timestamp ? "timestamp" : "occlusion"));
+    SetMethod(isolate, obj, "destroy", QuerySet_Destroy);
+    return obj;
+}
+
 // ---------------------------------------------------------------------------
 // GPUCanvasContext
 // ---------------------------------------------------------------------------
@@ -617,6 +1069,11 @@ static void Ctx_Configure(const v8::FunctionCallbackInfo<v8::Value>& args)
     DawnContext* gpu = HostContext::From(isolate)->gpu;
     // device は既に DawnContext が保持。フォーマット/サイズのみ反映する。
     if (args.Length() > 0 && args[0]->IsObject()) {
+        static uint64_t count = 0;
+        ++count;
+        if (count <= 10 || count % 300 == 0) {
+            std::cerr << "[GPU] context.configure #" << count << std::endl;
+        }
         // width/height は canvas サイズを使用 (configure の size は任意)
         gpu->Configure(gpu->width(), gpu->height());
     }
@@ -626,6 +1083,11 @@ static void Ctx_GetCurrentTexture(const v8::FunctionCallbackInfo<v8::Value>& arg
 {
     v8::Isolate* isolate = args.GetIsolate();
     DawnContext* gpu = HostContext::From(isolate)->gpu;
+    static uint64_t count = 0;
+    ++count;
+    if (count <= 10 || count % 300 == 0) {
+        std::cerr << "[GPU] getCurrentTexture #" << count << std::endl;
+    }
     args.GetReturnValue().Set(WrapTexture(isolate, gpu->GetCurrentTexture()));
 }
 
@@ -881,17 +1343,62 @@ struct RenderPipelineScratch {
     std::vector<wgpu::ColorTargetState> targets;
     std::vector<wgpu::BlendState> blends;
     std::string vs_entry, fs_entry;
+    // pipeline-overridable constants (WGSL の override 定数)。key 文字列は
+    // ConstantEntry.key が指すため CreateRenderPipeline 完了まで生存させる。
+    std::vector<std::string> vs_const_keys, fs_const_keys;
+    std::vector<wgpu::ConstantEntry> vs_constants, fs_constants;
 };
 
-static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
+// { "KEY": number|bool, ... } を wgpu::ConstantEntry 配列へ変換する。
+// player は WGSL の override(GRADIENT_TYPE / SPREAD_MODE / yFlipSign / フィルタ種別など)
+// を constants で指定してパイプラインを特殊化する。ここを読まないと全パイプラインが
+// WGSL の既定値でコンパイルされ、放射状グラデが線形に、spread が pad に、
+// フィルタ種別が既定分岐に潰れる (エラーは出ない)。
+static void ParsePipelineConstants(
+    v8::Isolate* isolate, v8::Local<v8::Object> stage,
+    std::vector<std::string>& keys, std::vector<wgpu::ConstantEntry>& entries)
 {
-    v8::Isolate* isolate = args.GetIsolate();
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
-    auto& device = Unwrap<wgpu::Device>(args.This());
-    v8::Local<v8::Object> d = args[0].As<v8::Object>();
+    v8::Local<v8::Value> cv = Prop(isolate, stage, "constants");
+    if (!cv->IsObject()) {
+        return;
+    }
+    auto co = cv.As<v8::Object>();
+    v8::Local<v8::Array> names;
+    if (!co->GetOwnPropertyNames(ctx).ToLocal(&names)) {
+        return;
+    }
+    // 再確保で ConstantEntry.key の指す c_str が無効化されないよう上限で確保する。
+    keys.reserve(keys.size() + names->Length());
+    entries.reserve(entries.size() + names->Length());
+    for (uint32_t i = 0; i < names->Length(); ++i) {
+        v8::Local<v8::Value> k, val;
+        if (!names->Get(ctx, i).ToLocal(&k)) continue;
+        if (!co->Get(ctx, k).ToLocal(&val)) continue;
+        double num;
+        if (val->IsBoolean()) {
+            num = val.As<v8::Boolean>()->Value() ? 1.0 : 0.0;
+        } else if (val->IsNumber()) {
+            num = val.As<v8::Number>()->Value();
+        } else {
+            continue;
+        }
+        v8::String::Utf8Value ks(isolate, k);
+        if (!*ks) continue;
+        keys.emplace_back(*ks, static_cast<size_t>(ks.length()));
+        wgpu::ConstantEntry e = {};
+        e.key = wgpu::StringView(keys.back().c_str(), keys.back().size());
+        e.value = num;
+        entries.push_back(e);
+    }
+}
 
-    RenderPipelineScratch scratch;
-    wgpu::RenderPipelineDescriptor desc = {};
+// ディスクリプタ構築 (sync/async 双方から使う。desc/scratch は呼び出し側が保持し、
+// CreateRenderPipeline[Async] が同期コピーするまで生存させる)。
+static void FillRenderPipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Object> d,
+    RenderPipelineScratch& scratch, wgpu::RenderPipelineDescriptor& desc)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
 
     // layout: 'auto' or GPUPipelineLayout
     v8::Local<v8::Value> layout = Prop(isolate, d, "layout");
@@ -942,6 +1449,13 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
         }
         desc.vertex.bufferCount = scratch.vertex_buffers.size();
         desc.vertex.buffers = scratch.vertex_buffers.data();
+    }
+
+    // vertex.constants (override 定数)
+    ParsePipelineConstants(isolate, vertex, scratch.vs_const_keys, scratch.vs_constants);
+    if (!scratch.vs_constants.empty()) {
+        desc.vertex.constantCount = scratch.vs_constants.size();
+        desc.vertex.constants = scratch.vs_constants.data();
     }
 
     // primitive
@@ -1008,6 +1522,13 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
     if (ms->IsObject()) {
         auto m = ms.As<v8::Object>();
         desc.multisample.count = U32(isolate, m, "count", 1);
+        // alphaToCoverageEnabled: フラグメント alpha を MSAA カバレッジへ変換する。
+        // Next2D はベクタ図形の境界を塗り alpha に頼るため、これが無いと全図形の
+        // アンチエイリアスが失われて縁がジャギる (静かな品質劣化)。
+        desc.multisample.alphaToCoverageEnabled = Bool(isolate, m, "alphaToCoverageEnabled", false);
+        if (HasProp(isolate, m, "mask")) {
+            desc.multisample.mask = U32(isolate, m, "mask", 0xFFFFFFFF);
+        }
     }
 
     // fragment
@@ -1053,10 +1574,221 @@ static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value
             fragment.targetCount = scratch.targets.size();
             fragment.targets = scratch.targets.data();
         }
+
+        // fragment.constants (override 定数: GRADIENT_TYPE/SPREAD_MODE/フィルタ種別など)
+        ParsePipelineConstants(isolate, f, scratch.fs_const_keys, scratch.fs_constants);
+        if (!scratch.fs_constants.empty()) {
+            fragment.constantCount = scratch.fs_constants.size();
+            fragment.constants = scratch.fs_constants.data();
+        }
+
         desc.fragment = &fragment;
     }
+}
 
+static void Device_CreateRenderPipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    RenderPipelineScratch scratch;
+    wgpu::RenderPipelineDescriptor desc = {};
+    FillRenderPipelineDescriptor(isolate, args[0].As<v8::Object>(), scratch, desc);
     args.GetReturnValue().Set(WrapPipeline(isolate, device.CreateRenderPipeline(&desc)));
+}
+
+// ---------------------------------------------------------------------------
+// GPUDevice.createComputePipeline
+// { layout: 'auto'|GPUPipelineLayout, compute: {module, entryPoint?, constants?} }
+// ---------------------------------------------------------------------------
+// compute ディスクリプタ構築 (sync/async 共有)。entryPoint/constants の文字列寿命は
+// 呼び出し側が保持する keys/entry_strs で管理する。
+struct ComputePipelineScratch {
+    std::string cs_entry;
+    std::vector<std::string> cs_const_keys;
+    std::vector<wgpu::ConstantEntry> cs_constants;
+};
+
+static void FillComputePipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Object> d,
+    ComputePipelineScratch& scratch, wgpu::ComputePipelineDescriptor& desc)
+{
+    v8::Local<v8::Value> layout = Prop(isolate, d, "layout");
+    if (layout->IsObject()) {
+        desc.layout = Unwrap<wgpu::PipelineLayout>(layout.As<v8::Object>());
+    }
+    v8::Local<v8::Object> compute = Prop(isolate, d, "compute").As<v8::Object>();
+    desc.compute.module = Unwrap<wgpu::ShaderModule>(Prop(isolate, compute, "module").As<v8::Object>());
+    scratch.cs_entry = webgpu::Str(isolate, compute, "entryPoint");
+    if (!scratch.cs_entry.empty()) {
+        desc.compute.entryPoint = wgpu::StringView(scratch.cs_entry.c_str(), scratch.cs_entry.size());
+    }
+    ParsePipelineConstants(isolate, compute, scratch.cs_const_keys, scratch.cs_constants);
+    if (!scratch.cs_constants.empty()) {
+        desc.compute.constantCount = scratch.cs_constants.size();
+        desc.compute.constants = scratch.cs_constants.data();
+    }
+}
+
+static void Device_CreateComputePipeline(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    ComputePipelineScratch scratch;
+    wgpu::ComputePipelineDescriptor desc = {};
+    FillComputePipelineDescriptor(isolate, args[0].As<v8::Object>(), scratch, desc);
+    args.GetReturnValue().Set(
+        WrapComputePipeline(isolate, device.CreateComputePipeline(&desc)));
+}
+
+// createRenderPipelineAsync / createComputePipelineAsync -> Promise<GPU*Pipeline>
+// Dawn C++ の Future 版 (CallbackMode::AllowProcessEvents で event loop が処理)。
+// ディスクリプタは呼び出し時に同期コピーされるため scratch はスタックで足りる。
+static void Device_CreateRenderPipelineAsync(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    RenderPipelineScratch scratch;
+    wgpu::RenderPipelineDescriptor desc = {};
+    FillRenderPipelineDescriptor(isolate, args[0].As<v8::Object>(), scratch, desc);
+
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    auto* persistent = new v8::Global<v8::Promise::Resolver>(isolate, resolver);
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    device.CreateRenderPipelineAsync(&desc, wgpu::CallbackMode::AllowProcessEvents,
+        [isolate, persistent](wgpu::CreatePipelineAsyncStatus status,
+                              wgpu::RenderPipeline pipeline, wgpu::StringView) {
+            v8::HandleScope scope(isolate);
+            v8::Local<v8::Context> c = isolate->GetCurrentContext();
+            auto r = persistent->Get(isolate);
+            if (status == wgpu::CreatePipelineAsyncStatus::Success) {
+                r->Resolve(c, WrapPipeline(isolate, pipeline)).Check();
+            } else {
+                r->Reject(c, v8::Exception::Error(
+                    v8util::Str(isolate, "createRenderPipelineAsync failed"))).Check();
+            }
+            persistent->Reset(); delete persistent;
+        });
+}
+
+static void Device_CreateComputePipelineAsync(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    ComputePipelineScratch scratch;
+    wgpu::ComputePipelineDescriptor desc = {};
+    FillComputePipelineDescriptor(isolate, args[0].As<v8::Object>(), scratch, desc);
+
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    auto* persistent = new v8::Global<v8::Promise::Resolver>(isolate, resolver);
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    device.CreateComputePipelineAsync(&desc, wgpu::CallbackMode::AllowProcessEvents,
+        [isolate, persistent](wgpu::CreatePipelineAsyncStatus status,
+                              wgpu::ComputePipeline pipeline, wgpu::StringView) {
+            v8::HandleScope scope(isolate);
+            v8::Local<v8::Context> c = isolate->GetCurrentContext();
+            auto r = persistent->Get(isolate);
+            if (status == wgpu::CreatePipelineAsyncStatus::Success) {
+                r->Resolve(c, WrapComputePipeline(isolate, pipeline)).Check();
+            } else {
+                r->Reject(c, v8::Exception::Error(
+                    v8util::Str(isolate, "createComputePipelineAsync failed"))).Check();
+            }
+            persistent->Reset(); delete persistent;
+        });
+}
+
+// createQuerySet({ type: 'occlusion'|'timestamp', count })
+static void Device_CreateQuerySet(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    v8::Local<v8::Object> d = args[0].As<v8::Object>();
+    wgpu::QuerySetDescriptor desc = {};
+    desc.type = ToQueryType(webgpu::Str(isolate, d, "type"));
+    desc.count = U32(isolate, d, "count", 0);
+    args.GetReturnValue().Set(WrapQuerySet(isolate, device.CreateQuerySet(&desc)));
+}
+
+// createRenderBundleEncoder({ colorFormats[], depthStencilFormat?, sampleCount?, ... })
+static void Device_CreateRenderBundleEncoder(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+    v8::Local<v8::Object> d = args[0].As<v8::Object>();
+
+    std::vector<wgpu::TextureFormat> formats;
+    v8::Local<v8::Value> cf = Prop(isolate, d, "colorFormats");
+    if (cf->IsArray()) {
+        auto arr = cf.As<v8::Array>();
+        for (uint32_t i = 0; i < arr->Length(); ++i) {
+            v8::Local<v8::Value> v;
+            if (arr->Get(ctx, i).ToLocal(&v) && v->IsString()) {
+                formats.push_back(ToTextureFormat(v8util::ToStdString(isolate, v)));
+            } else {
+                formats.push_back(wgpu::TextureFormat::Undefined);  // ギャップ (null)
+            }
+        }
+    }
+
+    wgpu::RenderBundleEncoderDescriptor desc = {};
+    desc.colorFormatCount = formats.size();
+    desc.colorFormats = formats.data();
+    if (HasProp(isolate, d, "depthStencilFormat")) {
+        desc.depthStencilFormat = ToTextureFormat(webgpu::Str(isolate, d, "depthStencilFormat"));
+    }
+    desc.sampleCount = U32(isolate, d, "sampleCount", 1);
+    desc.depthReadOnly = Bool(isolate, d, "depthReadOnly", false);
+    desc.stencilReadOnly = Bool(isolate, d, "stencilReadOnly", false);
+
+    args.GetReturnValue().Set(
+        WrapRenderBundleEncoder(isolate, device.CreateRenderBundleEncoder(&desc)));
+}
+
+// pushErrorScope(filter) / popErrorScope() -> Promise<GPUError|null>
+static void Device_PushErrorScope(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    wgpu::ErrorFilter filter = ToErrorFilter(
+        args.Length() > 0 ? v8util::ToStdString(isolate, args[0]) : "validation");
+    Unwrap<wgpu::Device>(args.This()).PushErrorScope(filter);
+}
+
+static void Device_PopErrorScope(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto& device = Unwrap<wgpu::Device>(args.This());
+
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    auto* persistent = new v8::Global<v8::Promise::Resolver>(isolate, resolver);
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    device.PopErrorScope(wgpu::CallbackMode::AllowProcessEvents,
+        [isolate, persistent](wgpu::PopErrorScopeStatus, wgpu::ErrorType type, wgpu::StringView message) {
+            v8::HandleScope scope(isolate);
+            v8::Local<v8::Context> c = isolate->GetCurrentContext();
+            auto r = persistent->Get(isolate);
+            if (type == wgpu::ErrorType::NoError) {
+                r->Resolve(c, v8::Null(isolate)).Check();
+            } else {
+                // GPUError 相当のオブジェクト ({ message, __errorType })
+                v8::Local<v8::Object> err = v8::Object::New(isolate);
+                std::string msg(message.data ? message.data : "", message.length);
+                SetValue(isolate, err, "message", v8util::Str(isolate, msg.c_str()));
+                SetValue(isolate, err, "__errorType", v8util::Str(isolate, ErrorTypeName(type)));
+                r->Resolve(c, err).Check();
+            }
+            persistent->Reset(); delete persistent;
+        });
+}
+
+static void Device_Destroy(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    Unwrap<wgpu::Device>(args.This()).Destroy();
 }
 
 static void Device_CreateCommandEncoder(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -1106,10 +1838,16 @@ static v8::Local<v8::Object> WrapEncoder(v8::Isolate* isolate, wgpu::CommandEnco
 {
     auto obj = WrapWith(isolate, Tmpl(isolate).commandEncoder, std::move(encoder));
     SetMethod(isolate, obj, "beginRenderPass", Encoder_BeginRenderPass);
+    SetMethod(isolate, obj, "beginComputePass", Encoder_BeginComputePass);
     SetMethod(isolate, obj, "finish", Encoder_Finish);
     SetMethod(isolate, obj, "copyBufferToBuffer", Encoder_CopyBufferToBuffer);
     SetMethod(isolate, obj, "copyTextureToTexture", Encoder_CopyTextureToTexture);
     SetMethod(isolate, obj, "copyTextureToBuffer", Encoder_CopyTextureToBuffer);
+    SetMethod(isolate, obj, "resolveQuerySet", Encoder_ResolveQuerySet);
+    SetMethod(isolate, obj, "writeTimestamp", Encoder_WriteTimestamp);
+    SetMethod(isolate, obj, "pushDebugGroup", Encoder_PushDebugGroup);
+    SetMethod(isolate, obj, "popDebugGroup", Encoder_PopDebugGroup);
+    SetMethod(isolate, obj, "insertDebugMarker", Encoder_InsertDebugMarker);
     return obj;
 }
 
@@ -1120,9 +1858,45 @@ static v8::Local<v8::Object> WrapPipeline(v8::Isolate* isolate, wgpu::RenderPipe
     return obj;
 }
 
+static void ComputePipeline_GetBindGroupLayout(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    auto& pipeline = Unwrap<wgpu::ComputePipeline>(args.This());
+    uint32_t index = args.Length() > 0 && args[0]->IsNumber()
+        ? static_cast<uint32_t>(args[0].As<v8::Number>()->Value()) : 0;
+    args.GetReturnValue().Set(
+        WrapWith(isolate, Tmpl(isolate).bindGroupLayout, pipeline.GetBindGroupLayout(index)));
+}
+
+static v8::Local<v8::Object> WrapComputePipeline(v8::Isolate* isolate, wgpu::ComputePipeline pipeline)
+{
+    auto obj = WrapWith(isolate, Tmpl(isolate).computePipeline, std::move(pipeline));
+    SetMethod(isolate, obj, "getBindGroupLayout", ComputePipeline_GetBindGroupLayout);
+    return obj;
+}
+
 // ---------------------------------------------------------------------------
 // GPUDevice / GPUQueue / GPUAdapter のラップ
 // ---------------------------------------------------------------------------
+static void Queue_OnSubmittedWorkDone(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto& queue = Unwrap<wgpu::Queue>(args.This());
+
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    auto* persistent = new v8::Global<v8::Promise::Resolver>(isolate, resolver);
+    args.GetReturnValue().Set(resolver->GetPromise());
+
+    queue.OnSubmittedWorkDone(wgpu::CallbackMode::AllowProcessEvents,
+        [isolate, persistent](wgpu::QueueWorkDoneStatus, wgpu::StringView) {
+            v8::HandleScope scope(isolate);
+            v8::Local<v8::Context> c = isolate->GetCurrentContext();
+            persistent->Get(isolate)->Resolve(c, v8::Undefined(isolate)).Check();
+            persistent->Reset(); delete persistent;
+        });
+}
+
 static v8::Local<v8::Object> WrapQueue(v8::Isolate* isolate, wgpu::Queue queue)
 {
     auto obj = WrapWith(isolate, Tmpl(isolate).queue, std::move(queue));
@@ -1130,6 +1904,7 @@ static v8::Local<v8::Object> WrapQueue(v8::Isolate* isolate, wgpu::Queue queue)
     SetMethod(isolate, obj, "writeBuffer", Queue_WriteBuffer);
     SetMethod(isolate, obj, "writeTexture", Queue_WriteTexture);
     SetMethod(isolate, obj, "copyExternalImageToTexture", Queue_CopyExternalImageToTexture);
+    SetMethod(isolate, obj, "onSubmittedWorkDone", Queue_OnSubmittedWorkDone);
     return obj;
 }
 
@@ -1144,9 +1919,25 @@ static v8::Local<v8::Object> WrapDevice(v8::Isolate* isolate, wgpu::Device devic
     SetMethod(isolate, obj, "createBindGroup", Device_CreateBindGroup);
     SetMethod(isolate, obj, "createPipelineLayout", Device_CreatePipelineLayout);
     SetMethod(isolate, obj, "createRenderPipeline", Device_CreateRenderPipeline);
+    SetMethod(isolate, obj, "createComputePipeline", Device_CreateComputePipeline);
+    SetMethod(isolate, obj, "createRenderPipelineAsync", Device_CreateRenderPipelineAsync);
+    SetMethod(isolate, obj, "createComputePipelineAsync", Device_CreateComputePipelineAsync);
     SetMethod(isolate, obj, "createCommandEncoder", Device_CreateCommandEncoder);
+    SetMethod(isolate, obj, "createQuerySet", Device_CreateQuerySet);
+    SetMethod(isolate, obj, "createRenderBundleEncoder", Device_CreateRenderBundleEncoder);
+    SetMethod(isolate, obj, "pushErrorScope", Device_PushErrorScope);
+    SetMethod(isolate, obj, "popErrorScope", Device_PopErrorScope);
+    SetMethod(isolate, obj, "destroy", Device_Destroy);
     SetValue(isolate, obj, "queue", WrapQueue(isolate, device.GetQueue()));
     SetValue(isolate, obj, "features", v8::Object::New(isolate));
+
+    // device.lost: Promise<GPUDeviceLostInfo>。デバイス生存中は pending (spec 準拠)。
+    // 実際のロストは Dawn の deviceLost コールバック経路 (DawnContext 側) に委ねる。
+    {
+        v8::Local<v8::Context> lctx = isolate->GetCurrentContext();
+        auto lost = v8::Promise::Resolver::New(lctx).ToLocalChecked();
+        SetValue(isolate, obj, "lost", lost->GetPromise());
+    }
 
     // limits: player は maxTextureDimension2D で描画最大サイズを決めるため実値を返す。
     // GetLimits の戻り値型は Dawn バージョン差があるため値でガードする(0 なら保証最小値)。
@@ -1224,6 +2015,8 @@ static void InitTemplates(v8::Isolate* isolate)
     make(t.textureView); make(t.sampler); make(t.shaderModule); make(t.bindGroupLayout);
     make(t.bindGroup); make(t.pipelineLayout); make(t.renderPipeline); make(t.commandEncoder);
     make(t.renderPass); make(t.commandBuffer); make(t.canvasContext);
+    make(t.computePipeline); make(t.computePass);
+    make(t.querySet); make(t.renderBundle); make(t.renderBundleEncoder);
 }
 
 static void SetFlag(v8::Isolate* isolate, v8::Local<v8::Object> obj, const char* k, uint32_t v)
@@ -1234,6 +2027,13 @@ static void SetFlag(v8::Isolate* isolate, v8::Local<v8::Object> obj, const char*
 } // namespace webgpu
 
 // Bindings.h から呼ばれる公開関数
+// V8 破棄前に呼ぶ。テンプレートの v8::Global (static map) を解放する。
+// (放置すると static デストラクタが V8 破棄後に走りアクセス違反になる)
+void ShutdownWebGPU()
+{
+    webgpu::g_templates.clear();
+}
+
 void InstallWebGPU(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host)
 {
     using namespace next2d::webgpu;

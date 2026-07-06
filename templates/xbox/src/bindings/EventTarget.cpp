@@ -104,6 +104,7 @@ void DispatchEvent(v8::Isolate* isolate, v8::Local<v8::Object> target,
     if (target->Get(ctx, Str(isolate, onname.c_str())).ToLocal(&on) && on->IsFunction()) {
         v8::TryCatch tc(isolate);
         (void) on.As<v8::Function>()->Call(ctx, target, 1, args1);
+        v8util::ReportCaught(isolate, &tc, onname.c_str());
     }
 
     // __listeners[type]
@@ -118,6 +119,7 @@ void DispatchEvent(v8::Isolate* isolate, v8::Local<v8::Object> target,
                 if (arr->Get(ctx, i).ToLocal(&fn) && fn->IsFunction()) {
                     v8::TryCatch tc(isolate);
                     (void) fn.As<v8::Function>()->Call(ctx, target, 1, args1);
+                    v8util::ReportCaught(isolate, &tc, ("listener:" + type).c_str());
                 }
             }
         }

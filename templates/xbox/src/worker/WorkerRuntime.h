@@ -25,9 +25,12 @@ class HostContext;
 class EventLoop;
 class WorkerRuntime;
 
-// 1 メッセージ = ValueSerializer 出力バイト列。
+// 1 メッセージ = ValueSerializer 出力バイト列 + transfer された ArrayBuffer の実体。
+// transfer_list の ArrayBuffer は中身を bytes に埋め込まず所有権ごと移す
+// (render キューは数十 MB になるため、コピーするとフレームレートが崩壊する)。
 struct WorkerMessage {
     std::vector<uint8_t> data;
+    std::vector<std::shared_ptr<v8::BackingStore>> transfers;
 };
 
 class WorkerInstance {
@@ -39,8 +42,8 @@ public:
     void Terminate();
 
     // main→worker / worker→main の投函
-    void PostToWorker(std::vector<uint8_t> bytes);
-    void PostToMain(std::vector<uint8_t> bytes);
+    void PostToWorker(WorkerMessage message);
+    void PostToMain(WorkerMessage message);
 
     // 配送 + タイマー/rAF 前進 (WorkerRuntime::Pump から呼ぶ)
     void Deliver(double now_ms);
@@ -88,21 +91,28 @@ public:
 
     bool HasWorkers() const { return !workers_.empty(); }
 
+    // 全 WorkerInstance を破棄する。WorkerInstance は v8::Global (context_ /
+    // main_worker_object 等) を保持するため、Isolate::Dispose より前に必ず呼ぶこと
+    // (呼ばずにスタック巻き戻しで破棄されると Isolate 破棄後の Global::Reset で fail-fast)。
+    void Shutdown() { workers_.clear(); }
+
 private:
     v8::Isolate* isolate_;
     HostContext* host_;
     std::vector<std::unique_ptr<WorkerInstance>> workers_;
 };
 
-// ValueSerializer/Deserializer による structured clone (OffscreenCanvas transfer 対応)。
-// 失敗時は空を返す。source_ctx で直列化し、bytes を得る。
-std::vector<uint8_t> SerializeMessage(v8::Isolate* isolate, v8::Local<v8::Context> source_ctx,
-                                      v8::Local<v8::Value> message,
-                                      v8::Local<v8::Value> transfer_list);
+// ValueSerializer/Deserializer による structured clone
+// (OffscreenCanvas / ImageBitmap のホストオブジェクト対応 + ArrayBuffer transfer)。
+// 失敗時は data が空の WorkerMessage を返す。transfer_list 内の ArrayBuffer は
+// detach され、backing store が message.transfers へ移る。
+WorkerMessage SerializeMessage(v8::Isolate* isolate, v8::Local<v8::Context> source_ctx,
+                               v8::Local<v8::Value> message,
+                               v8::Local<v8::Value> transfer_list);
 
-// bytes を target_ctx で復元する。
+// message を target_ctx で復元する (transfer された ArrayBuffer は同一実体を再装着)。
 v8::MaybeLocal<v8::Value> DeserializeMessage(v8::Isolate* isolate,
                                              v8::Local<v8::Context> target_ctx,
-                                             const std::vector<uint8_t>& bytes);
+                                             const WorkerMessage& message);
 
 } // namespace next2d

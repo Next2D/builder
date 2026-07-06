@@ -25,7 +25,7 @@
     // V8 単体には Web の Text* が含まれないため最小実装を提供する。
     if (typeof global.TextEncoder === "undefined") {
         global.TextEncoder = class TextEncoder {
-            get encoding() { return "utf-8"; }
+            get encoding() { return "utf-8" }
             encode(str) {
                 str = String(str);
                 const out = [];
@@ -34,23 +34,23 @@
                     if (code < 0x80) {
                         out.push(code);
                     } else if (code < 0x800) {
-                        out.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+                        out.push(0xc0 | code >> 6, 0x80 | code & 0x3f);
                     } else if (code >= 0xd800 && code <= 0xdbff) {
                         // サロゲートペア
                         const hi = code;
                         const lo = str.charCodeAt(++i);
-                        code = 0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00);
+                        code = 0x10000 + (hi - 0xd800 << 10) + (lo - 0xdc00);
                         out.push(
-                            0xf0 | (code >> 18),
-                            0x80 | ((code >> 12) & 0x3f),
-                            0x80 | ((code >> 6) & 0x3f),
-                            0x80 | (code & 0x3f)
+                            0xf0 | code >> 18,
+                            0x80 | code >> 12 & 0x3f,
+                            0x80 | code >> 6 & 0x3f,
+                            0x80 | code & 0x3f
                         );
                     } else {
                         out.push(
-                            0xe0 | (code >> 12),
-                            0x80 | ((code >> 6) & 0x3f),
-                            0x80 | (code & 0x3f)
+                            0xe0 | code >> 12,
+                            0x80 | code >> 6 & 0x3f,
+                            0x80 | code & 0x3f
                         );
                     }
                 }
@@ -61,10 +61,10 @@
 
     if (typeof global.TextDecoder === "undefined") {
         global.TextDecoder = class TextDecoder {
-            constructor(label) { this._label = label || "utf-8"; }
-            get encoding() { return "utf-8"; }
+            constructor(label) { this._label = label || "utf-8" }
+            get encoding() { return "utf-8" }
             decode(input) {
-                if (!input) return "";
+                if (!input) { return "" }
                 const bytes = input instanceof Uint8Array
                     ? input
                     : new Uint8Array(input.buffer || input);
@@ -75,14 +75,14 @@
                     if (c < 0x80) {
                         out += String.fromCharCode(c);
                     } else if (c < 0xe0) {
-                        out += String.fromCharCode(((c & 0x1f) << 6) | (bytes[i++] & 0x3f));
+                        out += String.fromCharCode((c & 0x1f) << 6 | bytes[i++] & 0x3f);
                     } else if (c < 0xf0) {
                         out += String.fromCharCode(
-                            ((c & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f)
+                            (c & 0x0f) << 12 | (bytes[i++] & 0x3f) << 6 | bytes[i++] & 0x3f
                         );
                     } else {
-                        let code = ((c & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12) |
-                                   ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+                        let code = (c & 0x07) << 18 | (bytes[i++] & 0x3f) << 12 |
+                                   (bytes[i++] & 0x3f) << 6 | bytes[i++] & 0x3f;
                         code -= 0x10000;
                         out += String.fromCharCode(0xd800 + (code >> 10), 0xdc00 + (code & 0x3ff));
                     }
@@ -97,28 +97,31 @@
     if (typeof global.URL === "undefined") {
         global.URL = class URL {
             constructor(url, base) {
-                this.href = base ? (String(base).replace(/\/?$/, "/") + url) : String(url);
+                this.href = base ? String(base).replace(/\/?$/, "/") + url : String(url);
                 this.pathname = this.href.replace(/^[a-z]+:\/\/[^/]*/i, "");
                 this.search = "";
                 this.hash = "";
             }
-            toString() { return this.href; }
+            toString() { return this.href }
         };
-        global.URL.createObjectURL = function () { return ""; };
+        global.URL.createObjectURL = function () { return "" };
+        // 意図的な no-op スタブ (ローカル実行では解放処理は不要)
+        // eslint-disable-next-line no-empty-function
         global.URL.revokeObjectURL = function () {};
     }
 
     // --- location (Next2D が参照する場合の最小値) ---------------------------
     if (typeof global.location === "undefined") {
         global.location = {
-            href: "app://local/",
-            origin: "app://local",
-            protocol: "app:",
-            host: "local",
-            hostname: "local",
-            pathname: "/",
-            search: "",
-            hash: "",
+            "href": "app://local/",
+            "origin": "app://local",
+            "protocol": "app:",
+            "host": "local",
+            "hostname": "local",
+            "pathname": "/",
+            "search": "",
+            "hash": "",
+            // eslint-disable-next-line no-empty-function
             reload() {}
         };
     }

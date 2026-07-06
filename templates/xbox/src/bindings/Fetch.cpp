@@ -3,6 +3,7 @@
 #include "HostContext.h"
 #include "AssetLoader.h"
 #include "v8/V8Util.h"
+#include "v8/WeakHandle.h"
 
 #include <cstring>
 #include <vector>
@@ -84,12 +85,6 @@ void ResponseJson(const v8::FunctionCallbackInfo<v8::Value>& args)
     args.GetReturnValue().Set(resolver->GetPromise());
 }
 
-// External に持たせた vector を解放するための弱参照コールバック
-void ReleaseResponseData(const v8::WeakCallbackInfo<std::vector<uint8_t>>& info)
-{
-    delete info.GetParameter();
-}
-
 v8::Local<v8::Object> MakeResponse(v8::Isolate* isolate, v8::Local<v8::Context> ctx,
                                    std::vector<uint8_t>&& bytes, bool ok, int status)
 {
@@ -101,8 +96,7 @@ v8::Local<v8::Object> MakeResponse(v8::Isolate* isolate, v8::Local<v8::Context> 
     response->SetInternalField(0, v8::External::New(isolate, data));
 
     // GC 時に解放
-    auto* handle = new v8::Global<v8::Object>(isolate, response);
-    handle->SetWeak(data, ReleaseResponseData, v8::WeakCallbackType::kParameter);
+    v8util::AttachWeak(isolate, response, data);
 
     v8util::SetValue(isolate, response, "ok", v8::Boolean::New(isolate, ok));
     v8util::SetValue(isolate, response, "status", v8::Integer::New(isolate, status));

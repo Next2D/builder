@@ -220,7 +220,7 @@ const buildWeb = (): Promise<void> =>
 {
     return new Promise<void>((resolve, reject): void =>
     {
-        const stream = cp.spawn("npx", [
+        const stream = $spawn("npx", [
             "@next2d/vite-plugin-next2d-auto-loader"
         ], { "stdio": "inherit" });
 
@@ -230,7 +230,7 @@ const buildWeb = (): Promise<void> =>
                 reject("vite plugin command failed.");
             }
 
-            const stream = cp.spawn("npx", [
+            const stream = $spawn("npx", [
                 "vite",
                 "--outDir",
                 $buildDir,
@@ -267,7 +267,7 @@ const installElectron = (): Promise<void> =>
             return resolve();
         }
 
-        const stream = cp.spawn("npm", [
+        const stream = $spawn("npm", [
             "--prefix",
             `${process.cwd()}/electron`,
             "install",
@@ -363,7 +363,7 @@ const buildSteam = async (): Promise<void> =>
 
     if (preview) {
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "electron",
             `${process.cwd()}/electron/index.js`
         ], { "stdio": "inherit" });
@@ -437,7 +437,7 @@ const generateNativeProject = (): Promise<void> =>
             return resolve();
         }
 
-        const stream = cp.spawn("npx", [
+        const stream = $spawn("npx", [
             "cap",
             "add",
             platform
@@ -484,7 +484,7 @@ const runNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    cp.spawn("npx", [
+    $spawn("npx", [
         "cap",
         "run",
         platform
@@ -518,7 +518,7 @@ const openNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    const stream = cp.spawn("npx", [
+    const stream = $spawn("npx", [
         "cap",
         "sync",
         platform
@@ -531,7 +531,7 @@ const openNative = async (): Promise<void> =>
             return;
         }
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "cap",
             "open",
             platform
@@ -566,7 +566,7 @@ const buildNative = async (): Promise<void> =>
         JSON.stringify(config, null, 2)
     );
 
-    const stream = cp.spawn("npx", [
+    const stream = $spawn("npx", [
         "cap",
         "sync",
         platform
@@ -579,7 +579,7 @@ const buildNative = async (): Promise<void> =>
             return;
         }
 
-        cp.spawn("npx", [
+        $spawn("npx", [
             "cap",
             "build",
             platform
@@ -616,6 +616,30 @@ const getTemplateDir = (name: string): string =>
 const XBOX_CONFIG_NAME: string = "MicrosoftGame.config";
 
 /**
+ * @description npx / npm を子プロセスとして起動する (クロスプラットフォーム)。
+ *              Windows では npx/npm が .cmd (バッチファイル) のため、shell 経由で
+ *              ないと起動できない (spawn ENOENT / Node の CVE-2024-27980 対応により
+ *              .cmd の直接 spawn も不可)。スペースを含む引数は二重引用符で保護する。
+ *              Spawn npx/npm cross-platform. On Windows they are .cmd batch files,
+ *              which require a shell to spawn.
+ *
+ * @param  {string} command
+ * @param  {array} args
+ * @param  {object} options
+ * @return {object}
+ * @method
+ * @public
+ */
+const $spawn = (command: string, args: string[], options: object = {}): cp.ChildProcess =>
+{
+    if (process.platform === "win32" && (command === "npx" || command === "npm")) {
+        const quoted: string[] = args.map((a: string): string => /\s/.test(a) ? `"${a}"` : a);
+        return cp.spawn(command, quoted, { ...options, "shell": true });
+    }
+    return cp.spawn(command, args, options);
+};
+
+/**
  * @description 自動ダウンロードする prebuilt V8 のバージョン。
  *              `.github/workflows/build-v8.yml` で発行した Releases のタグと、
  *              `xbox-host-ci.yml` の V8_TAG に一致させること。
@@ -625,7 +649,19 @@ const XBOX_CONFIG_NAME: string = "MicrosoftGame.config";
  * @type {string}
  * @constant
  */
-const XBOX_V8_VERSION: string = "13.6.233.17";
+const XBOX_V8_VERSION: string = "13.7.152.19";
+
+/**
+ * @description prebuilt V8 のアセットリビジョン。同一 V8 バージョンでも
+ *              gn フラグ変更 (例: r2 = WebAssembly + DrumBrake 有効化) で
+ *              バイナリが変わる場合に上げ、Release タグとローカルキャッシュを分離する。
+ *              Asset revision. Bump when gn flags change for the same V8 version
+ *              (r2 = WebAssembly + DrumBrake enabled).
+ *
+ * @type {string}
+ * @constant
+ */
+const XBOX_V8_REVISION: string = "r3";
 
 /**
  * @description ゲーム側の `xbox/` へスキャフォールドしないテンプレート内ファイル。
@@ -779,14 +815,14 @@ const resolveXboxV8Root = async (): Promise<string> =>
     const cacheBase: string = process.env.LOCALAPPDATA
         ? `${process.env.LOCALAPPDATA}/next2d`
         : `${os.homedir()}/.cache/next2d`;
-    const cacheDir: string = `${cacheBase}/v8/${XBOX_V8_VERSION}`;
+    const cacheDir: string = `${cacheBase}/v8/${XBOX_V8_VERSION}-${XBOX_V8_REVISION}`;
     if (fs.existsSync(`${cacheDir}/include/v8.h`)) {
         return cacheDir;
     }
 
     // 4. GitHub Releases から自動ダウンロード (マシンごとに初回のみ)
     const assetName: string = `v8-monolith-${XBOX_V8_VERSION}-windows-x64.zip`;
-    const url: string = `https://github.com/Next2D/builder/releases/download/v8-${XBOX_V8_VERSION}-windows-x64/${assetName}`;
+    const url: string = `https://github.com/Next2D/builder/releases/download/v8-${XBOX_V8_VERSION}-windows-x64-${XBOX_V8_REVISION}/${assetName}`;
 
     console.log(pc.green(`Downloading prebuilt V8 ${XBOX_V8_VERSION} (first time only) ...`));
     console.log(url);
@@ -908,21 +944,25 @@ const buildXbox = async (): Promise<void> =>
         return;
     }
 
-    // フルビルド (Release パッケージまで)
-    const stream = cp.spawn("cmake", [
-        "--build", cmakeBuildDir,
-        "--config", "Release"
-    ], { "stdio": "inherit" });
-
-    stream.on("close", (code: number): void =>
+    // フルビルド (Release パッケージまで)。失敗時は reject して非ゼロ終了させる
+    // (以前は表示のみで exit code 0 のまま成功扱いになっていた)
+    await new Promise<void>((resolve, reject): void =>
     {
-        if (code !== 0) {
-            console.log(pc.red("Export of the Xbox (GDK) package failed."));
-            return;
-        }
-        console.log();
-        console.log(pc.green(`Finished building the Xbox (GDK) package for ${gdkArch}.`));
-        console.log();
+        const stream = cp.spawn("cmake", [
+            "--build", cmakeBuildDir,
+            "--config", "Release"
+        ], { "stdio": "inherit" });
+
+        stream.on("close", (code: number): void =>
+        {
+            if (code !== 0) {
+                return reject("Export of the Xbox (GDK) package failed.");
+            }
+            console.log();
+            console.log(pc.green(`Finished building the Xbox (GDK) package for ${gdkArch}.`));
+            console.log();
+            resolve();
+        });
     });
 };
 

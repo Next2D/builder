@@ -5,6 +5,10 @@
 #include "v8/V8Util.h"
 
 #include <Windows.h>
+#include <bcrypt.h>
+#include <cstdio>
+
+#pragma comment(lib, "bcrypt.lib")
 
 namespace next2d {
 
@@ -107,6 +111,109 @@ void ClipboardWriteText(const v8::FunctionCallbackInfo<v8::Value>& args)
     resolver->Resolve(ctx, v8::Undefined(isolate)).Check();
 }
 
+// crypto.getRandomValues(typedArray): OS 乱数で埋めて同じ view を返す
+void CryptoGetRandomValues(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    if (args.Length() < 1 || !args[0]->IsArrayBufferView()) {
+        v8util::ThrowTypeError(isolate, "getRandomValues requires a TypedArray");
+        return;
+    }
+    auto view = args[0].As<v8::ArrayBufferView>();
+    std::vector<uint8_t> bytes(view->ByteLength());
+    if (!bytes.empty()) {
+        BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        // view のバッキングへ書き戻す
+        auto ab = view->Buffer();
+        auto* dst = static_cast<uint8_t*>(ab->GetBackingStore()->Data()) + view->ByteOffset();
+        memcpy(dst, bytes.data(), bytes.size());
+    }
+    args.GetReturnValue().Set(args[0]);
+}
+
+// crypto.randomUUID(): RFC 4122 v4
+void CryptoRandomUUID(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    uint8_t b[16] = {};
+    BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    b[6] = static_cast<uint8_t>((b[6] & 0x0f) | 0x40);   // version 4
+    b[8] = static_cast<uint8_t>((b[8] & 0x3f) | 0x80);   // variant
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+    args.GetReturnValue().Set(Str(isolate, buf));
+}
+
+// --- 名前付きストレージの永続化バックエンド ---------------------------------
+// localStorage / indexedDB のセマンティクスは Polyfills.cpp の JS 側が実装し、
+// ここは名前ごとのファイル I/O のみを担う。
+// 保存先: %LOCALAPPDATA%\Next2D\<name>.json
+// «EXTEND» コンソール実機では XGameSave への置き換えが必要 (devkit 後の作業)。
+std::wstring StorageFilePath(const std::string& name)
+{
+    // ファイル名として安全な文字だけを残す
+    std::wstring safe;
+    for (char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '-';
+        safe.push_back(ok ? static_cast<wchar_t>(c) : L'_');
+    }
+    if (safe.empty()) {
+        safe = L"storage";
+    }
+    wchar_t base[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) {
+        return safe + L".json";   // フォールバック: カレント
+    }
+    std::wstring dir = std::wstring(base) + L"\\Next2D";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\" + safe + L".json";
+}
+
+// __next2d_storage_load(name) -> string
+void StorageLoad(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    const std::string name = args.Length() > 0
+        ? v8util::ToStdString(isolate, args[0]) : "localStorage";
+    HANDLE h = CreateFileW(StorageFilePath(name).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        args.GetReturnValue().Set(Str(isolate, ""));
+        return;
+    }
+    DWORD size = GetFileSize(h, nullptr);
+    std::string data(size, '\0');
+    DWORD read = 0;
+    ReadFile(h, data.data(), size, &read, nullptr);
+    CloseHandle(h);
+    data.resize(read);
+    args.GetReturnValue().Set(Str(isolate, data));
+}
+
+// __next2d_storage_save(name, data)
+void StorageSave(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    if (args.Length() < 2) {
+        return;
+    }
+    v8::Isolate* isolate = args.GetIsolate();
+    const std::string name = v8util::ToStdString(isolate, args[0]);
+    const std::string data = v8util::ToStdString(isolate, args[1]);
+    HANDLE h = CreateFileW(StorageFilePath(name).c_str(), GENERIC_WRITE, 0,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
+    CloseHandle(h);
+}
+
 // new OffscreenCanvas(width, height)
 void OffscreenCanvasConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
@@ -144,6 +251,19 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     SetValue(isolate, global, "self", global);
     NoopEventTarget(isolate, global);
 
+    // crypto (getRandomValues / randomUUID — OS 乱数)。
+    // player の WebGLUtil が ID 生成に crypto.randomUUID を使う。
+    {
+        v8::Local<v8::Object> crypto = v8::Object::New(isolate);
+        SetMethod(isolate, crypto, "getRandomValues", CryptoGetRandomValues);
+        SetMethod(isolate, crypto, "randomUUID", CryptoRandomUUID);
+        SetValue(isolate, global, "crypto", crypto);
+    }
+
+    // localStorage のファイル I/O バックエンド (Polyfills.cpp の JS が利用)
+    SetMethod(isolate, global, "__next2d_storage_load", StorageLoad);
+    SetMethod(isolate, global, "__next2d_storage_save", StorageSave);
+
     // devicePixelRatio
     SetValue(isolate, global, "devicePixelRatio",
              v8::Number::New(isolate, host->device_pixel_ratio));
@@ -176,6 +296,8 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     // document
     v8::Local<v8::Object> document = v8::Object::New(isolate);
     SetMethod(isolate, document, "createElement", CreateElement);
+    // 起動時点で読み込み完了扱い (ゲームの boot 分岐が readyState === "loading" で待機しないように)
+    SetValue(isolate, document, "readyState", Str(isolate, "complete"));
     SetMethod(isolate, document, "getElementById",
         [](const v8::FunctionCallbackInfo<v8::Value>& a) { a.GetReturnValue().SetNull(); });
     SetMethod(isolate, document, "querySelector",
@@ -216,6 +338,11 @@ void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, H
     InstallAudio(isolate, global, host);
     InstallWebGPU(isolate, global, host);   // navigator.gpu
     InstallGamepad(isolate, global, host);  // navigator.getGamepads
+
+    // TextEncoder/TextDecoder/queueMicrotask。bootstrap.js はメインコンテキスト
+    // でのみ実行されるため、worker を含む全コンテキストにはここで注入する
+    // (Vite バンドルの worker は評価時に TextDecoder を要求する)。
+    InstallPolyfills(isolate, isolate->GetCurrentContext());
 }
 
 } // namespace next2d

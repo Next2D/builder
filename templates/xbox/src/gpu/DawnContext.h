@@ -36,6 +36,9 @@ public:
     // 提示する。
     void Present();
 
+    // 提示直前の surface 中央行を読み戻して非黒ピクセル数をログする (黒画面調査用)。
+    void DebugProbeSurface();
+
     // Dawn の非同期イベント(コールバック)を進める。毎フレーム呼ぶ。
     void Tick();
 
@@ -59,6 +62,21 @@ private:
     HWND     hwnd_   = nullptr;
     uint32_t width_  = 0;
     uint32_t height_ = 0;
+
+    // surface が Configure 済みか。未構成のまま Present すると Dawn の
+    // 検証エラーが毎フレーム出るため、Present/GetCurrentTexture をゲートする。
+    bool     configured_ = false;
+
+    // 今フレーム GetCurrentTexture が呼ばれたか。呼ばれていないフレームで
+    // Present すると Dawn の検証エラーになるため、Present をゲートする
+    // (アプリが描画しないフレームは提示しない)。
+    bool     frame_texture_acquired_ = false;
+
+    // デバッグ用: surface の CopySrc 可否 / 今フレームのテクスチャ / 提示統計
+    bool          can_copy_src_ = false;
+    wgpu::Texture current_texture_ = nullptr;
+    uint64_t      present_count_ = 0;
+    uint64_t      present_skipped_ = 0;
 };
 
 } // namespace next2d

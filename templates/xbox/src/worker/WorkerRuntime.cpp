@@ -526,6 +526,18 @@ bool WorkerInstance::Start()
               "endFrame(){__n2dTrace(\"EF\",\"fs=\"+this.frameStarted+\" enc=\"+!!this.commandEncoder);if(this.frameStarted){");
         patch("transferMainCanvas(){if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)",
               "transferMainCanvas(){__n2dTrace(\"TMC\",\"att=\"+!!(this.$mainAttachmentObject&&this.$mainAttachmentObject.texture));if(!this.$mainAttachmentObject||!this.$mainAttachmentObject.texture)");
+        // «診断/自己修復» CommandController.execute() は try/catch を持たないため、
+        // 描画中の例外が 1 度起きると this.state が "active" のまま固まり、
+        // 以後 onmessage は queue に積むだけで execute を再開せず worker が永久停止する
+        // (画面が ~15 フレームで凍結する現象の直接原因)。元の execute をリネームし、
+        // 例外を捕捉して message+stack を出力しつつ state を戻すラッパを被せる。
+        // これで「実際に何が throw しているか」を CI ログで確定でき、かつ凍結も防げる。
+        patch("async execute(){for(this.state=\"active\"",
+              "async execute(){try{await this.__n2dExec()}catch(__ee){"
+              "var __n=(globalThis.__rerr=(globalThis.__rerr||0)+1);"
+              "if(__n<=8)console.error(\"[rendererr] #\"+__n+\" \"+(__ee&&__ee.message||__ee)+"
+              "\"\\n\"+(__ee&&__ee.stack||\"\"));this.state=\"deactivate\"}}"
+              "async __n2dExec(){for(this.state=\"active\"");
     }
     v8::TryCatch tc(isolate_);
     v8::ScriptOrigin origin(Str(isolate_, url_));

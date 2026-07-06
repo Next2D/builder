@@ -584,6 +584,55 @@
                 "dynamic offset 256 -> green, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
         });
 
+        await softTest("WebGPU: MSAA (sampleCount=4) + resolveTarget 解決 (player 全描画経路)", async () => {
+            assert(device, "needs device");
+            // player は全描画を MSAA テクスチャへ行い resolveTarget で本体へ解決する。
+            // resolveTarget が無視されると描画結果がどこにも現れない (黒画面の実原因だった)
+            const shader = device.createShaderModule({ "code": `
+                @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                    var p = array<vec2f, 3>(vec2f(-1,-3), vec2f(3,1), vec2f(-1,1));
+                    return vec4f(p[i], 0, 1);
+                }
+                @fragment fn fs() -> @location(0) vec4f { return vec4f(0, 0, 1, 1); }
+            ` });
+            const pipeline = device.createRenderPipeline({
+                "layout": "auto",
+                "vertex": { "module": shader, "entryPoint": "vs" },
+                "fragment": { "module": shader, "entryPoint": "fs",
+                    "targets": [{ "format": "rgba8unorm" }] },
+                "primitive": { "topology": "triangle-list" },
+                "multisample": { "count": 4 }
+            });
+            const msaa = device.createTexture({
+                "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "sampleCount": 4,
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT
+            });
+            const resolve = device.createTexture({
+                "size": { "width": 4, "height": 4 }, "format": "rgba8unorm",
+                "usage": GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+            });
+            const enc = device.createCommandEncoder();
+            const pass = enc.beginRenderPass({ "colorAttachments": [{
+                "view": msaa.createView(),
+                "resolveTarget": resolve.createView(),
+                "loadOp": "clear", "storeOp": "store",
+                "clearValue": [0, 0, 0, 0]
+            }] });
+            pass.setPipeline(pipeline);
+            pass.draw(3);
+            pass.end();
+            const buf = device.createBuffer({ "size": 256 * 4, "usage": GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const enc2 = device.createCommandEncoder();
+            enc2.copyTextureToBuffer({ "texture": resolve }, { "buffer": buf, "bytesPerRow": 256 }, { "width": 4, "height": 4 });
+            device.queue.submit([enc.finish(), enc2.finish()]);
+            await buf.mapAsync(GPUMapMode.READ);
+            const px = new Uint8Array(buf.getMappedRange().slice(0));
+            buf.unmap();
+            assert(px[2] === 255 && px[3] === 255,
+                "resolve target has blue, got rgba=" + px[0] + "," + px[1] + "," + px[2] + "," + px[3]);
+        });
+
         await softTest("WebGPU: stencil8 パイプライン + setStencilReference (マスク経路)", async () => {
             assert(device, "needs device");
             const shader = device.createShaderModule({ "code": `

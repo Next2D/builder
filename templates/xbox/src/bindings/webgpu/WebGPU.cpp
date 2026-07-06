@@ -518,6 +518,13 @@ static void Encoder_BeginRenderPass(const v8::FunctionCallbackInfo<v8::Value>& a
             att.loadOp = ToLoadOp(webgpu::Str(isolate, o, "loadOp"));
             att.storeOp = ToStoreOp(webgpu::Str(isolate, o, "storeOp"));
             att.depthSlice = wgpu::kDepthSliceUndefined;
+            // MSAA 解決先。player は全描画を MSAA テクスチャへ行い resolveTarget で
+            // 本体テクスチャに解決する。未対応だと描画結果がどこにも現れない (黒画面)。
+            v8::Local<v8::Value> rt = Prop(isolate, o, "resolveTarget");
+            if (rt->IsObject()) {
+                att.resolveTarget =
+                    Unwrap<wgpu::TextureView>(rt.As<v8::Object>());
+            }
             v8::Local<v8::Value> cv = Prop(isolate, o, "clearValue");
             if (cv->IsArray()) {
                 auto c = cv.As<v8::Array>();

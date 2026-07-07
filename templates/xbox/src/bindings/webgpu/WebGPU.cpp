@@ -8,6 +8,9 @@
 #include "gpu/DawnContext.h"
 #include "bindings/ImageSource.h"
 
+#include "v8/V8Util.h"
+
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -755,6 +758,22 @@ static void Encoder_BeginRenderPass(const v8::FunctionCallbackInfo<v8::Value>& a
                 auto c = cv.As<v8::Object>();
                 att.clearValue = { F64(isolate, c, "r"), F64(isolate, c, "g"),
                                    F64(isolate, c, "b"), F64(isolate, c, "a") };
+            }
+            // «診断» 背景クリアパスの clearValue を記録する。
+            // スライムの白→透明グラデが黒くなる原因が「surface が透明(0,0,0,0)で
+            // クリアされているか」を確定させる。ゲームは stage.bgColor="#6dd4ff" を
+            // 設定しているので、正しく反映されていれば (0.43,0.83,1.0,1.0) 付近の
+            // 不透明シアンになるはず。(0,0,0,0) なら bgColor が player に届いていない。
+            if (att.loadOp == wgpu::LoadOp::Clear) {
+                static int clear_log = 0;
+                if (clear_log < 12) {
+                    ++clear_log;
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf),
+                        "[gpu] clear pass rgba=(%.3f,%.3f,%.3f,%.3f)",
+                        att.clearValue.r, att.clearValue.g, att.clearValue.b, att.clearValue.a);
+                    v8util::AppendErrorLog(buf);
+                }
             }
             color_attachments.push_back(att);
         }

@@ -8,6 +8,7 @@
 #include "v8/WeakHandle.h"
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace next2d {
@@ -230,19 +231,36 @@ void PumpAudioEvents(v8::Isolate* isolate)
     if (sources.empty()) return;
     v8::HandleScope scope(isolate);
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    // 1) 終了した source を集めて先に登録リストから外す。ここでは JS を呼ばない。
+    //    (この時点の erase による v8::Global の move は他の再入が無いので安全)
+    std::vector<v8::Global<v8::Object>> finished;
     for (size_t i = 0; i < sources.size();) {
         v8::Local<v8::Object> node = sources[i].Get(isolate);
         auto voice = Get<AudioVoice>(node);
         if (!voice || voice->IsFinished()) {
-            if (voice) {
-                v8::Local<v8::Object> ev = v8::Object::New(isolate);
-                ev->Set(ctx, Str(isolate, "type"), Str(isolate, "ended")).Check();
-                DispatchEvent(isolate, node, ev);
-            }
+            finished.push_back(std::move(sources[i]));
             sources.erase(sources.begin() + i);
         } else {
             ++i;
         }
+    }
+
+    // 2) リストが安定した状態で "ended" を配送する。
+    //    "ended" ハンドラは source.disconnect() や新規再生で PlayingSources を
+    //    再入的に変更しうる。以前は配送と erase を同一ループで行っていたため、
+    //    配送中にベクタが変更されると直後の erase 中の v8::Global move が壊れ
+    //    GlobalHandles::MoveGlobal でアクセス違反していた。独立した finished を
+    //    走査することで再入変更から隔離する。
+    for (auto& g : finished) {
+        v8::Local<v8::Object> node = g.Get(isolate);
+        auto voice = Get<AudioVoice>(node);
+        if (voice) {
+            v8::Local<v8::Object> ev = v8::Object::New(isolate);
+            ev->Set(ctx, Str(isolate, "type"), Str(isolate, "ended")).Check();
+            DispatchEvent(isolate, node, ev);
+        }
+        g.Reset();
     }
 }
 

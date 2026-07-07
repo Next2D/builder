@@ -278,6 +278,15 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     SetValue(isolate, global, "innerWidth", v8::Integer::New(isolate, host->viewport_width));
     SetValue(isolate, global, "innerHeight", v8::Integer::New(isolate, host->viewport_height));
 
+    // scrollX / scrollY (非スクロールの全画面アプリでは常に 0)。
+    // 未定義だと player の PlayerSetCurrentMousePointService 冒頭
+    // `let x = window.scrollX;` が undefined になり、以降 x が NaN 化して
+    // stage.pointer 全体が NaN → ヒットテストが全 miss → ボタンが一切反応しない。
+    SetValue(isolate, global, "scrollX", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "scrollY", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "pageXOffset", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "pageYOffset", v8::Integer::New(isolate, 0));
+
     // navigator (gpu/getGamepads は後段のバインディングが付与)
     v8::Local<v8::Object> navigator = v8::Object::New(isolate);
     SetValue(isolate, navigator, "userAgent",

@@ -7,7 +7,7 @@
 import { ctx } from "./context.js";
 import { initCli, echoHelp } from "./cli.js";
 import { loadConfig, buildWeb } from "./web.js";
-import { buildSteam } from "./steam.js";
+import { buildElectron } from "./electron.js";
 import { runNative, openNative, buildNative } from "./native.js";
 import { buildXbox } from "./xbox.js";
 
@@ -32,7 +32,7 @@ const multiBuild = async (): Promise<void> =>
         case "steam:windows":
         case "steam:macos":
         case "steam:linux":
-            await buildSteam();
+            await buildElectron();
             break;
 
         case "ios":

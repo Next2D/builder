@@ -122,9 +122,9 @@ const copyXboxResources = (): Promise<void> =>
  * @param  {string} [prefix] キーへ付与する接頭辞 (例 "" / "assets/")
  * @return {Array<[string, string]>}
  * @method
- * @private
+ * @public
  */
-const walkFiles = (rootDir: string, prefix: string = ""): [string, string][] =>
+export const walkFiles = (rootDir: string, prefix: string = ""): [string, string][] =>
 {
     const out: [string, string][] = [];
     if (!fs.existsSync(rootDir)) {
@@ -140,6 +140,58 @@ const walkFiles = (rootDir: string, prefix: string = ""): [string, string][] =>
         }
     }
     return out;
+};
+
+/**
+ * @description (key, データ) の並びを exe 埋め込み用 pak バイナリへ直列化する純関数。
+ *              host 側 EmbeddedAssets.cpp の ParseEmbeddedPak と対になる。
+ *              フォーマット (リトルエンディアン uint32):
+ *                magic "N2DA" / version(=1) / count / [keyLen,key,dataLen,data]...
+ *              Serialize (key, data) entries into the embedded pak binary.
+ *
+ * @param  {Array<[string, Buffer]>} entries
+ * @return {Buffer}
+ * @method
+ * @public
+ */
+export const buildPak = (entries: [string, Buffer][]): Buffer =>
+{
+    const chunks: Buffer[] = [];
+    const header: Buffer = Buffer.alloc(12);
+    header.write("N2DA", 0, "ascii");
+    header.writeUInt32LE(1, 4);                 // version
+    header.writeUInt32LE(entries.length, 8);    // count
+    chunks.push(header);
+
+    for (const [key, data] of entries) {
+        const keyBuf: Buffer = Buffer.from(key, "utf8");
+        const meta: Buffer = Buffer.alloc(4);
+        meta.writeUInt32LE(keyBuf.length, 0);
+        chunks.push(meta, keyBuf);
+        const meta2: Buffer = Buffer.alloc(4);
+        meta2.writeUInt32LE(data.length, 0);
+        chunks.push(meta2, data);
+    }
+
+    return Buffer.concat(chunks);
+};
+
+/**
+ * @description assets.pak を RCDATA "N2DASSETS" として取り込む .rc の内容を生成する純関数。
+ *              相対パスだと rc.exe の CWD (build ディレクトリ) 基準で探して見つからない
+ *              (RC2135) ため絶対パスを埋める。RC はフォワードスラッシュを受理する。
+ *              文字列は必ずダブルクォート (RC 仕様。シングルクォートは不可)。
+ *              Render the .rc content that embeds assets.pak as RCDATA.
+ *
+ * @param  {string} pakAbsPath  assets.pak の絶対パス
+ * @return {string}
+ * @method
+ * @public
+ */
+export const renderAssetsRc = (pakAbsPath: string): string =>
+{
+    const forward: string = pakAbsPath.replace(/\\/g, "/");
+    return `N2DASSETS RCDATA "${forward}"\n`;
 };
 
 /**
@@ -194,38 +246,19 @@ const embedXboxAssets = (): Promise<void> =>
                 return reject("No Xbox assets found to embed (assets/app is empty).");
             }
 
-            // pak バイナリを組み立てる。
-            const chunks: Buffer[] = [];
-            const header: Buffer = Buffer.alloc(12);
-            header.write("N2DA", 0, "ascii");
-            header.writeUInt32LE(1, 4);                 // version
-            header.writeUInt32LE(entries.length, 8);    // count
-            chunks.push(header);
+            // (key, データ) を読み込み、pak バイナリへ直列化する。
+            const pakEntries: [string, Buffer][] = entries.map(
+                ([key, abs]): [string, Buffer] => [key, fs.readFileSync(abs)]
+            );
+            const pak: Buffer = buildPak(pakEntries);
+            fs.writeFileSync(pakPath, pak);
 
-            for (const [key, abs] of entries) {
-                const keyBuf: Buffer = Buffer.from(key, "utf8");
-                const dataBuf: Buffer = fs.readFileSync(abs);
-                const meta: Buffer = Buffer.alloc(4);
-                meta.writeUInt32LE(keyBuf.length, 0);
-                chunks.push(meta, keyBuf);
-                const meta2: Buffer = Buffer.alloc(4);
-                meta2.writeUInt32LE(dataBuf.length, 0);
-                chunks.push(meta2, dataBuf);
-            }
+            // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む .rc を生成する。
+            fs.writeFileSync(rcPath, renderAssetsRc(path.resolve(pakPath)), "utf8");
 
-            fs.writeFileSync(pakPath, Buffer.concat(chunks));
-
-            // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む。
-            // 相対パスだと rc.exe の CWD (build ディレクトリ) 基準で探して見つからない
-            // (RC2135) ため、絶対パスを埋める。RC はフォワードスラッシュを受理する。
-            // 文字列は必ずダブルクォート (RC 仕様。シングルクォートは不可)。
-            const pakAbs: string = path.resolve(pakPath).replace(/\\/g, "/");
-            fs.writeFileSync(rcPath, `N2DASSETS RCDATA "${pakAbs}"\n`, "utf8");
-
-            const total: number = chunks.reduce((n, b): number => n + b.length, 0);
             console.log(pc.green(
                 `Embedded ${entries.length} Xbox asset file(s) into assets.pak `
-                + `(${(total / 1024 / 1024).toFixed(2)} MB).`
+                + `(${(pak.length / 1024 / 1024).toFixed(2)} MB).`
             ));
             resolve();
         } catch (error) {

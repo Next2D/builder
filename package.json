@@ -21,7 +21,9 @@
     "Multi-platform builder"
   ],
   "scripts": {
-    "lint": "eslint src/index.ts",
+    "lint": "eslint src",
+    "build": "tsc",
+    "test": "tsc && node --test \"tests/**/*.test.ts\"",
     "prepare": "tsc",
     "release": "tsc"
   },

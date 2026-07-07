@@ -31,6 +31,116 @@ export const echoHelp = (): void =>
 };
 
 /**
+ * @typedef {object} ParsedArgs
+ */
+export interface ParsedArgs {
+    platform: string;
+    environment: string;
+    preview: boolean;
+    open: boolean;
+    build: boolean;
+    v8Root: string;
+    hasHelp: boolean;
+}
+
+/**
+ * @description ビルド対象として受理するプラットフォーム名の集合。
+ * @type {Set<string>}
+ * @constant
+ */
+export const SUPPORTED_PLATFORMS: Set<string> = new Set([
+    "windows", "macos", "linux",
+    "steam:windows", "steam:macos", "steam:linux",
+    "ios", "android", "xbox", "web"
+]);
+
+/**
+ * @description process.argv 等のトークン列を解析する純関数 (副作用なし)。
+ *              Parse an argv token list into structured flags (pure, no side effects).
+ *
+ * @param  {string[]} argv
+ * @return {ParsedArgs}
+ * @method
+ * @public
+ */
+export const parseArgv = (argv: string[]): ParsedArgs =>
+{
+    const result: ParsedArgs = {
+        "platform": "",
+        "environment": "",
+        "preview": false,
+        "open": false,
+        "build": false,
+        "v8Root": "",
+        "hasHelp": false
+    };
+
+    for (let idx: number = 0; idx < argv.length; ++idx) {
+
+        switch (argv[idx]) {
+
+            case "--preview":
+                result.preview = true;
+                break;
+
+            case "--open":
+                result.open = true;
+                break;
+
+            case "--build":
+                result.build = true;
+                break;
+
+            case "--help":
+            case "--h":
+                result.hasHelp = true;
+                break;
+
+            case "--platform":
+                result.platform = (argv[++idx] || "").toLowerCase();
+                break;
+
+            case "--env":
+                result.environment = argv[++idx] || "";
+                break;
+
+            case "--v8-root":
+                // Xbox ビルドで使う prebuilt V8 monolith のパス (環境変数 V8_ROOT より優先)
+                result.v8Root = argv[++idx] || "";
+                break;
+
+            default:
+                break;
+
+        }
+
+        if (result.hasHelp) {
+            break;
+        }
+    }
+
+    if (!result.platform || !result.environment) {
+        result.hasHelp = true;
+    }
+
+    return result;
+};
+
+/**
+ * @description プラットフォーム名をパス表現へ変換する ("steam:windows" -> "steam/windows")。
+ *              Convert a platform name to its path form.
+ *
+ * @param  {string} platform
+ * @return {string}
+ * @method
+ * @public
+ */
+export const derivePlatformDir = (platform: string): string =>
+{
+    return platform.indexOf(":") ? platform.split(":").join("/") : platform;
+};
+
+/**
  * @description Node バージョン検証 → process.argv 解析 → ctx 初期化 →
  *              プラットフォーム妥当性検証 → platformDir 算出 → 環境変数設定。
  *              不正/ヘルプ要求時は echoHelp() で終了する。
@@ -51,81 +161,20 @@ Please update your version of Node.`);
         process.exit(1);
     }
 
-    let hasHelp: boolean = false;
+    const parsed: ParsedArgs = parseArgv(process.argv);
 
-    for (let idx: number = 0; idx < process.argv.length; ++idx) {
+    ctx.platform    = parsed.platform;
+    ctx.environment = parsed.environment;
+    ctx.preview     = parsed.preview;
+    ctx.open        = parsed.open;
+    ctx.build       = parsed.build;
+    ctx.v8Root      = parsed.v8Root;
 
-        switch (process.argv[idx]) {
-
-            case "--preview":
-                ctx.preview = true;
-                break;
-
-            case "--open":
-                ctx.open = true;
-                break;
-
-            case "--build":
-                ctx.build = true;
-                break;
-
-            case "--help":
-            case "--h":
-                hasHelp = true;
-                break;
-
-            case "--platform":
-                ctx.platform = process.argv[++idx].toLowerCase();
-                break;
-
-            case "--env":
-                ctx.environment = process.argv[++idx];
-                break;
-
-            case "--v8-root":
-                // Xbox ビルドで使う prebuilt V8 monolith のパス (環境変数 V8_ROOT より優先)
-                ctx.v8Root = process.argv[++idx] || "";
-                break;
-
-            default:
-                break;
-
-        }
-
-        if (hasHelp) {
-            break;
-        }
-    }
-
-    if (!ctx.platform || !ctx.environment) {
-        hasHelp = true;
-    }
-
-    if (hasHelp) {
+    if (parsed.hasHelp || !SUPPORTED_PLATFORMS.has(ctx.platform)) {
         echoHelp();
     }
 
-    switch (ctx.platform) {
-
-        case "windows":
-        case "macos":
-        case "linux":
-        case "steam:windows":
-        case "steam:macos":
-        case "steam:linux":
-        case "ios":
-        case "android":
-        case "xbox":
-        case "web":
-            break;
-
-        default:
-            echoHelp();
-            break;
-
-    }
-
-    ctx.platformDir = ctx.platform.indexOf(":") ? ctx.platform.split(":").join("/") : ctx.platform;
+    ctx.platformDir = derivePlatformDir(ctx.platform);
 
     // update env variables
     process.env.NEXT2D_EBUILD_ENVIRONMENT = ctx.environment;

@@ -1,4 +1,4 @@
-// Steam / デスクトップ (Electron) ビルド。
+// Electron ベースのデスクトップ配布 (Steam / Epic Games Store など)。
 import pc from "picocolors";
 import fs from "fs";
 import cp from "child_process";
@@ -101,14 +101,15 @@ const copyResources = (): Promise<void> =>
 };
 
 /**
- * @description Windows用アプリの書き出し関数
- *              Export function for Windows apps
+ * @description Electron ベースのデスクトップアプリ書き出し関数
+ *              (Windows / macOS / Linux、Steam・Epic Games Store 等の配布に共通)。
+ *              Export function for Electron-based desktop apps.
  *
  * @return {Promise}
  * @method
  * @public
  */
-export const buildSteam = async (): Promise<void> =>
+export const buildElectron = async (): Promise<void> =>
 {
     // reset
     await removeResources();

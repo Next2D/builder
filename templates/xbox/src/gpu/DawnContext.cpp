@@ -1,22 +1,44 @@
 #include "DawnContext.h"
 
 #include <Windows.h>
+#include <fstream>
 #include <iostream>
+#include <string>
 
 namespace next2d {
 
 namespace {
 
+// GUI 実行では stderr が見えないため、GPU の致命的エラー/検証エラーを
+// next2d-error.log にも残す。描画が黒くなる/表示されない等の原因(検証エラー・
+// device lost・リソース枯渇)を掴む唯一の手段。氾濫防止に総数を制限する。
+void AppendGpuLog(const std::string& line)
+{
+    static int count = 0;
+    if (count >= 60) {
+        return;
+    }
+    ++count;
+    std::ofstream ofs("next2d-error.log", std::ios::app);
+    if (ofs) {
+        ofs << line << std::endl;
+    }
+}
+
 void HandleDeviceLost(const wgpu::Device&, wgpu::DeviceLostReason reason, wgpu::StringView message)
 {
-    std::cerr << "[Dawn] Device lost (" << static_cast<int>(reason) << "): "
-              << std::string(message.data, message.length) << std::endl;
+    const std::string line = "[Dawn] Device lost (" + std::to_string(static_cast<int>(reason))
+        + "): " + std::string(message.data, message.length);
+    std::cerr << line << std::endl;
+    AppendGpuLog(line);
 }
 
 void HandleUncapturedError(const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message)
 {
-    std::cerr << "[Dawn] Uncaptured error (" << static_cast<int>(type) << "): "
-              << std::string(message.data, message.length) << std::endl;
+    const std::string line = "[Dawn] Uncaptured error (" + std::to_string(static_cast<int>(type))
+        + "): " + std::string(message.data, message.length);
+    std::cerr << line << std::endl;
+    AppendGpuLog(line);
 }
 
 } // namespace

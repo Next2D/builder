@@ -6,6 +6,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import cp from "child_process";
+import { minifySync } from "vite";
 import { ctx } from "./context.js";
 import { getTemplateDir } from "./utils.js";
 import {
@@ -195,6 +196,35 @@ export const renderAssetsRc = (pakAbsPath: string): string =>
 };
 
 /**
+ * @description ホストスクリプト(js/bootstrap.js 等)を minify + 難読化する純関数。
+ *              Oxc(vite 同梱)でコメント除去・空白圧縮・ローカル識別子マングルを行う。
+ *              `globalThis.*` 等のグローバル名はゲームが参照するため保持される。
+ *              失敗時は元コードをそのまま返す(埋め込み自体は継続)。
+ *              Minify/obfuscate a host script; returns the original on failure.
+ *
+ * @param  {string} name  ファイル名 (拡張子で構文判定)
+ * @param  {string} code  元の JavaScript
+ * @return {string}
+ * @method
+ * @public
+ */
+export const minifyJs = (name: string, code: string): string =>
+{
+    try {
+        const result = minifySync(name, code);
+        if (result.errors && result.errors.length > 0) {
+            const msg = (result.errors[0] as any)?.message ?? String(result.errors[0]);
+            console.log(pc.yellow(`Xbox: minify skipped for ${name} (${msg}); embedding as-is.`));
+            return code;
+        }
+        return result.code;
+    } catch (error) {
+        console.log(pc.yellow(`Xbox: minify failed for ${name}; embedding as-is. ${error}`));
+        return code;
+    }
+};
+
+/**
  * @description Xbox ホストの assets/app とホストスクリプト(js/bootstrap.js 等)を
  *              単一の pak バイナリへまとめ、`assets.pak` と RCDATA 参照用の
  *              `assets.rc` を xbox/ 直下へ生成する。CMake が assets.rc を検出すると
@@ -247,10 +277,26 @@ const embedXboxAssets = (): Promise<void> =>
             }
 
             // (key, データ) を読み込み、pak バイナリへ直列化する。
+            // js/ のホストスクリプト(bootstrap.js/selftest.js)は minify + 難読化する。
+            // assets/app の JS は vite が本番ビルドで minify 済みのためそのまま。
+            let minified = 0;
             const pakEntries: [string, Buffer][] = entries.map(
-                ([key, abs]): [string, Buffer] => [key, fs.readFileSync(abs)]
+                ([key, abs]): [string, Buffer] => {
+                    if (key.startsWith("js/") && key.endsWith(".js")) {
+                        const src = fs.readFileSync(abs, { "encoding": "utf8" });
+                        const out = minifyJs(key, src);
+                        if (out.length < src.length) {
+                            ++minified;
+                        }
+                        return [key, Buffer.from(out, "utf8")];
+                    }
+                    return [key, fs.readFileSync(abs)];
+                }
             );
             const pak: Buffer = buildPak(pakEntries);
+            if (minified > 0) {
+                console.log(pc.green(`Minified ${minified} host script(s) before embedding.`));
+            }
             fs.writeFileSync(pakPath, pak);
 
             // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む .rc を生成する。

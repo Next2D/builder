@@ -7,6 +7,7 @@
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
+#include <cstdio>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -285,9 +286,26 @@ void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
     }
 
     auto pcm = std::make_shared<PcmBuffer>();
-    if (input.empty() || !AudioEngine::Decode(input, *pcm)) {
-        resolver->Reject(ctx, v8::Exception::Error(Str(isolate, "audio decode failed"))).Check();
-        return;
+    const bool decoded = !input.empty() && AudioEngine::Decode(input, *pcm);
+
+    // «診断» どのサウンドがデコードできたか/失敗したかを次のログで特定する。
+    {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "[audio] decode bytes=%zu -> %s",
+                      input.size(), decoded ? "ok" : "FAIL");
+        v8util::AppendErrorLog(buf);
+    }
+
+    // 重要: デコード失敗でも Reject しない。@next2d/media の SoundDecodeService は
+    // decodeAudioData の reject を catch して先頭バイトをスキップし再帰リトライするが、
+    // そのループ条件 (`idx > byteLength`) が常に false のため同一バッファで無限再帰し、
+    // マイクロタスクが枯渇してフレームワークのローディング画面ごとフリーズする。
+    // ここで無音の空バッファを resolve すれば、そのサウンドは無音になるだけでアプリは
+    // 進行できる (graceful degradation)。実データが壊れているか MF 非対応かは上のログで判別。
+    if (!decoded) {
+        pcm->samples.clear();      // 0 サンプル = 無音
+        pcm->channels = pcm->channels ? pcm->channels : 2;
+        pcm->sample_rate = pcm->sample_rate ? pcm->sample_rate : 48000;
     }
 
     v8::Local<v8::Object> buffer = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();

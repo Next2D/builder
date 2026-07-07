@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include <windowsx.h>
 #include <timeapi.h>
+#include <DbgHelp.h>
 #include <XGameRuntime.h>
 
 #pragma comment(lib, "winmm.lib")
@@ -27,6 +28,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <cstring>
 
 namespace fs = std::filesystem;
 using namespace next2d;
@@ -238,8 +240,96 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
 
 } // namespace
 
+// 未処理例外(segfault/AV 等)発生時にコールスタックを next2d-error.log へ書き出す。
+// GUI 実行では stderr が見えないため、C++ クラッシュ地点を掴む唯一の手段。
+// DbgHelp の StackWalk64 で例外コンテキストからフレームを辿り、可能なら
+// シンボル名 (関数+行) とモジュールを添える (PDB があれば関数/行まで解決)。
+static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep)
+{
+    std::ofstream ofs("next2d-error.log", std::ios::app);
+    if (!ofs || !ep || !ep->ExceptionRecord || !ep->ContextRecord) {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    ofs << "\n[CRASH] code=0x" << std::hex
+        << ep->ExceptionRecord->ExceptionCode
+        << " addr=" << ep->ExceptionRecord->ExceptionAddress
+        << std::dec << std::endl;
+
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread  = GetCurrentThread();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, nullptr, TRUE);
+
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 frame = {};
+    DWORD machine = 0;
+#if defined(_M_X64)
+    machine = IMAGE_FILE_MACHINE_AMD64;
+    frame.AddrPC.Offset    = ctx.Rip;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrStack.Offset = ctx.Rsp;
+#elif defined(_M_ARM64)
+    machine = IMAGE_FILE_MACHINE_ARM64;
+    frame.AddrPC.Offset    = ctx.Pc;
+    frame.AddrFrame.Offset = ctx.Fp;
+    frame.AddrStack.Offset = ctx.Sp;
+#endif
+    frame.AddrPC.Mode    = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
+
+    char symbuf[sizeof(SYMBOL_INFO) + 256] = {};
+    SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen   = 255;
+
+    for (int i = 0; i < 48; ++i) {
+        if (!StackWalk64(machine, process, thread, &frame, &ctx,
+                         nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) {
+            break;
+        }
+        const DWORD64 pc = frame.AddrPC.Offset;
+        if (!pc) {
+            break;
+        }
+
+        ofs << "  #" << i << " 0x" << std::hex << pc << std::dec;
+
+        DWORD64 disp = 0;
+        if (SymFromAddr(process, pc, &disp, sym)) {
+            ofs << " " << sym->Name << "+0x" << std::hex << disp << std::dec;
+        }
+
+        const DWORD64 modbase = SymGetModuleBase64(process, pc);
+        if (modbase) {
+            char modname[MAX_PATH] = {};
+            if (GetModuleFileNameA(reinterpret_cast<HMODULE>(modbase), modname, MAX_PATH)) {
+                const char* base = std::strrchr(modname, '\\');
+                ofs << " [" << (base ? base + 1 : modname) << "]";
+            }
+        }
+
+        IMAGEHLP_LINE64 line = {};
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD line_disp = 0;
+        if (SymGetLineFromAddr64(process, pc, &line_disp, &line) && line.FileName) {
+            const char* fbase = std::strrchr(line.FileName, '\\');
+            ofs << " (" << (fbase ? fbase + 1 : line.FileName) << ":" << line.LineNumber << ")";
+        }
+        ofs << std::endl;
+    }
+
+    ofs.flush();
+    SymCleanup(process);
+    return EXCEPTION_EXECUTE_HANDLER;   // プロセスを終了させる (無限再入回避)
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 {
+    // 最初にクラッシュハンドラを設置し、以降の segfault 等でスタックを記録する。
+    SetUnhandledExceptionFilter(CrashHandler);
+
     // Sleep() の分解能を 1ms に上げる (フレームペーシング用。既定 15.6ms では
     // 60Hz を刻めない)
     timeBeginPeriod(1);

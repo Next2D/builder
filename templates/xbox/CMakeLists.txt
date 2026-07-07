@@ -153,6 +153,7 @@ target_link_libraries(Next2DXboxHost PRIVATE
     dxgi
     dxguid
     windowscodecs   # WIC: 画像デコード
+    dbghelp         # クラッシュハンドラのスタックトレース (StackWalk64/SymFromAddr)
 )
 
 if(NEXT2D_IS_CONSOLE)

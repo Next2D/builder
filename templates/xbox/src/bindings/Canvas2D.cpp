@@ -229,23 +229,30 @@ void IsPointInPath(const v8::FunctionCallbackInfo<v8::Value>& a)
     const bool hit = raster::PointInPath(c->path, px, py);
 
     // 診断: ヒットテストのクエリ点・パス外接矩形・結果を記録する。
-    // 「pointermove は発火するがボタンが反応しない」の原因切り分け用。
+    // 「pointermove は反応するがボタン(pointerdown/up)が効かない」の切り分け用。
     //   - 点が全パス外接矩形の外 → stage.pointer の座標系ズレ (scale/offset)
+    //   - q=nan → stage.pointer が NaN (起動直後 rendererScale=0 等)
     //   - 点が矩形内なのに false → winding 判定バグ
     //   - パスが空 → パス構築経路の問題
-    // 最初の 24 回 + 初ヒットを 1 度だけ残す (AppendErrorLog は 200 行で頭打ち)。
+    // pointerdown/up は move とは別枠(各 40 行)で確実に残す。起動直後の move 洪水で
+    // 枠を使い切って down/up が観測できない事態を防ぐ。
     {
-        static int hit_log = 0;
-        static bool first_hit_logged = false;
-        if (hit_log < 24 || (hit && !first_hit_logged)) {
-            if (hit_log < 24) ++hit_log;
-            if (hit && !first_hit_logged) first_hit_logged = true;
+        HostContext* host = HostContext::From(a.GetIsolate());
+        const int kind = host ? host->input_kind : 0;
+        const bool is_press = (kind == 2 || kind == 3);
+        static int press_log = 0, move_log = 0;
+        int* cnt = is_press ? &press_log : &move_log;
+        const int cap = is_press ? 40 : 24;
+        if (*cnt < cap) {
+            ++(*cnt);
+            const char* label = (kind == 2) ? "down" : (kind == 3) ? "up"
+                              : (kind == 1) ? "move" : "other";
             double bx0, by0, bx1, by1;
             const bool has = raster::PathBounds(c->path, &bx0, &by0, &bx1, &by1);
-            char buf[192];
+            char buf[208];
             std::snprintf(buf, sizeof(buf),
-                "[Hit] q=(%.1f,%.1f) subpaths=%zu bbox=%s(%.1f,%.1f..%.1f,%.1f) -> %s",
-                px, py, c->path.size(), has ? "" : "EMPTY",
+                "[Hit:%s] q=(%.1f,%.1f) subpaths=%zu bbox=%s(%.1f,%.1f..%.1f,%.1f) -> %s",
+                label, px, py, c->path.size(), has ? "" : "EMPTY",
                 has?bx0:0, has?by0:0, has?bx1:0, has?by1:0, hit ? "HIT" : "miss");
             v8util::AppendErrorLog(buf);
         }

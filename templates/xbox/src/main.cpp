@@ -45,6 +45,13 @@ void FireEvent(const char* type, const std::function<void(v8::Isolate*, v8::Loca
     if (!g_runtime || !g_host) {
         return;
     }
+    // 現在の入力種別を記録する (Canvas2D の isPointInPath 診断が種別ごとに参照)。
+    {
+        const std::string t = type;
+        g_host->input_kind = (t == "pointermove") ? 1
+                           : (t == "pointerdown") ? 2
+                           : (t == "pointerup")   ? 3 : 0;
+    }
     // 診断: 入力イベントが JS 配送層まで到達しているかを一度だけ next2d-error.log に残す
     // (先頭12件)。GUI 実行では stderr が見えないため。main_canvas 未設定なら pointer が
     // どこにも届かない。ここに [Input] 行が出れば Win32 配送とループは正常。

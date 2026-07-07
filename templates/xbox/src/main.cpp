@@ -22,12 +22,18 @@
 #include "bindings/EventTarget.h"
 #include "v8/V8Runtime.h"
 
+#include "v8/V8Util.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <cstring>
 
 namespace fs = std::filesystem;
@@ -39,6 +45,37 @@ bool g_running = true;
 DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
 V8Runtime* g_runtime = nullptr;
+
+// «診断» ウォッチドッグ: メインスレッドが JS 内で長時間フリーズ (ローディングで
+// 止まる #2 の無限ループ) したら、その時点の JS スタックを next2d-error.log に残す。
+// メインループ毎に g_loop_iter を進め、別スレッドが停滞を検出して RequestInterrupt する。
+std::atomic<uint64_t> g_loop_iter{0};
+std::atomic<bool> g_stuck_reported{false};
+
+// RequestInterrupt により「メインスレッド上で」実行される。無限ループの JS 位置を記録。
+void OnMainThreadStuck(v8::Isolate* isolate, void* /*data*/)
+{
+    v8::HandleScope hs(isolate);
+    v8::Local<v8::StackTrace> stack =
+        v8::StackTrace::CurrentStackTrace(isolate, 24, v8::StackTrace::kDetailed);
+    std::string out = "[watchdog] main thread stalled >3s. JS stack (top first):";
+    const int n = stack.IsEmpty() ? 0 : stack->GetFrameCount();
+    if (n == 0) {
+        out += "\n  (no JS frames — likely stuck in native/C++ loop)";
+    }
+    for (int i = 0; i < n; ++i) {
+        v8::Local<v8::StackFrame> f = stack->GetFrame(isolate, i);
+        v8::String::Utf8Value fn(isolate, f->GetFunctionName());
+        v8::String::Utf8Value sc(isolate, f->GetScriptNameOrSourceURL());
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "\n  #%d %s (%s:%d:%d)", i,
+            (*fn && **fn) ? *fn : "<anonymous>",
+            (*sc && **sc) ? *sc : "<unknown>",
+            f->GetLineNumber(), f->GetColumn());
+        out += buf;
+    }
+    v8util::AppendErrorLog(out);
+}
 
 // window(global) / document / 主要 canvas へイベントを配送する。
 // window へのキーボード、canvas へのポインタ/ホイールは player の登録先に合わせている。
@@ -481,9 +518,30 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     int exit_code = 0;
     // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
     // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
+    // «診断» ウォッチドッグ起動: 3 秒間メインループが進まなければ JS スタックを記録。
+    std::thread watchdog([&runtime]() {
+        uint64_t last = 0;
+        int stall = 0;
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            const uint64_t cur = g_loop_iter.load(std::memory_order_relaxed);
+            if (cur == last) {
+                if (++stall >= 3 && !g_stuck_reported.exchange(true)) {
+                    runtime.isolate()->RequestInterrupt(OnMainThreadStuck, nullptr);
+                }
+            } else {
+                last = cur;
+                stall = 0;
+                g_stuck_reported.store(false);
+            }
+        }
+    });
+    watchdog.detach();
+
     {
     v8::Isolate::Scope isolate_scope(runtime.isolate());
     while (g_running) {
+        g_loop_iter.fetch_add(1, std::memory_order_relaxed);
         // Win32 メッセージ
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {

@@ -224,6 +224,21 @@ void Stroke(const v8::FunctionCallbackInfo<v8::Value>& a)
 // デバイス座標で判定するため、パスへは変換適用済み。
 void IsPointInPath(const v8::FunctionCallbackInfo<v8::Value>& a)
 {
+    // «診断» 暴走ループ検出。player のメッシュ生成 (fill/stroke) は isPointInPath を
+    // 多数呼ぶが、正常なら 1 フレームで収束する。ローディングで固まる #2 が
+    // 「メッシュ生成の無限ループ」なら、この総数ログがフリーズ直前に高速連発する
+    // (ハートビートが止まった後も総数だけ伸び続ける)。[Hit] 診断はキャップ後に
+    // 出ないため、キャップ後の暴走を捉えるにはこの総数ログが必要。
+    {
+        static uint64_t s_total = 0;
+        if (++s_total % 50000 == 0) {
+            char b[72];
+            std::snprintf(b, sizeof(b), "[hittest] isPointInPath total=%llu",
+                          static_cast<unsigned long long>(s_total));
+            v8util::AppendErrorLog(b);
+        }
+    }
+
     Canvas2D* c = Self(a.This());
     const double px = Arg(a,0), py = Arg(a,1);
     const bool hit = raster::PointInPath(c->path, px, py);

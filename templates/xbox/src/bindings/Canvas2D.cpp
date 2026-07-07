@@ -761,7 +761,11 @@ void InstallAccessors(v8::Isolate* isolate, v8::Local<v8::Object> obj)
             Self(info.This())->state.MEMBER = v->BooleanValue(info.GetIsolate()); }).Check()
 
     // fillStyle / strokeStyle: gradient/pattern オブジェクトも受け取り代表色へ解決。
-    // getter は代入した文字列(色)をそのまま返す (player は色正規化に読み戻しを使う)。
+    // 重要: getter は「代入した色を #rrggbb に正規化して」返す (ブラウザ準拠)。
+    // player は色文字列の数値化に読み戻しを使う (@next2d/filters の
+    // $convertColorStringToNumber は `+("0x"+ctx.fillStyle.slice(1))` で解釈するため、
+    // getter が "rgb(191,255,255)" 等の生文字列を返すと NaN になり、その色を使う
+    // グラデーション (スライム body 等) が黒くなる)。パース済み RGBA を hex 化して保持する。
     obj->SetNativeDataProperty(ctx, Str(isolate, "fillStyle"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
             info.GetReturnValue().Set(v8util::Str(info.GetIsolate(), Self(info.This())->state.fill_style_str));
@@ -769,7 +773,14 @@ void InstallAccessors(v8::Isolate* isolate, v8::Local<v8::Object> obj)
         [](v8::Local<v8::Name>, v8::Local<v8::Value> value, const v8::PropertyCallbackInfo<void>& info) {
             Canvas2D* c = Self(info.This());
             c->state.fill = ColorFromValue(info.GetIsolate(), value);
-            if (value->IsString()) c->state.fill_style_str = ToStdString(info.GetIsolate(), value);
+            if (value->IsString()) {
+                char hex[8];
+                std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
+                    static_cast<unsigned>(c->state.fill.r),
+                    static_cast<unsigned>(c->state.fill.g),
+                    static_cast<unsigned>(c->state.fill.b));
+                c->state.fill_style_str = hex;
+            }
         }).Check();
     obj->SetNativeDataProperty(ctx, Str(isolate, "strokeStyle"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
@@ -778,7 +789,14 @@ void InstallAccessors(v8::Isolate* isolate, v8::Local<v8::Object> obj)
         [](v8::Local<v8::Name>, v8::Local<v8::Value> value, const v8::PropertyCallbackInfo<void>& info) {
             Canvas2D* c = Self(info.This());
             c->state.stroke = ColorFromValue(info.GetIsolate(), value);
-            if (value->IsString()) c->state.stroke_style_str = ToStdString(info.GetIsolate(), value);
+            if (value->IsString()) {
+                char hex[8];
+                std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
+                    static_cast<unsigned>(c->state.stroke.r),
+                    static_cast<unsigned>(c->state.stroke.g),
+                    static_cast<unsigned>(c->state.stroke.b));
+                c->state.stroke_style_str = hex;
+            }
         }).Check();
 
     N2D_STR_PROP("font", font);

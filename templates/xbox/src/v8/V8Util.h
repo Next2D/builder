@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace next2d::v8util {
 
@@ -16,6 +17,32 @@ inline v8::Local<v8::String> Str(v8::Isolate* isolate, std::string_view s)
         isolate, s.data(), v8::NewStringType::kNormal,
         static_cast<int>(s.size())
     ).ToLocalChecked();
+}
+
+// プロパティ名 v8::String のキャッシュ。
+// バインディングのディスクリプタ解析 (webgpu::Prop/HasProp/U32 等) は毎フレーム
+// 数千回呼ばれ、その度に NewFromUtf8 が JS ヒープ確保 + ハッシュ計算をしていた。
+// internalized string (isolate 内で重複排除され、プロパティ検索がポインタ比較で済む)
+// を v8::Eternal で保持し、2 回目以降はハッシュマップ参照のみにする。
+// jitless では JS↔C++ 境界のコストが相対的に重いため、ここの削減が全体に効く。
+// キーは内容比較 (std::string) なので呼び出し元がリテラル以外を渡しても安全。
+// ホストは単一 Isolate 運用 (worker も同一 Isolate の別 Context) だが、
+// 念のため isolate が変わったらキャッシュを破棄する (Eternal は isolate 寿命に紐づく)。
+inline v8::Local<v8::String> PropName(v8::Isolate* isolate, const char* key)
+{
+    static v8::Isolate* cached_isolate = nullptr;
+    static std::unordered_map<std::string, v8::Eternal<v8::String>> cache;
+    if (cached_isolate != isolate) {
+        cache.clear();
+        cached_isolate = isolate;
+    }
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        v8::Local<v8::String> s = v8::String::NewFromUtf8(
+            isolate, key, v8::NewStringType::kInternalized).ToLocalChecked();
+        it = cache.emplace(key, v8::Eternal<v8::String>(isolate, s)).first;
+    }
+    return it->second.Get(isolate);
 }
 
 // v8::Value -> std::string (UTF-8)

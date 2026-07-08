@@ -47,7 +47,11 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     // - JS: --jitless (Ignition インタプリタのみ・RWX ページ無し)
     // - WebAssembly: --wasm-jitless (DrumBrake = V8 の wasm インタープリタ。
     //   prebuilt V8 r2 は v8_enable_drumbrake=true でビルドされている)
-    v8::V8::SetFlagsFromString("--jitless --wasm-jitless");
+    // - --no-flush-bytecode: V8 は既定でしばらく実行されない関数のバイトコードを
+    //   破棄し、次回実行時に再パースする (メモリ最適化)。ゲームでは画面遷移で
+    //   久々に呼ばれる関数の再パースがフレームヒッチになるため無効化する
+    //   (ゲームバンドル数 MB 程度ならバイトコード常駐のメモリ増は許容範囲)。
+    v8::V8::SetFlagsFromString("--jitless --wasm-jitless --no-flush-bytecode");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);
     v8::V8::InitializeExternalStartupData(exec_path);
@@ -79,6 +83,14 @@ bool V8Runtime::Initialize(HostContext* host)
 
     create_params_.array_buffer_allocator =
         v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+
+    // 60fps のゲームはフレーム毎に短命オブジェクト (ディスクリプタ/一時配列) を
+    // 大量生成する。young generation を既定 (十数 MB) から 64MB へ拡大して
+    // scavenge (minor GC) の頻度を下げ、マイクロヒッチを減らす。
+    // scavenge の停止時間は生存オブジェクト量に比例し空間サイズには比例しないため、
+    // 拡大はほぼ純粋に頻度低減として効く。
+    create_params_.constraints.set_max_young_generation_size_in_bytes(
+        64 * 1024 * 1024);
 
     isolate_ = v8::Isolate::New(create_params_);
     isolate_->SetData(kHostContextSlot, host);

@@ -117,6 +117,20 @@ bool DawnContext::AcquireDevice()
     device_desc.SetDeviceLostCallback(wgpu::CallbackMode::AllowProcessEvents, HandleDeviceLost);
     device_desc.SetUncapturedErrorCallback(HandleUncapturedError);
 
+#ifdef NDEBUG
+    // Release では Dawn の API 検証 (skip_validation) と robustness (OOB クランプ) を
+    // 無効化する。両方とも全描画コマンドのエンコードで毎フレーム CPU を消費する
+    // 安全網で、検証済みタイトルの出荷ビルドでは Chrome も同様に外す定番最適化。
+    // Debug ビルドでは有効のままにして検証エラーを検出できるようにする
+    // (エラーは HandleUncapturedError -> next2d-error.log へ出る)。
+    // toggle 名は Dawn 本体 src/dawn/native/Toggles.cpp 定義 (いずれも ToggleStage::Device)。
+    static const char* kReleaseToggles[] = {"skip_validation", "disable_robustness"};
+    wgpu::DawnTogglesDescriptor device_toggles = {};
+    device_toggles.enabledToggles     = kReleaseToggles;
+    device_toggles.enabledToggleCount = 2;
+    device_desc.nextInChain = &device_toggles;
+#endif
+
     wgpu::Future device_future = adapter_.RequestDevice(
         &device_desc,
         wgpu::CallbackMode::AllowProcessEvents,

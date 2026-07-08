@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 
 namespace next2d {
@@ -352,10 +353,34 @@ void AddEventListener(const v8::FunctionCallbackInfo<v8::Value>& args)
 // ===========================================================================
 // WorkerInstance
 // ===========================================================================
-WorkerInstance::WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url)
-    : runtime_(runtime), isolate_(isolate), url_(std::move(url))
+WorkerInstance::WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url,
+                               bool is_module)
+    : runtime_(runtime), isolate_(isolate), url_(std::move(url)), module_(is_module)
 {
 }
+
+namespace {
+
+// import 指定子を referrer の URL からの相対で解決する。
+// data:/blob: の referrer(インライン worker)は基準ディレクトリを持たないため
+// 指定子をそのまま返す(assets 参照は失敗するが、インライン ESM は import を持たない)。
+std::string ResolveModulePath(const std::string& referrer_url, const std::string& specifier)
+{
+    // 絶対 URL / bare specifier はそのまま
+    if (specifier.rfind("/", 0) == 0 ||
+        specifier.rfind("http:", 0) == 0 || specifier.rfind("https:", 0) == 0 ||
+        specifier.rfind("data:", 0) == 0 || specifier.rfind("blob:", 0) == 0) {
+        return specifier;
+    }
+    if (referrer_url.rfind("data:", 0) == 0 || referrer_url.rfind("blob:", 0) == 0) {
+        return specifier;
+    }
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(referrer_url).parent_path();
+    return (dir / specifier).lexically_normal().generic_string();
+}
+
+} // namespace
 
 WorkerInstance::~WorkerInstance() = default;
 
@@ -424,6 +449,8 @@ bool WorkerInstance::Start()
     // worker 専用 EventLoop を Context の embedder slot に登録
     loop_ = std::make_unique<EventLoop>(isolate_);
     context->SetAlignedPointerInEmbedderData(kEventLoopEmbedderSlot, loop_.get());
+    // ESM の ResolveModule コールバックが context から自身を引けるように登録
+    context->SetAlignedPointerInEmbedderData(kWorkerInstanceEmbedderSlot, this);
 
     v8::Context::Scope context_scope(context);
     v8::Local<v8::Object> global = context->Global();
@@ -447,7 +474,7 @@ bool WorkerInstance::Start()
     // 入れ子 Worker を許可 (ZlibInflate 等)。
     runtime_->InstallOnGlobal(global);
 
-    // ワーカースクリプトを読み込んで評価 (クラシック。ESM worker は «EXTEND»)。
+    // ワーカースクリプトを読み込む (クラシック / ESM は module_ で分岐)。
     // Vite の `?worker&inline` は data:application/javascript;base64,... を渡す
     // (バージョンによっては blob: URL)。data: / blob: / assets の順で解決する。
     HostContext* host = HostContext::From(isolate_);
@@ -480,6 +507,11 @@ bool WorkerInstance::Start()
             return false;
         }
         source = std::move(*src);
+    }
+
+    // ESM worker (new Worker(url, { type: "module" }))。モジュールとして評価する。
+    if (module_) {
+        return EvaluateModule(context, source);
     }
 
     // «自己修復» CommandController.execute() は try/catch を持たないため、描画中の例外が
@@ -521,6 +553,115 @@ bool WorkerInstance::Start()
     // NOTE: ここで PerformMicrotaskCheckpoint は呼ばない。Start は JS コールバック
     // (new Worker) の最中に呼ばれるため、JS 実行中のチェックポイントは V8 の規約違反。
     // マイクロタスクはメインループの PumpMicrotasks で処理される。
+    return true;
+}
+
+// --- ESM worker ------------------------------------------------------------
+// 依存モジュールを assets から読み、コンパイルして再帰ロードする。
+v8::MaybeLocal<v8::Module> WorkerInstance::LoadModule(const std::string& url)
+{
+    auto cached = modules_.find(url);
+    if (cached != modules_.end()) {
+        return cached->second.Get(isolate_);
+    }
+    HostContext* host = HostContext::From(isolate_);
+    auto src = host->assets->ReadText(url);
+    if (!src) {
+        std::cerr << "[Worker] module not found: " << ShortUrl(url) << std::endl;
+        return v8::MaybeLocal<v8::Module>();
+    }
+
+    v8::ScriptOrigin origin(Str(isolate_, url), 0, 0, false, -1,
+        v8::Local<v8::Value>(), false, false, /*is_module*/ true);
+    v8::ScriptCompiler::Source source(Str(isolate_, *src), origin);
+    v8::Local<v8::Module> module;
+    if (!v8::ScriptCompiler::CompileModule(isolate_, &source).ToLocal(&module)) {
+        std::cerr << "[Worker] module compile failed: " << ShortUrl(url) << std::endl;
+        return v8::MaybeLocal<v8::Module>();
+    }
+    modules_[url].Reset(isolate_, module);
+    module_paths_[module->GetIdentityHash()] = url;
+
+    v8::Local<v8::Context> ctx = context();
+    v8::Local<v8::FixedArray> requests = module->GetModuleRequests();
+    for (int i = 0; i < requests->Length(); ++i) {
+        v8::Local<v8::ModuleRequest> request =
+            requests->Get(ctx, i).As<v8::ModuleRequest>();
+        const std::string specifier = ToStdString(isolate_, request->GetSpecifier());
+        if (LoadModule(ResolveModulePath(url, specifier)).IsEmpty()) {
+            return v8::MaybeLocal<v8::Module>();
+        }
+    }
+    return module;
+}
+
+v8::MaybeLocal<v8::Module> WorkerInstance::ResolveModule(
+    v8::Local<v8::Context> context,
+    v8::Local<v8::String> specifier,
+    v8::Local<v8::FixedArray> /*import_attributes*/,
+    v8::Local<v8::Module> referrer)
+{
+    v8::Isolate* isolate = context->GetIsolate();
+    auto* self = static_cast<WorkerInstance*>(
+        context->GetAlignedPointerFromEmbedderData(kWorkerInstanceEmbedderSlot));
+    if (!self) {
+        return v8::MaybeLocal<v8::Module>();
+    }
+    auto it = self->module_paths_.find(referrer->GetIdentityHash());
+    const std::string referrer_url =
+        (it != self->module_paths_.end()) ? it->second : self->url_;
+    const std::string spec = ToStdString(isolate, specifier);
+    return self->LoadModule(ResolveModulePath(referrer_url, spec));
+}
+
+bool WorkerInstance::EvaluateModule(v8::Local<v8::Context> context, const std::string& source)
+{
+    v8::TryCatch tc(isolate_);
+
+    // 入口モジュールはインライン(data:/blob:)の可能性があるため、渡された source を
+    // 直接コンパイルする(assets 経由の LoadModule は依存モジュール用)。
+    v8::ScriptOrigin origin(Str(isolate_, url_), 0, 0, false, -1,
+        v8::Local<v8::Value>(), false, false, /*is_module*/ true);
+    v8::ScriptCompiler::Source src(Str(isolate_, source), origin);
+    v8::Local<v8::Module> module;
+    if (!v8::ScriptCompiler::CompileModule(isolate_, &src).ToLocal(&module)) {
+        std::cerr << "[Worker] module compile failed: " << ShortUrl(url_) << std::endl;
+        return false;
+    }
+    modules_[url_].Reset(isolate_, module);
+    module_paths_[module->GetIdentityHash()] = url_;
+
+    // 静的 import を再帰ロード(インライン worker は import 無しでスキップ)。
+    v8::Local<v8::FixedArray> requests = module->GetModuleRequests();
+    for (int i = 0; i < requests->Length(); ++i) {
+        v8::Local<v8::ModuleRequest> request =
+            requests->Get(context, i).As<v8::ModuleRequest>();
+        const std::string specifier = ToStdString(isolate_, request->GetSpecifier());
+        if (LoadModule(ResolveModulePath(url_, specifier)).IsEmpty()) {
+            return false;
+        }
+    }
+
+    if (module->InstantiateModule(context, ResolveModule).IsNothing()) {
+        std::cerr << "[Worker] module instantiate failed: " << ShortUrl(url_) << std::endl;
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value ex(isolate_, tc.Exception());
+            std::cerr << "[Worker]   exception: " << (*ex ? *ex : "?") << std::endl;
+        }
+        return false;
+    }
+
+    // NOTE: Start と同じく PerformMicrotaskCheckpoint は呼ばない(new Worker の JS 実行中)。
+    // トップレベル await が返す Promise はメインループの PumpMicrotasks で解決される。
+    v8::Local<v8::Value> result;
+    if (!module->Evaluate(context).ToLocal(&result)) {
+        std::cerr << "[Worker] module evaluate failed: " << ShortUrl(url_) << std::endl;
+        if (tc.HasCaught()) {
+            v8::String::Utf8Value ex(isolate_, tc.Exception());
+            std::cerr << "[Worker]   exception: " << (*ex ? *ex : "?") << std::endl;
+        }
+        return false;
+    }
     return true;
 }
 
@@ -598,11 +739,11 @@ WorkerRuntime::WorkerRuntime(v8::Isolate* isolate, HostContext* host)
 
 WorkerRuntime::~WorkerRuntime() = default;
 
-v8::Local<v8::Object> WorkerRuntime::CreateWorker(const std::string& url)
+v8::Local<v8::Object> WorkerRuntime::CreateWorker(const std::string& url, bool is_module)
 {
     v8::Local<v8::Context> ctx = isolate_->GetCurrentContext();
 
-    auto instance = std::make_unique<WorkerInstance>(this, isolate_, url);
+    auto instance = std::make_unique<WorkerInstance>(this, isolate_, url, is_module);
     WorkerInstance* ptr = instance.get();
 
     // main 側 Worker オブジェクト
@@ -648,7 +789,17 @@ void WorkerConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
         // new Worker(new URL(...)) にも対応するため toString で URL 文字列化
         url = ToStdString(isolate, args[0]);
     }
-    args.GetReturnValue().Set(runtime->CreateWorker(url));
+    // new Worker(url, { type: "module" }) → ESM として評価する
+    bool is_module = false;
+    if (args.Length() > 1 && args[1]->IsObject()) {
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        v8::Local<v8::Value> type;
+        if (args[1].As<v8::Object>()->Get(ctx, Str(isolate, "type")).ToLocal(&type) &&
+            type->IsString()) {
+            is_module = (ToStdString(isolate, type) == "module");
+        }
+    }
+    args.GetReturnValue().Set(runtime->CreateWorker(url, is_module));
 }
 
 } // namespace

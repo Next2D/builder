@@ -257,6 +257,55 @@ static void TestTransformedFill()
     CHECK(Px(s, 33, 25).a == 0);
 }
 
+// 任意形状クリップ (ピクセルマスク)。矩形は外接矩形、非矩形はマスクで厳密クリップ。
+static void TestClipMask()
+{
+    // 矩形パスは mask を作らない (IsAxisAlignedRect が true)。
+    std::vector<SubPath> rect = { MakeRectPath(2, 2, 5, 5) };
+    CHECK(IsAxisAlignedRect(rect));
+
+    // 左上三角 (0,0),(10,0),(0,10) — 内側は x+y<10。
+    std::vector<SubPath> tri(1);
+    tri[0].pts = { {0,0}, {10,0}, {0,10} };
+    tri[0].closed = true;
+    CHECK(!IsAxisAlignedRect(tri));
+
+    ClipRect clip;
+    IntersectClipMask(clip, tri, 10, 10);
+    CHECK(clip.mask != nullptr);
+    CHECK(clip.mask_w == 10 && clip.mask_h == 10);
+
+    // 全面塗りが三角形にクリップされる。
+    Surface s(10, 10);
+    std::vector<SubPath> full = { MakeRectPath(0, 0, 10, 10) };
+    FillPath(s, clip, full, {255, 0, 0, 255}, 1.0);
+    CHECK(Px(s, 1, 1).r == 255);   // 深く内側
+    CHECK(Px(s, 1, 2).r == 255);
+    CHECK(Px(s, 9, 9).a == 0);     // 深く外側 (x+y=18)
+    CHECK(Px(s, 8, 8).a == 0);     // 外側 (x+y=16)
+
+    // Blend も直接マスクに従う。
+    Surface s2(10, 10);
+    Blend(s2, clip, 1, 1, {0, 255, 0, 255}, 1.0);   // 内側 → 描かれる
+    Blend(s2, clip, 9, 9, {0, 255, 0, 255}, 1.0);   // 外側 → 描かれない
+    CHECK(Px(s2, 1, 1).g == 255);
+    CHECK(Px(s2, 9, 9).a == 0);
+
+    // マスク同士の積集合: 左上三角 ∩ 右下三角 は (1,1) を除外する。
+    ClipRect clip2;
+    IntersectClipMask(clip2, tri, 10, 10);
+    std::vector<SubPath> tri2(1);
+    tri2[0].pts = { {10,0}, {10,10}, {0,10} };   // 右下三角 (内側 x+y>10)
+    tri2[0].closed = true;
+    IntersectClipMask(clip2, tri2, 10, 10);
+    Surface s3(10, 10);
+    FillPath(s3, clip2, full, {0, 0, 255, 255}, 1.0);
+    CHECK(Px(s3, 1, 1).a == 0);    // 左上三角内だが右下三角外 → 積集合で除外
+
+    // 非矩形クリップでも外接矩形 (高速リジェクト) は反映される。
+    CHECK(clip.active);
+}
+
 int main()
 {
     TestParseColor();
@@ -272,6 +321,7 @@ int main()
     TestFlattenCurves();
     TestPathBounds();
     TestTransformedFill();
+    TestClipMask();
 
     std::printf("%s: %d checks, %d failures\n",
                 failures ? "FAILED" : "ok", checks, failures);

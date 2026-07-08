@@ -1213,9 +1213,13 @@ static void Device_CreateBindGroupLayout(const v8::FunctionCallbackInfo<v8::Valu
     v8::Local<v8::Object> d = args[0].As<v8::Object>();
 
     std::vector<wgpu::BindGroupLayoutEntry> entries;
+    // externalTexture の nextInChain 構造体は CreateBindGroupLayout 完了まで生存が必要。
+    // reserve でベクタ再割当を防ぎ、back() のアドレスを安定させる。
+    std::vector<wgpu::ExternalTextureBindingLayout> ext_layouts;
     v8::Local<v8::Value> ev = Prop(isolate, d, "entries");
     if (ev->IsArray()) {
         auto arr = ev.As<v8::Array>();
+        ext_layouts.reserve(arr->Length());
         for (uint32_t i = 0; i < arr->Length(); ++i) {
             v8::Local<v8::Value> v;
             if (!arr->Get(ctx, i).ToLocal(&v) || !v->IsObject()) continue;
@@ -1239,8 +1243,21 @@ static void Device_CreateBindGroupLayout(const v8::FunctionCallbackInfo<v8::Valu
                     ? ToTextureViewDimension(webgpu::Str(isolate, t, "viewDimension"))
                     : wgpu::TextureViewDimension::e2D;
                 entry.texture.multisampled = Bool(isolate, t, "multisampled", false);
+            } else if (HasProp(isolate, o, "storageTexture")) {
+                auto st = Prop(isolate, o, "storageTexture").As<v8::Object>();
+                entry.storageTexture.access = HasProp(isolate, st, "access")
+                    ? ToStorageTextureAccess(webgpu::Str(isolate, st, "access"))
+                    : wgpu::StorageTextureAccess::WriteOnly;
+                entry.storageTexture.format = ToTextureFormat(webgpu::Str(isolate, st, "format"));
+                entry.storageTexture.viewDimension = HasProp(isolate, st, "viewDimension")
+                    ? ToTextureViewDimension(webgpu::Str(isolate, st, "viewDimension"))
+                    : wgpu::TextureViewDimension::e2D;
+            } else if (HasProp(isolate, o, "externalTexture")) {
+                // GPUExternalTextureBindingLayout は空 (メンバ無し)。sType は
+                // Dawn の C++ ラッパが既定で設定するため emplace してチェーンするだけでよい。
+                ext_layouts.emplace_back();
+                entry.nextInChain = &ext_layouts.back();
             }
-            // «EXTEND» storageTexture / externalTexture は必要に応じて追加
             entries.push_back(entry);
         }
     }

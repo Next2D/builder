@@ -17,20 +17,52 @@ inline wgpu::TextureFormat ToTextureFormat(std::string_view s)
     if (s == "bgra8unorm")            return F::BGRA8Unorm;
     if (s == "bgra8unorm-srgb")       return F::BGRA8UnormSrgb;
     if (s == "rgba8snorm")            return F::RGBA8Snorm;
+    if (s == "rgba8uint")             return F::RGBA8Uint;
+    if (s == "rgba8sint")             return F::RGBA8Sint;
     if (s == "r8unorm")               return F::R8Unorm;
+    if (s == "r8snorm")               return F::R8Snorm;
+    if (s == "r8uint")                return F::R8Uint;
+    if (s == "r8sint")                return F::R8Sint;
     if (s == "rg8unorm")              return F::RG8Unorm;
+    if (s == "rg8snorm")              return F::RG8Snorm;
+    if (s == "rg8uint")               return F::RG8Uint;
+    if (s == "rg8sint")               return F::RG8Sint;
+    if (s == "r16uint")               return F::R16Uint;
+    if (s == "r16sint")               return F::R16Sint;
     if (s == "r16float")              return F::R16Float;
+    if (s == "rg16uint")              return F::RG16Uint;
+    if (s == "rg16sint")              return F::RG16Sint;
     if (s == "rg16float")             return F::RG16Float;
+    if (s == "rgba16uint")            return F::RGBA16Uint;
+    if (s == "rgba16sint")            return F::RGBA16Sint;
     if (s == "rgba16float")           return F::RGBA16Float;
+    if (s == "r32uint")               return F::R32Uint;
+    if (s == "r32sint")               return F::R32Sint;
     if (s == "r32float")              return F::R32Float;
+    if (s == "rg32uint")              return F::RG32Uint;
+    if (s == "rg32sint")              return F::RG32Sint;
     if (s == "rg32float")             return F::RG32Float;
+    if (s == "rgba32uint")            return F::RGBA32Uint;
+    if (s == "rgba32sint")            return F::RGBA32Sint;
     if (s == "rgba32float")           return F::RGBA32Float;
+    if (s == "rgb10a2unorm")          return F::RGB10A2Unorm;
+    if (s == "rg11b10ufloat")         return F::RG11B10Ufloat;
     if (s == "depth16unorm")          return F::Depth16Unorm;
     if (s == "depth24plus")           return F::Depth24Plus;
     if (s == "depth24plus-stencil8")  return F::Depth24PlusStencil8;
     if (s == "depth32float")          return F::Depth32Float;
+    if (s == "depth32float-stencil8") return F::Depth32FloatStencil8;
     if (s == "stencil8")              return F::Stencil8;
     return F::RGBA8Unorm;
+}
+
+inline wgpu::StorageTextureAccess ToStorageTextureAccess(std::string_view s)
+{
+    using A = wgpu::StorageTextureAccess;
+    if (s == "write-only") return A::WriteOnly;
+    if (s == "read-only")  return A::ReadOnly;
+    if (s == "read-write") return A::ReadWrite;
+    return A::WriteOnly;
 }
 
 inline wgpu::VertexFormat ToVertexFormat(std::string_view s)

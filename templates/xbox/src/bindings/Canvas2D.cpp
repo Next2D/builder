@@ -268,16 +268,22 @@ void Restore(const v8::FunctionCallbackInfo<v8::Value>& a)
     Canvas2D* c = Self(a.This());
     if (!c->stack.empty()) { c->state = c->stack.back(); c->stack.pop_back(); }
 }
-// clip(): 現在パスの外接矩形をクリップ領域として設定する (デバイス座標)。
-// 既存クリップとは積集合を取る。player の TextField 枠は矩形パスなので外接矩形で十分。
-// «EXTEND» 任意形状の厳密クリップは per-pixel マスクが必要 (現状は矩形近似)。
+// clip(): 現在パスをクリップ領域として設定する (デバイス座標)。既存クリップと積集合。
+//   矩形パス (TextField 枠等)  → 外接矩形クリップ (厳密・軽量)
+//   任意形状パス (円/多角形等) → nonzero winding のピクセルマスクで厳密にクリップ
 void Clip(const v8::FunctionCallbackInfo<v8::Value>& a)
 {
     Canvas2D* c = Self(a.This());
     double minx, miny, maxx, maxy;
     if (!raster::PathBounds(c->path, &minx, &miny, &maxx, &maxy)) return;
-    raster::IntersectClip(c->state.clip,
-        std::floor(minx), std::floor(miny), std::ceil(maxx), std::ceil(maxy));
+    if (raster::IsAxisAlignedRect(c->path)) {
+        // 矩形クリップは外接矩形で厳密 (軽量)。
+        raster::IntersectClip(c->state.clip,
+            std::floor(minx), std::floor(miny), std::ceil(maxx), std::ceil(maxy));
+    } else {
+        // 任意形状はピクセルマスクで厳密にクリップする (外接矩形も内部で反映)。
+        raster::IntersectClipMask(c->state.clip, c->path, c->surface.width, c->surface.height);
+    }
 }
 
 // --- 矩形 / クリア --------------------------------------------------------

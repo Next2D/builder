@@ -7,7 +7,6 @@
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
-#include <cstdio>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -287,14 +286,6 @@ void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
 
     auto pcm = std::make_shared<PcmBuffer>();
     const bool decoded = !input.empty() && AudioEngine::Decode(input, *pcm);
-
-    // «診断» どのサウンドがデコードできたか/失敗したかを次のログで特定する。
-    {
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "[audio] decode bytes=%zu -> %s",
-                      input.size(), decoded ? "ok" : "FAIL");
-        v8util::AppendErrorLog(buf);
-    }
 
     // 重要: デコード失敗でも Reject しない。@next2d/media の SoundDecodeService は
     // decodeAudioData の reject を catch して先頭バイトをスキップし再帰リトライするが、

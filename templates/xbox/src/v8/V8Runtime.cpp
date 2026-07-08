@@ -202,31 +202,6 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         }
     }
 
-    // «診断» Tween(Job) の凍結調査: app.js の Job 更新コードへトレースを注入する。
-    // rAF が 2 本 (ticker + 1 Job) のまま描画が止まる現象の currentTime/duration の
-    // 実値を観測する。パターン不一致なら無変更 (ログのみ)。
-    if (source.find("(e.currentTime=(t-e.startTime)/1e3,") != std::string::npos) {
-        const auto patch = [&source](const std::string& from, const std::string& to) {
-            const auto pos = source.find(from);
-            if (pos != std::string::npos) {
-                source.replace(pos, from.size(), to);
-            } else {
-                std::cerr << "[V8] job trace patch not applied: "
-                          << from.substr(0, 40) << std::endl;
-            }
-        };
-        patch("(e.currentTime=(t-e.startTime)/1e3,",
-              "(e.currentTime=(t-e.startTime)/1e3,"
-              "((globalThis.__jt=(globalThis.__jt||0)+1)<=60||globalThis.__jt%600===0)&&"
-              "console.info(\"[jobtrace] #\"+globalThis.__jt,"
-              "\"ct=\"+e.currentTime.toFixed(3),\"dur=\"+e.duration,"
-              "\"t=\"+t.toFixed(1),\"st=\"+e.startTime.toFixed(1)),");
-        patch("e.currentTime>=e.duration?(",
-              "e.currentTime>=e.duration?("
-              "console.info(\"[jobtrace] COMPLETE dur=\"+e.duration),");
-        std::cerr << "[V8] job trace patch applied to " << abs << std::endl;
-    }
-
     v8::Local<v8::String> src = v8util::Str(isolate_, source);
 
     v8::ScriptOrigin origin(

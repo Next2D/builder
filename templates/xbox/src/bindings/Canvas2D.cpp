@@ -224,55 +224,9 @@ void Stroke(const v8::FunctionCallbackInfo<v8::Value>& a)
 // デバイス座標で判定するため、パスへは変換適用済み。
 void IsPointInPath(const v8::FunctionCallbackInfo<v8::Value>& a)
 {
-    // «診断» 暴走ループ検出。player のメッシュ生成 (fill/stroke) は isPointInPath を
-    // 多数呼ぶが、正常なら 1 フレームで収束する。ローディングで固まる #2 が
-    // 「メッシュ生成の無限ループ」なら、この総数ログがフリーズ直前に高速連発する
-    // (ハートビートが止まった後も総数だけ伸び続ける)。[Hit] 診断はキャップ後に
-    // 出ないため、キャップ後の暴走を捉えるにはこの総数ログが必要。
-    {
-        static uint64_t s_total = 0;
-        if (++s_total % 50000 == 0) {
-            char b[72];
-            std::snprintf(b, sizeof(b), "[hittest] isPointInPath total=%llu",
-                          static_cast<unsigned long long>(s_total));
-            v8util::AppendErrorLog(b);
-        }
-    }
-
     Canvas2D* c = Self(a.This());
     const double px = Arg(a,0), py = Arg(a,1);
     const bool hit = raster::PointInPath(c->path, px, py);
-
-    // 診断: ヒットテストのクエリ点・パス外接矩形・結果を記録する。
-    // 「pointermove は反応するがボタン(pointerdown/up)が効かない」の切り分け用。
-    //   - 点が全パス外接矩形の外 → stage.pointer の座標系ズレ (scale/offset)
-    //   - q=nan → stage.pointer が NaN (起動直後 rendererScale=0 等)
-    //   - 点が矩形内なのに false → winding 判定バグ
-    //   - パスが空 → パス構築経路の問題
-    // pointerdown/up は move とは別枠(各 40 行)で確実に残す。起動直後の move 洪水で
-    // 枠を使い切って down/up が観測できない事態を防ぐ。
-    {
-        HostContext* host = HostContext::From(a.GetIsolate());
-        const int kind = host ? host->input_kind : 0;
-        const bool is_press = (kind == 2 || kind == 3);
-        static int press_log = 0, move_log = 0;
-        int* cnt = is_press ? &press_log : &move_log;
-        const int cap = is_press ? 40 : 24;
-        if (*cnt < cap) {
-            ++(*cnt);
-            const char* label = (kind == 2) ? "down" : (kind == 3) ? "up"
-                              : (kind == 1) ? "move" : "other";
-            double bx0, by0, bx1, by1;
-            const bool has = raster::PathBounds(c->path, &bx0, &by0, &bx1, &by1);
-            char buf[208];
-            std::snprintf(buf, sizeof(buf),
-                "[Hit:%s] q=(%.1f,%.1f) subpaths=%zu bbox=%s(%.1f,%.1f..%.1f,%.1f) -> %s",
-                label, px, py, c->path.size(), has ? "" : "EMPTY",
-                has?bx0:0, has?by0:0, has?bx1:0, has?by1:0, hit ? "HIT" : "miss");
-            v8util::AppendErrorLog(buf);
-        }
-    }
-
     a.GetReturnValue().Set(v8::Boolean::New(a.GetIsolate(), hit));
 }
 

@@ -44,10 +44,6 @@ public:
     // 入力イベント配送先の主要 canvas (Canvas.cpp が最後に生成したものを記録)
     v8::Global<v8::Object> main_canvas;
 
-    // 現在配送中の入力種別 (診断用)。0=その他, 1=pointermove, 2=pointerdown, 3=pointerup。
-    // FireEvent が設定し、Canvas2D の isPointInPath 診断が種別ごとにヒット結果を記録する。
-    int input_kind = 0;
-
     // アプリのビューポート論理サイズ (canvas.width/height の初期値)
     int viewport_width  = 1920;
     int viewport_height = 1080;

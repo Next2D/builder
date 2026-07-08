@@ -24,16 +24,12 @@
 
 #include "v8/V8Util.h"
 
-#include <atomic>
-#include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <cstring>
 
 namespace fs = std::filesystem;
@@ -46,65 +42,12 @@ DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
 V8Runtime* g_runtime = nullptr;
 
-// «診断» ウォッチドッグ: メインスレッドが JS 内で長時間フリーズ (ローディングで
-// 止まる #2 の無限ループ) したら、その時点の JS スタックを next2d-error.log に残す。
-// メインループ毎に g_loop_iter を進め、別スレッドが停滞を検出して RequestInterrupt する。
-std::atomic<uint64_t> g_loop_iter{0};
-std::atomic<bool> g_stuck_reported{false};
-
-// RequestInterrupt により「メインスレッド上で」実行される。無限ループの JS 位置を記録。
-void OnMainThreadStuck(v8::Isolate* isolate, void* /*data*/)
-{
-    v8::HandleScope hs(isolate);
-    v8::Local<v8::StackTrace> stack =
-        v8::StackTrace::CurrentStackTrace(isolate, 24, v8::StackTrace::kDetailed);
-    std::string out = "[watchdog] main thread stalled >3s. JS stack (top first):";
-    const int n = stack.IsEmpty() ? 0 : stack->GetFrameCount();
-    if (n == 0) {
-        out += "\n  (no JS frames — likely stuck in native/C++ loop)";
-    }
-    for (int i = 0; i < n; ++i) {
-        v8::Local<v8::StackFrame> f = stack->GetFrame(isolate, i);
-        v8::String::Utf8Value fn(isolate, f->GetFunctionName());
-        v8::String::Utf8Value sc(isolate, f->GetScriptNameOrSourceURL());
-        char buf[512];
-        std::snprintf(buf, sizeof(buf), "\n  #%d %s (%s:%d:%d)", i,
-            (*fn && **fn) ? *fn : "<anonymous>",
-            (*sc && **sc) ? *sc : "<unknown>",
-            f->GetLineNumber(), f->GetColumn());
-        out += buf;
-    }
-    v8util::AppendErrorLog(out);
-}
-
 // window(global) / document / 主要 canvas へイベントを配送する。
 // window へのキーボード、canvas へのポインタ/ホイールは player の登録先に合わせている。
 void FireEvent(const char* type, const std::function<void(v8::Isolate*, v8::Local<v8::Object>)>& fill)
 {
     if (!g_runtime || !g_host) {
         return;
-    }
-    // 現在の入力種別を記録する (Canvas2D の isPointInPath 診断が種別ごとに参照)。
-    {
-        const std::string t = type;
-        g_host->input_kind = (t == "pointermove") ? 1
-                           : (t == "pointerdown") ? 2
-                           : (t == "pointerup")   ? 3 : 0;
-    }
-    // 診断: 入力イベントが JS 配送層まで到達しているかを一度だけ next2d-error.log に残す
-    // (先頭12件)。GUI 実行では stderr が見えないため。main_canvas 未設定なら pointer が
-    // どこにも届かない。ここに [Input] 行が出れば Win32 配送とループは正常。
-    {
-        static int input_log = 0;
-        if (input_log < 12) {
-            ++input_log;
-            std::ofstream ofs("next2d-error.log", std::ios::app);
-            if (ofs) {
-                ofs << "[Input] fire " << type
-                    << " main_canvas=" << (g_host->main_canvas.IsEmpty() ? "EMPTY" : "set")
-                    << std::endl;
-            }
-        }
     }
     v8::Isolate* isolate = g_runtime->isolate();
     v8::HandleScope hs(isolate);
@@ -518,30 +461,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     int exit_code = 0;
     // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
     // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
-    // «診断» ウォッチドッグ起動: 3 秒間メインループが進まなければ JS スタックを記録。
-    std::thread watchdog([&runtime]() {
-        uint64_t last = 0;
-        int stall = 0;
-        while (g_running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            const uint64_t cur = g_loop_iter.load(std::memory_order_relaxed);
-            if (cur == last) {
-                if (++stall >= 3 && !g_stuck_reported.exchange(true)) {
-                    runtime.isolate()->RequestInterrupt(OnMainThreadStuck, nullptr);
-                }
-            } else {
-                last = cur;
-                stall = 0;
-                g_stuck_reported.store(false);
-            }
-        }
-    });
-    watchdog.detach();
-
     {
     v8::Isolate::Scope isolate_scope(runtime.isolate());
     while (g_running) {
-        g_loop_iter.fetch_add(1, std::memory_order_relaxed);
         // Win32 メッセージ
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
@@ -592,17 +514,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
             const double frame_ms = event_loop.Now() - now;
             if (frame_ms < 15.0) {
                 Sleep(static_cast<DWORD>(15.0 - frame_ms));
-            }
-        }
-
-        // 診断: ループ統計 (5 秒毎)
-        {
-            static uint64_t iteration = 0;
-            ++iteration;
-            if (iteration % 300 == 0) {
-                std::cerr << "[Loop] it=" << iteration
-                          << " rAF=" << event_loop.PendingAnimationFrameCount()
-                          << " timers=" << event_loop.PendingTimerCount() << std::endl;
             }
         }
 

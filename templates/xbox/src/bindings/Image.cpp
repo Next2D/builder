@@ -10,7 +10,6 @@
 
 #include <objbase.h>
 
-#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -99,29 +98,15 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
     }
 
     auto* img = new DecodedImage();
-    bool ok = !input.empty() && DecodeImageWithWIC(input, *img);
+    const bool ok = !input.empty() && DecodeImageWithWIC(input, *img);
 
-    // «診断+堅牢化» デコード失敗時の扱い。
+    // «堅牢化» デコード失敗時の扱い。
     // player の ShapeLoadSrcUseCase は image に "load" ハンドラのみ登録し "error" を
     // 監視しない。そのため "error" を発火すると Event.COMPLETE が来ず、ImageShapeAtom.load()
     // の Promise が永久に未解決になり、ページ build (=画面遷移) がローディング画面のまま
     // フリーズする。デコードできない 1 枚が全体をブリックするのを防ぐため、失敗時は
     // 1x1 透明のプレースホルダを割り当てて "load" として扱う (該当画像だけが空になる)。
-    // どの画像が失敗したかは下のログで特定できる。
-    {
-        const std::string id = url.rfind("data:", 0) == 0
-            ? ("data:" + (url.size() > 40 ? url.substr(5, 35) + "..." : url.substr(5)))
-            : url;
-        char head[160];
-        std::snprintf(head, sizeof(head), "[image] load %s bytes=%zu -> %s%s",
-                      id.c_str(), input.size(),
-                      ok ? "ok " : "DECODE-FAIL ",
-                      ok ? "" : "(placeholder 1x1)");
-        v8util::AppendErrorLog(head);
-    }
-
     if (!ok) {
-        // 1x1 透明画像でフォールバック (build を止めない)
         img->width = 1;
         img->height = 1;
         img->rgba.assign(4, 0);

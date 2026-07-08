@@ -306,6 +306,15 @@ const embedXboxAssets = (): Promise<void> =>
                 `Embedded ${entries.length} Xbox asset file(s) into assets.pak `
                 + `(${(pak.length / 1024 / 1024).toFixed(2)} MB).`
             ));
+
+            // 埋め込み済みの平文 `assets/`・`js/` は書き出し一覧から除外する。
+            // これらは assets.pak (=exe 内 RCDATA) に格納済みで、CMake も埋め込みモードでは
+            // exe 隣へステージしないため、xbox/ 直下に残しても不要かつ平文流出になる。
+            // (無効化時は上で早期 return するため、隣接読み込み用の実体はそのまま残る)
+            fs.rmSync(`${xboxDir}/assets`, { "recursive": true, "force": true });
+            fs.rmSync(`${xboxDir}/js`, { "recursive": true, "force": true });
+            console.log(pc.green("Excluded plaintext `assets/` and `js/` from the export (embedded in exe)."));
+
             resolve();
         } catch (error) {
             reject(`Failed to embed Xbox assets. ${error}`);

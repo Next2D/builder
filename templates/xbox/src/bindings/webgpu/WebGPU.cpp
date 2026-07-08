@@ -10,7 +10,6 @@
 
 #include "v8/V8Util.h"
 
-#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -758,27 +757,6 @@ static void Encoder_BeginRenderPass(const v8::FunctionCallbackInfo<v8::Value>& a
                 auto c = cv.As<v8::Object>();
                 att.clearValue = { F64(isolate, c, "r"), F64(isolate, c, "g"),
                                    F64(isolate, c, "b"), F64(isolate, c, "a") };
-            }
-            // «診断» クリアパスをフレーム・ハートビートとして記録する。
-            // (1) 冒頭数回は clearValue を出す (背景クリア色の確認: シアン #6dd4ff か透明か)。
-            //     → メインアタッチメントが不透明シアンなら bgColor は効いている。
-            // (2) 以降は一定間隔で通し番号だけ出す。ローディングで止まる #2 の切り分け用:
-            //     この行が途切れたら「描画ループが止まった=JS フリーズ」、
-            //     出続けるなら「描画は継続=表示/合成の問題」と判別できる。
-            if (att.loadOp == wgpu::LoadOp::Clear) {
-                static int clear_seen = 0;
-                ++clear_seen;
-                if (clear_seen <= 8) {
-                    char buf[128];
-                    std::snprintf(buf, sizeof(buf),
-                        "[gpu] clear#%d rgba=(%.3f,%.3f,%.3f,%.3f)", clear_seen,
-                        att.clearValue.r, att.clearValue.g, att.clearValue.b, att.clearValue.a);
-                    v8util::AppendErrorLog(buf);
-                } else if (clear_seen % 240 == 0) {
-                    char buf[64];
-                    std::snprintf(buf, sizeof(buf), "[gpu] heartbeat clear#%d", clear_seen);
-                    v8util::AppendErrorLog(buf);
-                }
             }
             color_attachments.push_back(att);
         }

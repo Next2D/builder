@@ -123,30 +123,6 @@ void DispatchEvent(v8::Isolate* isolate, v8::Local<v8::Object> target,
         if (lv.As<v8::Object>()->Get(ctx, Str(isolate, type.c_str())).ToLocal(&arrv) &&
             arrv->IsArray()) {
             auto arr = arrv.As<v8::Array>();
-            // 診断: pointer 種別ごとに独立カウンタで記録する (共有カウンタだと
-            // 起動直後の pointermove 連発で使い切られ pointerdown/up が観測できない)。
-            // クリック経路の要である down/up は座標付きで残す。
-            if (type.rfind("pointer", 0) == 0) {
-                static int log_move = 0, log_down = 0, log_up = 0;
-                int* counter = (type == "pointermove") ? &log_move
-                             : (type == "pointerdown") ? &log_down
-                             : (type == "pointerup")   ? &log_up : nullptr;
-                if (counter && *counter < 8) {
-                    ++(*counter);
-                    std::string msg = "[Input] dispatch " + type
-                        + " listeners=" + std::to_string(arr->Length());
-                    // down/up はクライアント座標も併記する
-                    if (type != "pointermove") {
-                        v8::Local<v8::Value> cx, cy;
-                        if (event->Get(ctx, Str(isolate, "clientX")).ToLocal(&cx) &&
-                            event->Get(ctx, Str(isolate, "clientY")).ToLocal(&cy)) {
-                            msg += " clientX=" + std::to_string(cx->NumberValue(ctx).FromMaybe(0))
-                                +  " clientY=" + std::to_string(cy->NumberValue(ctx).FromMaybe(0));
-                        }
-                    }
-                    v8util::AppendErrorLog(msg);
-                }
-            }
             for (uint32_t i = 0; i < arr->Length(); ++i) {
                 v8::Local<v8::Value> fn;
                 if (arr->Get(ctx, i).ToLocal(&fn) && fn->IsFunction()) {

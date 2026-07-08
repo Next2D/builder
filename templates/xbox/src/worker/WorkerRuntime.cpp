@@ -117,15 +117,6 @@ bool IsImageBitmapObject(v8::Isolate* isolate, v8::Local<v8::Object> obj)
 constexpr uint32_t kHostObjectOffscreenCanvas = 1;
 constexpr uint32_t kHostObjectImageBitmap = 2;
 
-// メッセージトレース: 定常時のログ洪水を防ぐため、最初の 120 件のあとは
-// 200 件ごとに 1 回だけ出力する (render は 60fps で双方向に流れる)。
-bool TraceMessage()
-{
-    static uint64_t count = 0;
-    ++count;
-    return count <= 120 || count % 200 == 0;
-}
-
 class SerializerDelegate : public v8::ValueSerializer::Delegate {
 public:
     explicit SerializerDelegate(v8::Isolate* isolate) : isolate_(isolate) {}
@@ -383,10 +374,6 @@ void WorkerSelfPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
     auto message = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
-    if (TraceMessage()) {
-        std::cerr << "[Worker] worker->main postMessage: " << message.data.size()
-                  << " bytes (+" << message.transfers.size() << " transfers)" << std::endl;
-    }
     if (!message.data.empty()) {
         instance->PostToMain(std::move(message));
     }
@@ -420,10 +407,6 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Local<v8::Value> msg = args.Length() > 0 ? args[0] : v8::Undefined(isolate).As<v8::Value>();
     v8::Local<v8::Value> transfer = args.Length() > 1 ? args[1] : v8::Undefined(isolate).As<v8::Value>();
     auto message = SerializeMessage(isolate, isolate->GetCurrentContext(), msg, transfer);
-    if (TraceMessage()) {
-        std::cerr << "[Worker] main->worker postMessage: " << message.data.size()
-                  << " bytes (+" << message.transfers.size() << " transfers)" << std::endl;
-    }
     if (!message.data.empty()) {
         instance->PostToWorker(std::move(message));
     }
@@ -433,12 +416,10 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 bool WorkerInstance::Start()
 {
-    std::cerr << "[Worker] start: " << ShortUrl(url_) << std::endl;
     v8::HandleScope handle_scope(isolate_);
 
     v8::Local<v8::Context> context = v8::Context::New(isolate_);
     context_.Reset(isolate_, context);
-    std::cerr << "[Worker] context created" << std::endl;
 
     // worker 専用 EventLoop を Context の embedder slot に登録
     loop_ = std::make_unique<EventLoop>(isolate_);
@@ -449,7 +430,6 @@ bool WorkerInstance::Start()
 
     // ブラウザ相当環境一式 (console/timers/fetch/image/audio/webgpu/canvas/dom)
     InstallGlobalBindings(isolate_, global, HostContext::From(isolate_));
-    std::cerr << "[Worker] bindings installed" << std::endl;
 
     // worker スコープには document/window を出さない (ライブラリの環境判定対策)。
     global->Delete(context, Str(isolate_, "document")).Check();
@@ -501,7 +481,6 @@ bool WorkerInstance::Start()
         }
         source = std::move(*src);
     }
-    std::cerr << "[Worker] source resolved (" << source.size() << " bytes)" << std::endl;
 
     // «自己修復» CommandController.execute() は try/catch を持たないため、描画中の例外が
     // 1 度起きると this.state が "active" のまま固まり、以後 onmessage は queue に積むだけで
@@ -542,7 +521,6 @@ bool WorkerInstance::Start()
     // NOTE: ここで PerformMicrotaskCheckpoint は呼ばない。Start は JS コールバック
     // (new Worker) の最中に呼ばれるため、JS 実行中のチェックポイントは V8 の規約違反。
     // マイクロタスクはメインループの PumpMicrotasks で処理される。
-    std::cerr << "[Worker] script evaluated" << std::endl;
     return true;
 }
 
@@ -567,16 +545,9 @@ void WorkerInstance::DeliverToWorker(double now_ms)
     while (!to_worker_.empty()) {
         WorkerMessage m = std::move(to_worker_.front());
         to_worker_.pop_front();
-        const bool trace = TraceMessage();
-        if (trace) {
-            std::cerr << "[Worker] deliver main->worker (" << m.data.size() << " bytes)" << std::endl;
-        }
         v8::Local<v8::Value> data;
         if (DeserializeMessage(isolate_, ctx, m).ToLocal(&data)) {
             DispatchMessage(isolate_, ctx, ctx->Global(), data);
-            if (trace) {
-                std::cerr << "[Worker] worker onmessage done" << std::endl;
-            }
         } else {
             std::cerr << "[Worker] main->worker deserialize failed ("
                       << m.data.size() << " bytes)" << std::endl;
@@ -601,16 +572,9 @@ void WorkerInstance::DeliverToMain()
     while (!to_main_.empty()) {
         WorkerMessage m = std::move(to_main_.front());
         to_main_.pop_front();
-        const bool trace = TraceMessage();
-        if (trace) {
-            std::cerr << "[Worker] deliver worker->main (" << m.data.size() << " bytes)" << std::endl;
-        }
         v8::Local<v8::Value> data;
         if (DeserializeMessage(isolate_, main_ctx, m).ToLocal(&data)) {
             DispatchMessage(isolate_, main_ctx, worker_obj, data);
-            if (trace) {
-                std::cerr << "[Worker] main onmessage done" << std::endl;
-            }
         } else {
             std::cerr << "[Worker] worker->main deserialize failed ("
                       << m.data.size() << " bytes)" << std::endl;

@@ -110,6 +110,126 @@
         global.URL.revokeObjectURL = function () {};
     }
 
+    // --- URLSearchParams の最小補完 ----------------------------------------
+    // V8 単体には URLSearchParams が存在しないため補完する。
+    // Next2D アプリがクエリ文字列 (?mode=0 等) を解析する際に使用する。
+    if (typeof global.URLSearchParams === "undefined") {
+        global.URLSearchParams = class URLSearchParams {
+            constructor(init) {
+                this._list = [];
+                if (typeof init === "string") {
+                    let query = init;
+                    if (query.charAt(0) === "?") {
+                        query = query.slice(1);
+                    }
+                    if (query.length) {
+                        const pairs = query.split("&");
+                        for (let i = 0; i < pairs.length; i++) {
+                            const pair = pairs[i];
+                            if (!pair) {
+                                continue;
+                            }
+                            const index = pair.indexOf("=");
+                            const decode = (value) => {
+                                try {
+                                    return decodeURIComponent(value.replace(/\+/g, " "));
+                                } catch {
+                                    return value;
+                                }
+                            };
+                            if (index === -1) {
+                                this._list.push([decode(pair), ""]);
+                            } else {
+                                this._list.push([decode(pair.slice(0, index)), decode(pair.slice(index + 1))]);
+                            }
+                        }
+                    }
+                } else if (init && typeof init === "object") {
+                    if (Array.isArray(init)) {
+                        for (let i = 0; i < init.length; i++) {
+                            this._list.push([String(init[i][0]), String(init[i][1])]);
+                        }
+                    } else if (typeof init.forEach === "function") {
+                        init.forEach((value, key) => this._list.push([String(key), String(value)]));
+                    } else {
+                        for (const key in init) {
+                            if (Object.prototype.hasOwnProperty.call(init, key)) {
+                                this._list.push([key, String(init[key])]);
+                            }
+                        }
+                    }
+                }
+            }
+            get(name) {
+                for (let i = 0; i < this._list.length; i++) {
+                    if (this._list[i][0] === name) {
+                        return this._list[i][1];
+                    }
+                }
+                return null;
+            }
+            getAll(name) {
+                const result = [];
+                for (let i = 0; i < this._list.length; i++) {
+                    if (this._list[i][0] === name) {
+                        result.push(this._list[i][1]);
+                    }
+                }
+                return result;
+            }
+            has(name) {
+                return this.get(name) !== null;
+            }
+            set(name, value) {
+                const text = String(value);
+                let done = false;
+                const next = [];
+                for (let i = 0; i < this._list.length; i++) {
+                    if (this._list[i][0] === name) {
+                        if (!done) {
+                            next.push([name, text]);
+                            done = true;
+                        }
+                    } else {
+                        next.push(this._list[i]);
+                    }
+                }
+                if (!done) {
+                    next.push([name, text]);
+                }
+                this._list = next;
+            }
+            append(name, value) {
+                this._list.push([String(name), String(value)]);
+            }
+            delete(name) {
+                this._list = this._list.filter((pair) => pair[0] !== name);
+            }
+            forEach(callback, thisArg) {
+                for (let i = 0; i < this._list.length; i++) {
+                    callback.call(thisArg, this._list[i][1], this._list[i][0], this);
+                }
+            }
+            keys() {
+                return this._list.map((pair) => pair[0])[Symbol.iterator]();
+            }
+            values() {
+                return this._list.map((pair) => pair[1])[Symbol.iterator]();
+            }
+            entries() {
+                return this._list.map((pair) => [pair[0], pair[1]])[Symbol.iterator]();
+            }
+            toString() {
+                return this._list
+                    .map((pair) => encodeURIComponent(pair[0]) + "=" + encodeURIComponent(pair[1]))
+                    .join("&");
+            }
+            [Symbol.iterator]() {
+                return this.entries();
+            }
+        };
+    }
+
     // --- location (Next2D が参照する場合の最小値) ---------------------------
     if (typeof global.location === "undefined") {
         global.location = {

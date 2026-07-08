@@ -227,10 +227,9 @@ export const minifyJs = (name: string, code: string): string =>
 /**
  * @description Xbox ホストの assets/app とホストスクリプト(js/bootstrap.js 等)を
  *              単一の pak バイナリへまとめ、`assets.pak` と RCDATA 参照用の
- *              `assets.rc` を xbox/ 直下へ生成する。CMake が assets.rc を検出すると
- *              これらを exe 内リソースへ埋め込み、平文 JS/HTML を配布物に残さない。
- *              環境変数 `NEXT2D_XBOX_NO_EMBED` が設定されている場合は埋め込みを無効化し、
- *              既存の生成物を削除して隣接ファイル読み込みへ戻す。
+ *              `assets.rc` を xbox/ 直下へ生成する。CMake が assets.rc を検出して
+ *              これらを exe 内リソースへ**必ず**埋め込み、平文 JS/HTML を配布物に残さない。
+ *              埋め込みは必須(非埋め込みの選択肢は無い)。資材が無ければハードエラー。
  *
  *              pak フォーマット (リトルエンディアン uint32):
  *                magic "N2DA" / version(=1) / count / [keyLen,key,dataLen,data]...
@@ -248,16 +247,6 @@ const embedXboxAssets = (): Promise<void> =>
         const xboxDir: string   = `${process.cwd()}/${XBOX_DIR_NAME}`;
         const pakPath: string   = `${xboxDir}/assets.pak`;
         const rcPath: string    = `${xboxDir}/assets.rc`;
-
-        // 明示的に無効化された場合は生成物を消してフォールバックへ戻す。
-        if (process.env.NEXT2D_XBOX_NO_EMBED) {
-            try {
-                fs.rmSync(pakPath, { "force": true });
-                fs.rmSync(rcPath, { "force": true });
-            } catch { /* ignore */ }
-            console.log(pc.yellow("Xbox asset embedding disabled (NEXT2D_XBOX_NO_EMBED)."));
-            return resolve();
-        }
 
         try {
             // 収集: assets/app 一式 (キーは app 基準) + host スクリプト (js/ 基準)。
@@ -310,7 +299,6 @@ const embedXboxAssets = (): Promise<void> =>
             // 埋め込み済みの平文 `assets/`・`js/` は書き出し一覧から除外する。
             // これらは assets.pak (=exe 内 RCDATA) に格納済みで、CMake も埋め込みモードでは
             // exe 隣へステージしないため、xbox/ 直下に残しても不要かつ平文流出になる。
-            // (無効化時は上で早期 return するため、隣接読み込み用の実体はそのまま残る)
             fs.rmSync(`${xboxDir}/assets`, { "recursive": true, "force": true });
             fs.rmSync(`${xboxDir}/js`, { "recursive": true, "force": true });
             console.log(pc.green("Excluded plaintext `assets/` and `js/` from the export (embedded in exe)."));

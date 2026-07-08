@@ -89,16 +89,17 @@ file(GLOB_RECURSE NEXT2D_HOST_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
 
-# 埋め込みアセット: builder の deployXbox が assets.pak と assets.rc を生成する。
-# 存在すれば RCDATA "N2DASSETS" として exe にリンクし、ゲーム JS/HTML を平文で
-# 隣に置かずに済む。無ければ従来どおり隣接 assets/app・js から読む。
+# 埋め込みアセット: builder の buildXbox が assets.pak と assets.rc を必ず生成し、
+# RCDATA "N2DASSETS" として exe にリンクする (ゲーム JS/HTML は平文で隣に置かない)。
+# 埋め込みは必須。assets.rc が無いのは builder を経由せず cmake を直接叩いた
+# ホスト単体ビルド (ゲーム資材なし) のみで、その場合はゲームは起動しない。
 set(NEXT2D_ASSETS_RC "${CMAKE_CURRENT_SOURCE_DIR}/assets.rc")
 if(EXISTS "${NEXT2D_ASSETS_RC}")
     enable_language(RC)
     list(APPEND NEXT2D_HOST_SOURCES "${NEXT2D_ASSETS_RC}")
     message(STATUS "Next2D: embedding assets from ${NEXT2D_ASSETS_RC}")
 else()
-    message(STATUS "Next2D: no assets.rc found - runtime reads adjacent files")
+    message(WARNING "Next2D: assets.rc not found - host-only build (no game assets). Run @next2d/builder to embed.")
 endif()
 
 add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
@@ -189,31 +190,15 @@ target_compile_definitions(Next2DXboxHost PRIVATE
 
 # -----------------------------------------------------------------------------
 # ランタイム資材のステージング
-#   builder が assets/app に JS/HTML/アセットを配置する。
-#   js/bootstrap.js はブラウザ相当グローバルを整える起動スクリプト。
-#
-#   埋め込みモード (assets.rc あり) では assets/ と js/ は exe 内 pak に入るため
-#   exe 隣へは一切コピーしない (平文 JS/HTML を配布物に残さないのが目的)。
-#   MicrosoftGame.config だけは常にステージングする。
+#   ゲーム JS/HTML/アセット (assets/app) とホストスクリプト (js/bootstrap.js) は
+#   builder が assets.pak にまとめて exe 内 RCDATA へ**必ず**埋め込む
+#   (非埋め込みの選択肢は無い。平文 JS/HTML を配布物に残さないのが目的)。
+#   したがって exe 隣へは assets/ も js/ もコピーしない。
+#   MicrosoftGame.config (GDK タイトル設定) だけを exe の隣へステージングする。
 # -----------------------------------------------------------------------------
-if(EXISTS "${NEXT2D_ASSETS_RC}")
-    add_custom_command(TARGET Next2DXboxHost POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/MicrosoftGame.config"
-            "$<TARGET_FILE_DIR:Next2DXboxHost>/MicrosoftGame.config"
-        COMMENT "Staging MicrosoftGame.config (assets/JS embedded in exe)"
-    )
-else()
-    add_custom_command(TARGET Next2DXboxHost POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-            "$<TARGET_FILE_DIR:Next2DXboxHost>/assets"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/js"
-            "$<TARGET_FILE_DIR:Next2DXboxHost>/js"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/MicrosoftGame.config"
-            "$<TARGET_FILE_DIR:Next2DXboxHost>/MicrosoftGame.config"
-        COMMENT "Staging Next2D assets, bootstrap JS and MicrosoftGame.config"
-    )
-endif()
+add_custom_command(TARGET Next2DXboxHost POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/MicrosoftGame.config"
+        "$<TARGET_FILE_DIR:Next2DXboxHost>/MicrosoftGame.config"
+    COMMENT "Staging MicrosoftGame.config (assets/JS embedded in exe)"
+)

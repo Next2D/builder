@@ -25,12 +25,18 @@
 
 #include "v8/V8Util.h"
 
+#include <v8-profiler.h>
+
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 #include <cstdio>
 #include <cstring>
 
@@ -90,6 +96,69 @@ struct PerfStats {
         *this = PerfStats{};
     }
 };
+
+// --profile: CPU プロファイル結果を self サンプル数の降順で next2d-cpuprofile.log へ。
+// ノードツリーを再帰集計し「関数 (script:line)」毎の self 時間を出す。
+void DumpCpuProfileNode(const v8::CpuProfileNode* node,
+                        std::map<std::string, unsigned>& self_hits)
+{
+    const char* name = node->GetFunctionNameStr();
+    const char* script = node->GetScriptResourceNameStr();
+    std::string key = (name && *name) ? name : "(anonymous)";
+    if (script && *script) {
+        // pak 内キーの末尾だけで十分読める
+        std::string s(script);
+        const auto slash = s.find_last_of('/');
+        if (slash != std::string::npos) {
+            s = s.substr(slash + 1);
+        }
+        key += " (" + s + ":" + std::to_string(node->GetLineNumber()) + ")";
+    }
+    self_hits[key] += node->GetHitCount();
+    for (int i = 0; i < node->GetChildrenCount(); ++i) {
+        DumpCpuProfileNode(node->GetChild(i), self_hits);
+    }
+}
+
+void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us)
+{
+    std::map<std::string, unsigned> self_hits;
+    DumpCpuProfileNode(profile->GetTopDownRoot(), self_hits);
+
+    unsigned total = 0;
+    for (const auto& [key, hits] : self_hits) {
+        total += hits;
+    }
+    std::vector<std::pair<std::string, unsigned>> sorted(self_hits.begin(), self_hits.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::ofstream ofs("next2d-cpuprofile.log", std::ios::app);
+    const double dur_ms =
+        static_cast<double>(profile->GetEndTime() - profile->GetStartTime()) / 1000.0;
+    char head[160];
+    std::snprintf(head, sizeof(head),
+        "[cpuprofile] duration %.1fs, %u samples (interval %uus), top self-time:",
+        dur_ms / 1000.0, total, interval_us);
+    std::cerr << head << std::endl;
+    if (ofs) {
+        ofs << head << std::endl;
+    }
+    int rank = 0;
+    for (const auto& [key, hits] : sorted) {
+        if (hits == 0 || ++rank > 50) {
+            break;
+        }
+        char line[512];
+        std::snprintf(line, sizeof(line), "  %5.1f%%  %8.1fms  %s",
+            total ? 100.0 * hits / total : 0.0,
+            hits * (interval_us / 1000.0), key.c_str());
+        std::cerr << line << std::endl;
+        if (ofs) {
+            ofs << line << std::endl;
+        }
+    }
+}
 DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
 V8Runtime* g_runtime = nullptr;
@@ -375,6 +444,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 使っているかを数値化し、以降の最適化 (worker 並列化等) の要否判断に使う。
     const bool perf = cmd_line && wcsstr(cmd_line, L"--perf") != nullptr;
 
+    // --profile: V8 の sampling CPU プロファイラを起動から終了まで回し、
+    // 終了時に self 時間の上位関数を next2d-cpuprofile.log へ出力する。
+    // jitless でも動作し、GC は "(garbage collector)" として現れる。
+    // --perf で見つかった js 区間の遷移スパイク (~1.2s) の中身を特定する用途。
+    const bool profile = cmd_line && wcsstr(cmd_line, L"--profile") != nullptr;
+
     // 1. GDK ランタイム初期化。
     // デスクトップでは Gaming Services 未導入の環境 (CI ランナー等) でも
     // 起動できるよう、失敗を警告に留めて続行する (本ホストは XUser 等を未使用)。
@@ -474,6 +549,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         v8::Context::Scope cs(ctx);
         ctx->SetAlignedPointerInEmbedderData(kEventLoopEmbedderSlot, &event_loop);
         InstallWorker(runtime.isolate(), ctx->Global(), &host);
+    }
+
+    // --profile: 起動直後からサンプリング開始 (0.5ms 間隔)
+    v8::CpuProfiler* cpu_profiler = nullptr;
+    constexpr unsigned kProfileIntervalUs = 500;
+    if (profile) {
+        v8::Isolate::Scope iso_scope(runtime.isolate());
+        v8::HandleScope hs(runtime.isolate());
+        cpu_profiler = v8::CpuProfiler::New(runtime.isolate());
+        cpu_profiler->SetSamplingInterval(kProfileIntervalUs);
+        cpu_profiler->StartProfiling(
+            v8::String::NewFromUtf8Literal(runtime.isolate(), "next2d"));
+        std::cerr << "[cpuprofile] profiling started" << std::endl;
     }
 
     // 6. bootstrap.js -> アプリ本体(ESM) の順で読み込み
@@ -618,6 +706,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         }
     }
 
+    }
+
+    // --profile: 終了時に集計して出力する (Isolate 破棄前に必ず行う)
+    if (cpu_profiler) {
+        v8::Isolate::Scope iso_scope(runtime.isolate());
+        v8::HandleScope hs(runtime.isolate());
+        v8::CpuProfile* p = cpu_profiler->StopProfiling(
+            v8::String::NewFromUtf8Literal(runtime.isolate(), "next2d"));
+        if (p) {
+            WriteCpuProfile(p, kProfileIntervalUs);
+            p->Delete();
+        }
+        cpu_profiler->Dispose();
+        cpu_profiler = nullptr;
     }
 
     // 8. 後始末: v8::Global を保持するものは Isolate 破棄前に必ず明示解放する。

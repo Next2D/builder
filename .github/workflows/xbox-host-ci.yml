@@ -49,7 +49,23 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: ilammy/msvc-dev-cmd@v1
+      # MSVC 環境 (vcvars64) をサードパーティ action なしで設定する。
+      # ilammy/msvc-dev-cmd は Node20 非推奨警告が出るため、実体である
+      # 「vcvars64.bat を実行して環境変数を GITHUB_ENV へ書き出す」処理を直接行う。
+      - name: Setup MSVC environment (vcvars64)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vs) { Write-Error "Visual Studio (VC tools) not found"; exit 1 }
+          cmd /s /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" > NUL && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              Add-Content $env:GITHUB_ENV "$($Matches[1])=$($Matches[2])"
+            }
+          }
+          Write-Host "MSVC env exported from: $vs"
 
       - name: Build & run RasterCore tests
         shell: cmd
@@ -84,43 +100,54 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: ilammy/msvc-dev-cmd@v1
+      # MSVC 環境 (vcvars64) をサードパーティ action なしで設定する。
+      # ilammy/msvc-dev-cmd は Node20 非推奨警告が出るため、実体である
+      # 「vcvars64.bat を実行して環境変数を GITHUB_ENV へ書き出す」処理を直接行う。
+      - name: Setup MSVC environment (vcvars64)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vs) { Write-Error "Visual Studio (VC tools) not found"; exit 1 }
+          cmd /s /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" > NUL && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              Add-Content $env:GITHUB_ENV "$($Matches[1])=$($Matches[2])"
+            }
+          }
+          Write-Host "MSVC env exported from: $vs"
 
       # ホストがコンソールでも使う API: 全て GAMES パーティションに必要 (欠落は fail)。
-      # 事前のローカル監査 (SDK 22621/26100/28000 のヘッダ解析) では全て GAMES 可視の
-      # はずなので、失敗時はエラー全文を出して原因 (SDK 差異/ヘッダ問題) を特定する。
+      # 事前のローカル監査 (SDK 22621/26100/28000 のヘッダ解析) では全て GAMES 可視。
+      # NOTE: cmd の複数行 if ブロックは括弧/errorlevel の罠が多い (2 回誤爆) ため、
+      #       v8-syntax-check と同じ pwsh + $LASTEXITCODE 方式に統一。
       - name: Host APIs must exist in GAMES partition
-        shell: cmd
+        shell: pwsh
         working-directory: templates/xbox
         run: |
-          rem 注意: cmd の if ブロック内の echo に半角 ( ) を含めてはならない —
-          rem ')' がブロックを途中で閉じ、以降の行が無条件実行される (前回の誤爆原因)。
-          echo SDK: %WindowsSDKVersion%
-          cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES ^
-             tests\gamecore_api_probe.cpp > host_probe.log 2>&1
-          if errorlevel 1 (
-            type host_probe.log
-            echo ::error::Game Core host API probe failed - see host_probe.log above
-            exit /b 1
-          )
-          type host_probe.log
-          echo OK: host APIs are all present in the GAMES partition
+          Write-Host "SDK: $env:WindowsSDKVersion"
+          cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES `
+             tests/gamecore_api_probe.cpp
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Game Core host API probe failed (cl errors above)"
+            exit 1
+          }
+          Write-Host "OK: host APIs are all present in the GAMES partition"
 
       # V8 platform 層の API: 欠落 = 移植時の置換 TODO リスト (情報提供、fail しない)
       - name: V8 platform-layer APIs (informational TODO list)
-        shell: cmd
+        shell: pwsh
         working-directory: templates/xbox
         run: |
-          cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES /DPROBE_V8 ^
-             tests\gamecore_api_probe.cpp > v8probe.log 2>&1
-          if errorlevel 1 (
-            echo === V8 porting TODO: these APIs are NOT in the GAMES partition ===
-            findstr /C:"error C" v8probe.log
-            echo === all other probed V8 platform APIs are available ===
-          ) else (
-            echo OK: V8 platform APIs are all present in the GAMES partition
-          )
-          exit /b 0
+          cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES /DPROBE_V8 `
+             tests/gamecore_api_probe.cpp
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "=== The cl errors above = V8 porting TODO (APIs not in GAMES partition) ==="
+          } else {
+            Write-Host "OK: V8 platform APIs are all present in the GAMES partition"
+          }
+          exit 0
 
   v8-syntax-check:
     name: V8-dependent sources compile check (MSVC)
@@ -128,7 +155,23 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: ilammy/msvc-dev-cmd@v1
+      # MSVC 環境 (vcvars64) をサードパーティ action なしで設定する。
+      # ilammy/msvc-dev-cmd は Node20 非推奨警告が出るため、実体である
+      # 「vcvars64.bat を実行して環境変数を GITHUB_ENV へ書き出す」処理を直接行う。
+      - name: Setup MSVC environment (vcvars64)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vs) { Write-Error "Visual Studio (VC tools) not found"; exit 1 }
+          cmd /s /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" > NUL && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              Add-Content $env:GITHUB_ENV "$($Matches[1])=$($Matches[2])"
+            }
+          }
+          Write-Host "MSVC env exported from: $vs"
 
       - name: Fetch V8 headers (${{ env.V8_TAG }})
         shell: pwsh

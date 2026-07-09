@@ -15,6 +15,7 @@
 #include "EmbeddedAssets.h"
 #include "EventLoop.h"
 #include "gpu/DawnContext.h"
+#include "platform/DecodeQueue.h"
 #include "platform/GamepadManager.h"
 #include "platform/AudioEngine.h"
 #include "worker/WorkerRuntime.h"
@@ -557,6 +558,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         // 音声: 再生終了した source へ "ended" を配送する
         PumpAudioEvents(runtime.isolate());
 
+        // バックグラウンドデコード完了の反映 (画像 load イベント / 音声 Promise)
+        decodequeue::Pump();
+
         // タイマー -> マイクロタスク
         event_loop.PumpTimers();
         runtime.PumpMicrotasks();
@@ -619,6 +623,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 8. 後始末: v8::Global を保持するものは Isolate 破棄前に必ず明示解放する。
     //    (スタック変数はスコープ終了 = runtime.Dispose() の後に巻き戻されるため、
     //     デストラクタ任せにすると破棄済み Isolate への Global::Reset で fail-fast する)
+    decodequeue::Shutdown(); // デコードスレッド join + 保留 complete (v8::Global) の破棄
     workers.Shutdown();      // WorkerInstance の Global<Context> / EventLoop
     event_loop.Shutdown();   // main の setTimeout/rAF コールバック (Global<Function>)
     ShutdownAudioEvents();

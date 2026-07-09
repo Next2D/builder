@@ -47,6 +47,7 @@ FILES=(
     src/bindings/Canvas.cpp
     src/bindings/Audio.cpp
     src/bindings/Gamepad.cpp
+    src/platform/DecodeQueue.cpp
 )
 for f in "${FILES[@]}"; do
     c++ -fsyntax-only -std=c++20 -Isrc -isystem "${V8INC}" \

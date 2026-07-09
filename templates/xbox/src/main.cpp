@@ -99,6 +99,8 @@ struct PerfStats {
 
 // --profile: CPU プロファイル結果を self サンプル数の降順で next2d-cpuprofile.log へ。
 // ノードツリーを再帰集計し「関数 (script:line)」毎の self 時間を出す。
+constexpr unsigned kProfileIntervalUs = 500;
+
 void DumpCpuProfileNode(const v8::CpuProfileNode* node,
                         std::map<std::string, unsigned>& self_hits)
 {
@@ -120,7 +122,7 @@ void DumpCpuProfileNode(const v8::CpuProfileNode* node,
     }
 }
 
-void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us)
+void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us, const char* reason)
 {
     std::map<std::string, unsigned> self_hits;
     DumpCpuProfileNode(profile->GetTopDownRoot(), self_hits);
@@ -136,10 +138,10 @@ void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us)
     std::ofstream ofs("next2d-cpuprofile.log", std::ios::app);
     const double dur_ms =
         static_cast<double>(profile->GetEndTime() - profile->GetStartTime()) / 1000.0;
-    char head[160];
+    char head[224];
     std::snprintf(head, sizeof(head),
-        "[cpuprofile] duration %.1fs, %u samples (interval %uus), top self-time:",
-        dur_ms / 1000.0, total, interval_us);
+        "[cpuprofile] %s: window %.1fs, %u samples (interval %uus), top self-time:",
+        reason, dur_ms / 1000.0, total, interval_us);
     std::cerr << head << std::endl;
     if (ofs) {
         ofs << head << std::endl;
@@ -158,6 +160,22 @@ void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us)
             ofs << line << std::endl;
         }
     }
+}
+
+// 現在のプロファイル窓を書き出して新しい窓を開始する。
+// 遷移スパイク (単発の長い rAF) 直後に呼ぶことで、スパイクを含む窓と含まない窓の
+// 比較から犯人関数を分離する (セッション全体の集計では定常コストに埋もれるため)。
+void DumpAndRestartProfile(v8::CpuProfiler* profiler, v8::Isolate* isolate,
+                           const char* reason)
+{
+    v8::HandleScope hs(isolate);
+    v8::CpuProfile* p = profiler->StopProfiling(
+        v8::String::NewFromUtf8Literal(isolate, "next2d"));
+    if (p) {
+        WriteCpuProfile(p, kProfileIntervalUs, reason);
+        p->Delete();
+    }
+    profiler->StartProfiling(v8::String::NewFromUtf8Literal(isolate, "next2d"));
 }
 DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
@@ -553,7 +571,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
     // --profile: 起動直後からサンプリング開始 (0.5ms 間隔)
     v8::CpuProfiler* cpu_profiler = nullptr;
-    constexpr unsigned kProfileIntervalUs = 500;
     if (profile) {
         v8::Isolate::Scope iso_scope(runtime.isolate());
         v8::HandleScope hs(runtime.isolate());
@@ -655,9 +672,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         perf_mark(perf_stats.tasks);
 
         // メインスレッドの requestAnimationFrame (アプリのロジック/描画コマンド生成)
+        const double profile_js_start = cpu_profiler ? event_loop.Now() : 0.0;
         event_loop.RunAnimationFrame(now);
         runtime.PumpMicrotasks();
         perf_mark(perf_stats.js);
+
+        // --profile: 遷移スパイク (単発の長い rAF) を検出したら窓を切り出す
+        if (cpu_profiler) {
+            const double js_ms = event_loop.Now() - profile_js_start;
+            if (js_ms > 300.0) {
+                char reason[64];
+                std::snprintf(reason, sizeof(reason), "spike (js %.0fms)", js_ms);
+                DumpAndRestartProfile(cpu_profiler, runtime.isolate(), reason);
+            }
+        }
 
         // Worker (レンダラ等) のメッセージ配送 + rAF。
         // レンダラ worker はここで WebGPU コマンドを発行し submit する。
@@ -715,7 +743,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         v8::CpuProfile* p = cpu_profiler->StopProfiling(
             v8::String::NewFromUtf8Literal(runtime.isolate(), "next2d"));
         if (p) {
-            WriteCpuProfile(p, kProfileIntervalUs);
+            WriteCpuProfile(p, kProfileIntervalUs, "final");
             p->Delete();
         }
         cpu_profiler->Dispose();

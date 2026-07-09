@@ -5,7 +5,7 @@
 #include "EventTarget.h"
 #include "ImageSource.h"
 #include "platform/DecodeQueue.h"
-#include "platform/WicDecoder.h"
+#include "platform/ImageDecoder.h"
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
@@ -85,7 +85,7 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
     decodequeue::Submit(
         // プールスレッド: WIC デコードのみ (V8 に触れない)
         [input = std::move(input), decoded, ok]() {
-            *ok = !input.empty() && DecodeImageWithWIC(input, *decoded);
+            *ok = DecodeImage(input, *decoded);
         },
         // メインスレッド: 結果を image オブジェクトへ反映し load を発火
         [isolate, image_ref, decoded, ok]() {
@@ -273,7 +273,7 @@ void CreateImageBitmap(const v8::FunctionCallbackInfo<v8::Value>& args)
 
     decodequeue::Submit(
         [input = std::move(input), decoded, ok]() {
-            *ok = DecodeImageWithWIC(input, *decoded);
+            *ok = DecodeImage(input, *decoded);
         },
         [isolate, resolver_ref, decoded, ok]() {
             v8::HandleScope hs(isolate);

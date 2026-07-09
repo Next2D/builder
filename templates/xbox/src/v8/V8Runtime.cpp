@@ -52,6 +52,9 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     //   破棄し、次回実行時に再パースする (メモリ最適化)。ゲームでは画面遷移で
     //   久々に呼ばれる関数の再パースがフレームヒッチになるため無効化する
     //   (ゲームバンドル数 MB 程度ならバイトコード常駐のメモリ増は許容範囲)。
+    // 注: PC ビルドも意図的に jitless で統一する。コンソール実機の性能を PC 検証で
+    //     忠実に再現するため (PC だけ JIT で速くするとレギュレーション下の実機で
+    //     性能問題が再発する)。
     v8::V8::SetFlagsFromString("--jitless --wasm-jitless --no-flush-bytecode");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);

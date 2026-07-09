@@ -106,6 +106,7 @@ add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
 
 target_include_directories(Next2DXboxHost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}"   # third_party/ (stb_image, dr_mp3 等)
 )
 
 # 展開レイアウト (GDK_ROOT) 使用時: include/lib を明示指定し、実行時 DLL を並べる
@@ -162,14 +163,24 @@ if(TARGET webgpu_dawn)
         COMMENT "Staging webgpu_dawn.dll next to the executable")
 endif()
 
-# WebGPU / D3D12 / GameInput / WIC / XAudio2 / GDK
+# WebGPU / D3D12 / GameInput / XAudio2 / GDK
 target_link_libraries(Next2DXboxHost PRIVATE
     d3d12
     dxgi
     dxguid
-    windowscodecs   # WIC: 画像デコード
-    dbghelp         # クラッシュハンドラのスタックトレース (StackWalk64/SymFromAddr)
 )
+
+if(NOT NEXT2D_IS_CONSOLE)
+    # デスクトップ専用 (Game Core OS に存在しない):
+    #   windowscodecs = WIC (stb_image で扱えない形式の画像デコードフォールバック)
+    #   dbghelp       = クラッシュハンドラのスタックトレース (StackWalk64/SymFromAddr)
+    # MF (mfplat 等)/d2d1/dwrite/shlwapi/winmm はソース側の #pragma comment(lib) が
+    # 同じ NEXT2D_XBOX_CONSOLE ガード内でリンク指示する。
+    target_link_libraries(Next2DXboxHost PRIVATE
+        windowscodecs
+        dbghelp
+    )
+endif()
 
 if(NEXT2D_IS_CONSOLE)
     # コンソール用ライブラリ (GDK が提供)

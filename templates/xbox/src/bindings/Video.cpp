@@ -15,14 +15,19 @@
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
+#include <string>
+#include <vector>
+
+// Media Foundation はコンソール (Game Core OS) に無いデスクトップ専用 API。
+// コンソールでは動画デコード未対応 (末尾の «CONSOLE» スタブ)。
+// 実機での動画対応は devkit 段階の課題。
+#if !NEXT2D_XBOX_CONSOLE
+
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <shlwapi.h>
 #include <wrl/client.h>
-
-#include <string>
-#include <vector>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -322,3 +327,52 @@ v8::Local<v8::Object> CreateVideoElement(v8::Isolate* isolate, HostContext* /*ho
 }
 
 } // namespace next2d
+
+#else // NEXT2D_XBOX_CONSOLE
+
+// «CONSOLE» 動画デコード未対応スタブ。
+// createElement('video') がクラッシュしないよう API 形状だけ提供する
+// (フレーム取得は常に false、canPlayType は空 = 非対応を正しく通知)。
+namespace next2d {
+
+using v8util::Str;
+using v8util::SetMethod;
+using v8util::SetValue;
+
+bool GetVideoFramePixels(v8::Isolate*, v8::Local<v8::Object>,
+                         const uint8_t** out_rgba, uint32_t* out_width, uint32_t* out_height)
+{
+    *out_rgba = nullptr;
+    *out_width = 0;
+    *out_height = 0;
+    return false;
+}
+
+v8::Local<v8::Object> CreateVideoElement(v8::Isolate* isolate, HostContext* /*host*/)
+{
+    v8::Local<v8::Object> self = v8::Object::New(isolate);
+    SetValue(isolate, self, "__isVideoElement", v8::Boolean::New(isolate, true));
+    SetValue(isolate, self, "tagName", Str(isolate, "VIDEO"));
+    SetValue(isolate, self, "localName", Str(isolate, "video"));
+    SetValue(isolate, self, "videoWidth", v8::Integer::New(isolate, 0));
+    SetValue(isolate, self, "videoHeight", v8::Integer::New(isolate, 0));
+    SetValue(isolate, self, "paused", v8::Boolean::New(isolate, true));
+    SetValue(isolate, self, "ended", v8::Boolean::New(isolate, false));
+    InstallEventTarget(isolate, self);
+    SetMethod(isolate, self, "load", [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+    SetMethod(isolate, self, "play", [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+        v8::Isolate* iso = a.GetIsolate();
+        auto r = v8::Promise::Resolver::New(iso->GetCurrentContext()).ToLocalChecked();
+        r->Resolve(iso->GetCurrentContext(), v8::Undefined(iso)).Check();
+        a.GetReturnValue().Set(r->GetPromise());
+    });
+    SetMethod(isolate, self, "pause", [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+    SetMethod(isolate, self, "canPlayType", [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+        a.GetReturnValue().Set(Str(a.GetIsolate(), ""));
+    });
+    return self;
+}
+
+} // namespace next2d
+
+#endif // !NEXT2D_XBOX_CONSOLE

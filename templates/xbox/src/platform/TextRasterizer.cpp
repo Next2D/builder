@@ -1,5 +1,12 @@
 #include "TextRasterizer.h"
 
+// DirectWrite / Direct2D / WIC はコンソール (Game Core OS) に存在しない
+// デスクトップ専用 API。コンソールでは false を返し、呼び出し側
+// (Canvas2D の fillText/measureText) が近似値へフォールバックする
+// (契約は TextRasterizer.h に明記済み)。
+// 実機でのテキスト描画品質は devkit 段階の課題 (stb_truetype + フォント同梱)。
+#if !NEXT2D_XBOX_CONSOLE
+
 #include "../bindings/RasterCore.h"
 
 #include <algorithm>
@@ -181,3 +188,22 @@ bool RasterizeTextWithDWrite(const std::string& css_font, const std::wstring& te
 }
 
 } // namespace next2d
+
+#else // NEXT2D_XBOX_CONSOLE
+
+namespace next2d {
+
+bool MeasureTextWithDWrite(const std::string&, const std::wstring&, TextMetricsInfo&)
+{
+    return false;   // 呼び出し側が近似値へフォールバックする
+}
+
+bool RasterizeTextWithDWrite(const std::string&, const std::wstring&,
+                             uint8_t, uint8_t, uint8_t, TextBitmap&)
+{
+    return false;
+}
+
+} // namespace next2d
+
+#endif // !NEXT2D_XBOX_CONSOLE

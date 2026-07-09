@@ -4,11 +4,16 @@
 // bootstrap.js とアプリ本体(ESM)の読み込み -> ゲームループ、という流れ。
 #include <Windows.h>
 #include <windowsx.h>
-#include <timeapi.h>
-#include <DbgHelp.h>
 #include <XGameRuntime.h>
 
+// winmm (timeBeginPeriod) と DbgHelp (StackWalk64) はコンソール (Game Core OS) に
+// 存在しないデスクトップ専用 API。コンソールは全画面 VSync 固定でペーシング不要、
+// クラッシュ解析はプラットフォーム側の仕組みに任せる。
+#if !NEXT2D_XBOX_CONSOLE
+#include <timeapi.h>
+#include <DbgHelp.h>
 #pragma comment(lib, "winmm.lib")
+#endif
 
 #include "HostContext.h"
 #include "AssetLoader.h"
@@ -340,7 +345,9 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
     // ウィンドウが画面(作業領域)より大きいと画面外にはみ出し、提示が
     // 見切れる/非等倍でスケールされて歪む (CI の低解像度ディスプレイで
     // 1920x1080 ウィンドウ → 描画が縦長になっていた)。作業領域に収まるよう
-    // クランプする。実機コンソールでは作業領域=全画面のため 1920x1080 のまま。
+    // クランプする。コンソールは常に全画面のためクランプ不要
+    // (SystemParametersInfo は Game Core に無い)。
+#if !NEXT2D_XBOX_CONSOLE
     RECT wa = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
         const int maxW = wa.right - wa.left;
@@ -348,6 +355,7 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
         if (maxW > 0 && width  > maxW) { width  = maxW; }
         if (maxH > 0 && height > maxH) { height = maxH; }
     }
+#endif
 
     // コンソールでは全画面相当。PC(GDK) 検証ではウィンドウ。
     const DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
@@ -363,6 +371,8 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
 // GUI 実行では stderr が見えないため、C++ クラッシュ地点を掴む唯一の手段。
 // DbgHelp の StackWalk64 で例外コンテキストからフレームを辿り、可能なら
 // シンボル名 (関数+行) とモジュールを添える (PDB があれば関数/行まで解決)。
+// コンソールには DbgHelp が無いためデスクトップ専用 (クラッシュ解析は実機ツール側)。
+#if !NEXT2D_XBOX_CONSOLE
 static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep)
 {
     std::ofstream ofs("next2d-error.log", std::ios::app);
@@ -443,15 +453,18 @@ static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep)
     SymCleanup(process);
     return EXCEPTION_EXECUTE_HANDLER;   // プロセスを終了させる (無限再入回避)
 }
+#endif // !NEXT2D_XBOX_CONSOLE
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 {
+#if !NEXT2D_XBOX_CONSOLE
     // 最初にクラッシュハンドラを設置し、以降の segfault 等でスタックを記録する。
     SetUnhandledExceptionFilter(CrashHandler);
 
     // Sleep() の分解能を 1ms に上げる (フレームペーシング用。既定 15.6ms では
-    // 60Hz を刻めない)
+    // 60Hz を刻めない)。コンソールは全画面 VSync 提示でペーシングされるため不要。
     timeBeginPeriod(1);
+#endif
 
     // --selftest: アプリの代わりに js/selftest.js を実行し、全バインディングを
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。

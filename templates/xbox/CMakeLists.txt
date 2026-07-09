@@ -137,6 +137,20 @@ if(MSVC)
     # Release でも PDB を生成する (クラッシュダンプ解析でスタックを名前解決するため)
     target_compile_options(Next2DXboxHost PRIVATE /Zi)
     target_link_options(Next2DXboxHost PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+
+    # Release: リンク時コード生成 (LTCG)。翻訳単位を跨いだインライン化が効き、
+    # 毎フレーム通る V8 バインディング層 (小さな関数の呼び出し連鎖) に有効。
+    # (VS ジェネレータでは COMPILE_OPTIONS は C++ (ClCompile) にのみ渡り、
+    #  RC (assets.rc) には影響しない。/Zi と同じ流儀)
+    target_compile_options(Next2DXboxHost PRIVATE $<$<CONFIG:Release>:/GL>)
+    target_link_options(Next2DXboxHost PRIVATE $<$<CONFIG:Release>:/LTCG>)
+
+    # /arch:AVX2: Xbox Series X|S (Zen 2) と Haswell (2013) 以降の PC で動作。
+    # ソフトラスタ (RasterCore) や pak 解析などホスト C++ の自動ベクトル化が進む。
+    # Xbox One (Jaguar) は AVX2 非対応のため除外する。
+    if(NOT CMAKE_GENERATOR_PLATFORM MATCHES "XboxOne")
+        target_compile_options(Next2DXboxHost PRIVATE /arch:AVX2)
+    endif()
 endif()
 
 # webgpu_dawn は SHARED (DLL)。実行に必要なため exe の隣へステージする

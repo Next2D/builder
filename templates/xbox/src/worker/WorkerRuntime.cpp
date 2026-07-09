@@ -7,6 +7,7 @@
 #include "bindings/ImageSource.h"
 #include "platform/ImageTypes.h"
 #include "v8/V8Util.h"
+#include "v8/CodeCache.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -535,8 +536,10 @@ bool WorkerInstance::Start()
     v8::TryCatch tc(isolate_);
     v8::ScriptOrigin origin(Str(isolate_, url_));
     v8::Local<v8::String> code = Str(isolate_, source);
+    // バイトコードキャッシュ込みでコンパイル。レンダラ worker (player の描画バンドル)
+    // が最大のパース対象。キーは自己修復パッチ適用後のソースなので整合する。
     v8::Local<v8::Script> script;
-    if (!v8::Script::Compile(context, code, &origin).ToLocal(&script) ||
+    if (!codecache::Compile(context, code, origin, url_, source).ToLocal(&script) ||
         script->Run(context).IsEmpty()) {
         std::cerr << "[Worker] script eval failed: " << ShortUrl(url_) << std::endl;
         if (tc.HasCaught()) {
@@ -573,9 +576,9 @@ v8::MaybeLocal<v8::Module> WorkerInstance::LoadModule(const std::string& url)
 
     v8::ScriptOrigin origin(Str(isolate_, url), 0, 0, false, -1,
         v8::Local<v8::Value>(), false, false, /*is_module*/ true);
-    v8::ScriptCompiler::Source source(Str(isolate_, *src), origin);
     v8::Local<v8::Module> module;
-    if (!v8::ScriptCompiler::CompileModule(isolate_, &source).ToLocal(&module)) {
+    if (!codecache::CompileModule(isolate_, Str(isolate_, *src), origin, url, *src)
+             .ToLocal(&module)) {
         std::cerr << "[Worker] module compile failed: " << ShortUrl(url) << std::endl;
         return v8::MaybeLocal<v8::Module>();
     }
@@ -622,9 +625,9 @@ bool WorkerInstance::EvaluateModule(v8::Local<v8::Context> context, const std::s
     // 直接コンパイルする(assets 経由の LoadModule は依存モジュール用)。
     v8::ScriptOrigin origin(Str(isolate_, url_), 0, 0, false, -1,
         v8::Local<v8::Value>(), false, false, /*is_module*/ true);
-    v8::ScriptCompiler::Source src(Str(isolate_, source), origin);
     v8::Local<v8::Module> module;
-    if (!v8::ScriptCompiler::CompileModule(isolate_, &src).ToLocal(&module)) {
+    if (!codecache::CompileModule(isolate_, Str(isolate_, source), origin, url_, source)
+             .ToLocal(&module)) {
         std::cerr << "[Worker] module compile failed: " << ShortUrl(url_) << std::endl;
         return false;
     }

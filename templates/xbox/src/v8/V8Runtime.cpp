@@ -1,6 +1,7 @@
 #include "V8Runtime.h"
 
 #include "V8Util.h"
+#include "CodeCache.h"
 #include "HostContext.h"
 #include "EmbeddedAssets.h"
 #include "bindings/Bindings.h"
@@ -175,8 +176,9 @@ bool V8Runtime::RunScript(const std::string& source, const std::string& name)
     v8::ScriptOrigin origin(v8util::Str(isolate_, name));
     v8::Local<v8::String> src = v8util::Str(isolate_, source);
 
+    // バイトコードキャッシュ込みでコンパイル (2回目以降の起動でパースを省略)
     v8::Local<v8::Script> script;
-    if (!v8::Script::Compile(ctx, src, &origin).ToLocal(&script)) {
+    if (!codecache::Compile(ctx, src, origin, name, source).ToLocal(&script)) {
         ReportException(&try_catch);
         return false;
     }
@@ -222,9 +224,10 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         false, false, /*is_module*/ true
     );
 
-    v8::ScriptCompiler::Source compiler_source(src, origin);
+    // バイトコードキャッシュ込みでコンパイル。アプリ本体 (数 MB の ESM バンドル) の
+    // 毎起動フルパースを 2 回目以降省略する (起動時間の主要因)。
     v8::Local<v8::Module> module;
-    if (!v8::ScriptCompiler::CompileModule(isolate_, &compiler_source).ToLocal(&module)) {
+    if (!codecache::CompileModule(isolate_, src, origin, abs, source).ToLocal(&module)) {
         return v8::MaybeLocal<v8::Module>();
     }
 

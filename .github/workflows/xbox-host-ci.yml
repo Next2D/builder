@@ -33,7 +33,7 @@ jobs:
     name: RasterCore tests + V8 syntax check (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Fetch V8 headers (${{ env.V8_TAG }})
         run: |
           git clone --depth 1 --branch "$V8_TAG" --filter=blob:none --sparse \
@@ -48,7 +48,7 @@ jobs:
     # VS2022 (v143) 世代に固定 — GDK ビルドの実ターゲットと同じ toolset で検証する
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Build & run RasterCore tests
@@ -83,18 +83,23 @@ jobs:
     name: Game Core API partition audit (WINAPI_FAMILY_GAMES)
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1
 
-      # ホストがコンソールでも使う API: 全て GAMES パーティションに必要 (欠落は fail)
+      # ホストがコンソールでも使う API: 全て GAMES パーティションに必要 (欠落は fail)。
+      # 事前のローカル監査 (SDK 22621/26100/28000 のヘッダ解析) では全て GAMES 可視の
+      # はずなので、失敗時はエラー全文を出して原因 (SDK 差異/ヘッダ問題) を特定する。
       - name: Host APIs must exist in GAMES partition
         shell: cmd
         working-directory: templates/xbox
         run: |
+          echo SDK: %WindowsSDKVersion%
           cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES ^
-             tests\gamecore_api_probe.cpp
-          if errorlevel 1 (
-            echo ::error::ホストが使用する Win32 API に Game Core 非対応のものがある (上のエラー参照)
+             tests\gamecore_api_probe.cpp > host_probe.log 2>&1
+          set CL_EXIT=%errorlevel%
+          type host_probe.log
+          if not "%CL_EXIT%"=="0" (
+            echo ::error::ホスト使用 API のプローブが失敗 (全文は上の host_probe.log 出力)
             exit /b 1
           )
           echo OK: host APIs are all present in the GAMES partition
@@ -120,7 +125,7 @@ jobs:
     # VS2022 (v143) 世代に固定 — GDK ビルドの実ターゲットと同じ toolset で検証する
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Fetch V8 headers (${{ env.V8_TAG }})

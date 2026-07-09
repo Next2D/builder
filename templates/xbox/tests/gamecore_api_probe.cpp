@@ -15,6 +15,13 @@
 //
 // 注意: これは「宣言がパーティションに含まれるか」の静的検査。実機での挙動
 // (リンク先 lib の有無・実行時の権限) は devkit での検証が別途必要。
+//
+// WIN32_LEAN_AND_MEAN は必須: GAMES ファミリではフル Windows.h が引き込む
+// 周辺ヘッダ (mmsystem/ole2/winsock 等) に GAMES 非対応部分があり
+// コンパイルが壊れる (vcpkg の Xbox トリプレットも同様の前提)。
+// 必要なヘッダは個別に include する。
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <Windows.h>
 
 #include <objbase.h>      // CoInitializeEx (DecodeQueue のスレッド COM 初期化)
@@ -22,6 +29,7 @@
 #include <xaudio2.h>      // XAudio2Create (音声出力)
 
 #ifdef PROBE_V8
+#include <timeapi.h>      // timeGetTime (V8 time.cc — GAMES 外の想定 = TODO 検出対象)
 #include <psapi.h>        // GetProcessMemoryInfo (V8 OS::GetPeakMemoryUsageKb)
 #include <process.h>      // _beginthreadex (V8 Thread)
 #endif

@@ -30,6 +30,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <cstdio>
 #include <cstring>
 
 namespace fs = std::filesystem;
@@ -38,6 +39,56 @@ using namespace next2d;
 namespace {
 
 bool g_running = true;
+
+// --- --perf: フレーム統計 ---------------------------------------------------
+// メインループの各区間の所要時間 (ms) を集計し、300 フレーム毎に 1 行で出力する。
+// avg でボトルネックの区間を、max でヒッチ (スパイク) の在り処を特定する。
+// GUI 実行では stderr が見えないため next2d-perf.log にも追記する。
+struct PerfSection {
+    double sum = 0.0;
+    double max = 0.0;
+    void Add(double ms)
+    {
+        sum += ms;
+        if (ms > max) {
+            max = ms;
+        }
+    }
+};
+
+struct PerfStats {
+    static constexpr int kWindow = 300;   // 60fps で約 5 秒
+    PerfSection tasks;     // 入力/音声/タイマー/マイクロタスク
+    PerfSection js;        // メイン rAF (アプリロジック/描画コマンド生成)
+    PerfSection worker;    // レンダラ worker (WebGPU コマンド発行 + submit)
+    PerfSection tick;      // V8 プラットフォームタスク + Dawn Tick
+    PerfSection present;   // Present (GPU/VSync 待ちを含む)
+    PerfSection busy;      // 上記合計 (ペーシング Sleep を除く実働)
+    PerfSection frame;     // フレーム間隔 (実効フレームレートの逆数)
+    int frames = 0;
+
+    void Flush()
+    {
+        if (frames == 0) {
+            return;
+        }
+        const auto avg = [this](const PerfSection& s) { return s.sum / frames; };
+        char line[320];
+        std::snprintf(line, sizeof(line),
+            "[perf] frame %.1fms (max %.1f) busy %.1fms | "
+            "tasks %.2f/%.1f js %.2f/%.1f worker %.2f/%.1f "
+            "tick %.2f/%.1f present %.2f/%.1f (avg/max, %d frames)",
+            avg(frame), frame.max, avg(busy),
+            avg(tasks), tasks.max, avg(js), js.max, avg(worker), worker.max,
+            avg(tick), tick.max, avg(present), present.max, frames);
+        std::cerr << line << std::endl;
+        std::ofstream ofs("next2d-perf.log", std::ios::app);
+        if (ofs) {
+            ofs << line << std::endl;
+        }
+        *this = PerfStats{};
+    }
+};
 DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
 V8Runtime* g_runtime = nullptr;
@@ -318,6 +369,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。
     const bool selftest = cmd_line && wcsstr(cmd_line, L"--selftest") != nullptr;
 
+    // --perf: フレーム統計を 300 フレーム (約 5 秒) 毎に stderr と next2d-perf.log
+    // へ出力する。どの区間 (JS / レンダラ worker / GPU / Present) にフレーム時間を
+    // 使っているかを数値化し、以降の最適化 (worker 並列化等) の要否判断に使う。
+    const bool perf = cmd_line && wcsstr(cmd_line, L"--perf") != nullptr;
+
     // 1. GDK ランタイム初期化。
     // デスクトップでは Gaming Services 未導入の環境 (CI ランナー等) でも
     // 起動できるよう、失敗を警告に留めて続行する (本ホストは XUser 等を未使用)。
@@ -459,6 +515,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 7. ゲームループ
     MSG msg = {};
     int exit_code = 0;
+    PerfStats perf_stats;
+    double perf_prev_frame = 0.0;
     // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
     // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
     {
@@ -478,6 +536,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
         const double now = event_loop.Now();
 
+        // --perf: 直前の計測点からの経過を各区間へ記録する軽量マーカー
+        double perf_cursor = now;
+        const auto perf_mark = [&](PerfSection& section) {
+            if (!perf) {
+                return;
+            }
+            const double t = event_loop.Now();
+            section.Add(t - perf_cursor);
+            perf_cursor = t;
+        };
+
         v8::HandleScope handle_scope(runtime.isolate());
         v8::Local<v8::Context> ctx = runtime.context();
         v8::Context::Scope context_scope(ctx);
@@ -491,21 +560,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         // タイマー -> マイクロタスク
         event_loop.PumpTimers();
         runtime.PumpMicrotasks();
+        perf_mark(perf_stats.tasks);
 
         // メインスレッドの requestAnimationFrame (アプリのロジック/描画コマンド生成)
         event_loop.RunAnimationFrame(now);
         runtime.PumpMicrotasks();
+        perf_mark(perf_stats.js);
 
         // Worker (レンダラ等) のメッセージ配送 + rAF。
         // レンダラ worker はここで WebGPU コマンドを発行し submit する。
         workers.Pump(now);
+        perf_mark(perf_stats.worker);
 
         // V8 プラットフォームタスク + Dawn の非同期処理
         runtime.PumpPlatformTasks();
         dawn.Tick();
+        perf_mark(perf_stats.tick);
 
         // 提示
         dawn.Present();
+        perf_mark(perf_stats.present);
+
+        if (perf) {
+            perf_stats.busy.Add(perf_cursor - now);
+            if (perf_prev_frame > 0.0) {
+                perf_stats.frame.Add(now - perf_prev_frame);
+            }
+            perf_prev_frame = now;
+            if (++perf_stats.frames >= PerfStats::kWindow) {
+                perf_stats.Flush();
+            }
+        }
 
         // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える。
         // Present はスキップ時にブロックしないため、これが無いとループが

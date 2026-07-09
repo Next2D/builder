@@ -1,6 +1,11 @@
 #include "DawnContext.h"
 
 #include <Windows.h>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -39,6 +44,117 @@ void HandleUncapturedError(const wgpu::Device&, wgpu::ErrorType type, wgpu::Stri
         + "): " + std::string(message.data, message.length);
     std::cerr << line << std::endl;
     AppendGpuLog(line);
+}
+
+// --- GPU Blob キャッシュ (シェーダ/パイプラインのコンパイル結果) -------------
+// D3D12 の HLSL コンパイル (FXC) はパイプライン初回生成時に走り、起動直後や
+// 新しいエフェクト初出時のフレームヒッチの原因になる。Dawn の BlobCache を
+// %LOCALAPPDATA%\Next2D\gpucache に永続化し、2 回目以降の起動で再利用する
+// (V8 バイトコードキャッシュの GPU 版)。
+// 呼び出し規約 (dawn/native/BlobCache.cpp LoadInternal で検証済み):
+//   load は 2 段階 — まず value=nullptr でサイズ問い合わせ (戻り値 0 = miss)、
+//   次に確保済みバッファへの読み込み (戻り値がサイズと不一致なら miss 扱い)。
+// キーには Dawn がアダプタ/ドライバ情報を織り込むため、環境が変われば自然に
+// 別エントリになる。あらゆる失敗は 0 / 何もしない (graceful degrade)。
+
+uint64_t Fnv1a(const void* data, size_t size, uint64_t hash = 1469598103934665603ull)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+const std::filesystem::path& GpuCacheDir()
+{
+    static const std::filesystem::path dir = []() -> std::filesystem::path {
+        const char* base = std::getenv("LOCALAPPDATA");
+        if (!base || !*base) {
+            return {};
+        }
+        std::error_code ec;
+        std::filesystem::path d = std::filesystem::path(base) / "Next2D" / "gpucache";
+        std::filesystem::create_directories(d, ec);
+        if (ec) {
+            return {};
+        }
+        // ドライバ/Dawn 更新でキーが変わると旧 blob は孤児になる。
+        // 30 日アクセスの無い .blob を掃除する (load ヒット時に touch する LRU)。
+        const auto now = std::filesystem::file_time_type::clock::now();
+        std::error_code iter_ec;
+        for (const auto& entry : std::filesystem::directory_iterator(d, iter_ec)) {
+            std::error_code e2;
+            if (entry.path().extension() != ".blob") {
+                continue;
+            }
+            const auto t = std::filesystem::last_write_time(entry.path(), e2);
+            if (!e2 && now - t > std::chrono::hours(24 * 30)) {
+                std::filesystem::remove(entry.path(), e2);
+            }
+        }
+        return d;
+    }();
+    return dir;
+}
+
+std::filesystem::path GpuCacheFileFor(const void* key, size_t key_size)
+{
+    const std::filesystem::path& dir = GpuCacheDir();
+    if (dir.empty()) {
+        return {};
+    }
+    char buf[17] = {};
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(Fnv1a(key, key_size)));
+    return dir / (std::string(buf) + ".blob");
+}
+
+size_t LoadGpuCacheData(const void* key, size_t key_size,
+                        void* value, size_t value_size, void*)
+{
+    const std::filesystem::path file = GpuCacheFileFor(key, key_size);
+    if (file.empty()) {
+        return 0;
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(file, ec);
+    if (ec || size == 0) {
+        return 0;
+    }
+    if (value == nullptr) {
+        // 1 段階目: サイズ問い合わせ
+        return static_cast<size_t>(size);
+    }
+    if (value_size < size) {
+        return 0;
+    }
+    std::ifstream ifs(file, std::ios::binary);
+    if (!ifs || !ifs.read(static_cast<char*>(value), static_cast<std::streamsize>(size))) {
+        return 0;
+    }
+    // 使用時に touch して 30 日掃除を LRU として機能させる
+    std::filesystem::last_write_time(
+        file, std::filesystem::file_time_type::clock::now(), ec);
+    return static_cast<size_t>(size);
+}
+
+void StoreGpuCacheData(const void* key, size_t key_size,
+                       const void* value, size_t value_size, void*)
+{
+    if (!value || value_size == 0) {
+        return;
+    }
+    const std::filesystem::path file = GpuCacheFileFor(key, key_size);
+    if (file.empty()) {
+        return;
+    }
+    std::ofstream ofs(file, std::ios::binary | std::ios::trunc);
+    if (ofs) {
+        ofs.write(static_cast<const char*>(value),
+                  static_cast<std::streamsize>(value_size));
+    }
 }
 
 } // namespace
@@ -117,6 +233,14 @@ bool DawnContext::AcquireDevice()
     device_desc.SetDeviceLostCallback(wgpu::CallbackMode::AllowProcessEvents, HandleDeviceLost);
     device_desc.SetUncapturedErrorCallback(HandleUncapturedError);
 
+    // GPU Blob キャッシュを接続する (シェーダコンパイル結果の永続化)。
+    // 関数ポインタは Dawn が device 生成時に BlobCache へコピーするため、
+    // この記述子自体は RequestDevice 完了までの生存で足りる。
+    wgpu::DawnCacheDeviceDescriptor cache_desc = {};
+    cache_desc.loadDataFunction  = LoadGpuCacheData;
+    cache_desc.storeDataFunction = StoreGpuCacheData;
+    device_desc.nextInChain = &cache_desc;
+
 #ifdef NDEBUG
     // Release では Dawn の API 検証 (skip_validation) と robustness (OOB クランプ) を
     // 無効化する。両方とも全描画コマンドのエンコードで毎フレーム CPU を消費する
@@ -128,7 +252,7 @@ bool DawnContext::AcquireDevice()
     wgpu::DawnTogglesDescriptor device_toggles = {};
     device_toggles.enabledToggles     = kReleaseToggles;
     device_toggles.enabledToggleCount = 2;
-    device_desc.nextInChain = &device_toggles;
+    cache_desc.nextInChain = &device_toggles;  // device -> cache -> toggles
 #endif
 
     wgpu::Future device_future = adapter_.RequestDevice(

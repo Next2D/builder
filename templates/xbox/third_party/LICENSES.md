@@ -6,6 +6,7 @@
 | ファイル | 提供元 | ライセンス |
 |---|---|---|
 | stb_image.h | https://github.com/nothings/stb | public domain (Unlicense) / MIT のデュアル |
+| stb_truetype.h | https://github.com/nothings/stb | public domain (Unlicense) / MIT のデュアル |
 | stb_vorbis.c | https://github.com/nothings/stb | public domain (Unlicense) / MIT のデュアル |
 | dr_mp3.h | https://github.com/mackron/dr_libs | public domain (Unlicense) / MIT-0 のデュアル |
 | dr_wav.h | https://github.com/mackron/dr_libs | public domain (Unlicense) / MIT-0 のデュアル |

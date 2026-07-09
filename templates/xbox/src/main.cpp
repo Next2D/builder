@@ -23,6 +23,7 @@
 #include "platform/DecodeQueue.h"
 #include "platform/GamepadManager.h"
 #include "platform/AudioEngine.h"
+#include "platform/StbTextRasterizer.h"
 #include "worker/WorkerRuntime.h"
 #include "bindings/Bindings.h"
 #include "bindings/EventTarget.h"
@@ -507,6 +508,43 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     if (InitEmbeddedAssets()) {
         SetEmbeddedAssetsRoot(assets_app.string());
         std::cerr << "[Assets] using embedded pak" << std::endl;
+    }
+
+    // フォント登録 (stb_truetype 用)。コンソールにはシステムフォント/DirectWrite が
+    // 無いため、資材内の TTF/OTF を stbtext レジストリへ登録しておく
+    // (デスクトップは DirectWrite が主経路のため未使用でも無害)。
+    // 対象: 埋め込み pak 内の *.ttf/*.otf + exe 隣接 fonts/ (開発ビルド用)。
+    {
+        const auto register_font = [](const std::string& name,
+                                      std::vector<uint8_t> bytes) {
+            if (stbtext::RegisterFont(name, std::move(bytes))) {
+                std::cerr << "[Font] registered: " << name << std::endl;
+            }
+        };
+        const auto is_font_key = [](const std::string& key) {
+            const auto dot = key.find_last_of('.');
+            if (dot == std::string::npos) return false;
+            const std::string ext = key.substr(dot + 1);
+            return ext == "ttf" || ext == "otf" || ext == "TTF" || ext == "OTF";
+        };
+        ForEachEmbeddedAsset(
+            [&](const std::string& key, const std::vector<uint8_t>& data) {
+                if (is_font_key(key)) {
+                    register_font(fs::path(key).stem().string(), data);
+                }
+            });
+        std::error_code fonts_ec;
+        for (const auto& entry :
+             fs::directory_iterator(exe_dir / "fonts", fonts_ec)) {
+            const std::string p = entry.path().string();
+            if (is_font_key(p)) {
+                std::ifstream ifs(entry.path(), std::ios::binary);
+                std::vector<uint8_t> bytes(
+                    (std::istreambuf_iterator<char>(ifs)),
+                    std::istreambuf_iterator<char>());
+                register_font(entry.path().stem().string(), std::move(bytes));
+            }
+        }
     }
 
     // 2. HostContext と論理ビューポート

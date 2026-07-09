@@ -116,6 +116,18 @@ const std::vector<uint8_t>* GetEmbeddedAsset(const std::string& key)
     return it == g_assets.end() ? nullptr : &it->second;
 }
 
+void ForEachEmbeddedAsset(
+    const std::function<void(const std::string& key,
+                             const std::vector<uint8_t>& data)>& callback)
+{
+    if (!g_has) {
+        return;
+    }
+    for (const auto& [key, data] : g_assets) {
+        callback(key, data);
+    }
+}
+
 const std::vector<uint8_t>* GetEmbeddedAssetByAbsPath(const std::string& abs)
 {
     if (!g_has || g_root.empty()) {

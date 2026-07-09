@@ -191,17 +191,23 @@ bool RasterizeTextWithDWrite(const std::string& css_font, const std::wstring& te
 
 #else // NEXT2D_XBOX_CONSOLE
 
+// コンソール: stb_truetype 実装へ委譲する。フォントは main.cpp が起動時に
+// 埋め込み資材 (*.ttf/*.otf) から登録する。未登録なら false を返し、
+// 呼び出し側 (Canvas2D) が近似値へフォールバックする。
+#include "StbTextRasterizer.h"
+
 namespace next2d {
 
-bool MeasureTextWithDWrite(const std::string&, const std::wstring&, TextMetricsInfo&)
+bool MeasureTextWithDWrite(const std::string& css_font, const std::wstring& text,
+                           TextMetricsInfo& out)
 {
-    return false;   // 呼び出し側が近似値へフォールバックする
+    return stbtext::MeasureText(css_font, text, out);
 }
 
-bool RasterizeTextWithDWrite(const std::string&, const std::wstring&,
-                             uint8_t, uint8_t, uint8_t, TextBitmap&)
+bool RasterizeTextWithDWrite(const std::string& css_font, const std::wstring& text,
+                             uint8_t r, uint8_t g, uint8_t b, TextBitmap& out)
 {
-    return false;
+    return stbtext::RasterizeText(css_font, text, r, g, b, out);
 }
 
 } // namespace next2d

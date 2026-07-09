@@ -20,7 +20,10 @@
 #include "../src/platform/ImageDecoder.h"
 #include "../src/platform/AudioDecoder.h"
 #include "../src/platform/TextRasterizer.h"
+#include "../src/platform/StbTextRasterizer.h"
 #include "../src/platform/AudioEngine.h"
+
+#include <fstream>
 
 #include <Windows.h>
 #include <mfapi.h>
@@ -152,6 +155,40 @@ static void TestTextRasterizer()
     CHECK(!next2d::RasterizeTextWithDWrite("24px Segoe UI", L"", 0, 0, 0, empty));
 }
 
+// --- stb_truetype: コンソールのテキスト経路 (TextRasterizer の #else 分岐実体) --
+// コンソールでは DirectWrite が無く StbTextRasterizer が fillText/measureText を
+// 担う。Windows の実フォント (arial.ttf) で同一コードを検証する。
+static void TestStbText()
+{
+    // フォント未登録では false
+    next2d::TextMetricsInfo none;
+    CHECK(!next2d::stbtext::MeasureText("24px Arial", L"Hi", none));
+
+    wchar_t windir[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"WINDIR", windir, MAX_PATH);
+    std::wstring font_path = std::wstring(windir) + L"\\Fonts\\arial.ttf";
+    std::ifstream ifs(font_path.c_str(), std::ios::binary);
+    std::vector<uint8_t> font((std::istreambuf_iterator<char>(ifs)),
+                              std::istreambuf_iterator<char>());
+    CHECK(!font.empty());
+    CHECK(next2d::stbtext::RegisterFont("Arial", std::move(font)));
+
+    next2d::TextMetricsInfo m;
+    CHECK(next2d::stbtext::MeasureText("24px Arial", L"Hello", m));
+    CHECK(m.width > 10.0 && m.width < 200.0);
+    CHECK(m.ascent > 5.0 && m.ascent < 40.0);
+
+    next2d::TextBitmap bmp;
+    CHECK(next2d::stbtext::RasterizeText("24px Arial", L"A", 255, 0, 0, bmp));
+    CHECK(bmp.width > 0 && bmp.height > 0 && bmp.baseline > 0);
+    int opaque = 0;
+    for (size_t i = 3; i < bmp.rgba.size(); i += 4) if (bmp.rgba[i] > 200) ++opaque;
+    CHECK(opaque > 5);
+
+    next2d::TextBitmap empty;
+    CHECK(!next2d::stbtext::RasterizeText("24px Arial", L"", 0, 0, 0, empty));
+}
+
 // --- 音声デコード (decodeAudioData の実体) -----------------------------------
 // AudioEngine::Decode は第一経路 dr_wav/dr_mp3/stb_vorbis (コンソールでも同一)、
 // フォールバックが Media Foundation。両経路を検証する。
@@ -210,6 +247,7 @@ int main()
     TestWicDecode();
     TestImageDecoder();
     TestTextRasterizer();
+    TestStbText();
     TestAudioDecode();
     TestAudioEngineInit();
 

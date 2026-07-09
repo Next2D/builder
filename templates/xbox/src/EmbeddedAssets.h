@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,12 @@ void SetEmbeddedAssetsRoot(const std::string& abs_root);
 
 // 相対キー直接指定で検索する。見つかればバイト列ポインタ(プロセス生存中有効)、無ければ nullptr。
 const std::vector<uint8_t>* GetEmbeddedAsset(const std::string& key);
+
+// 全エントリを列挙する (フォント等、キーが事前に分からない資材の収集用)。
+// callback には key とデータ (プロセス生存中有効) が渡る。
+void ForEachEmbeddedAsset(
+    const std::function<void(const std::string& key,
+                             const std::vector<uint8_t>& data)>& callback);
 
 // モジュールローダ用: assets/app 配下の絶対パスを相対キーへ変換して検索する。
 // root 未登録 / abs が root 配下でない場合は nullptr。

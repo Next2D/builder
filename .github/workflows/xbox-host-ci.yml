@@ -93,12 +93,14 @@ jobs:
         shell: cmd
         working-directory: templates/xbox
         run: |
+          rem 注意: cmd の if ブロック内の echo に半角 ( ) を含めてはならない —
+          rem ')' がブロックを途中で閉じ、以降の行が無条件実行される (前回の誤爆原因)。
           echo SDK: %WindowsSDKVersion%
           cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES ^
              tests\gamecore_api_probe.cpp > host_probe.log 2>&1
           if errorlevel 1 (
             type host_probe.log
-            echo ::error::ホスト使用 API のプローブが失敗 (全文は上の host_probe.log 出力)
+            echo ::error::Game Core host API probe failed - see host_probe.log above
             exit /b 1
           )
           type host_probe.log
@@ -112,9 +114,9 @@ jobs:
           cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES /DPROBE_V8 ^
              tests\gamecore_api_probe.cpp > v8probe.log 2>&1
           if errorlevel 1 (
-            echo === V8 Game Core 移植時に置換が必要な API (GAMES パーティションに無い) ===
+            echo === V8 porting TODO: these APIs are NOT in the GAMES partition ===
             findstr /C:"error C" v8probe.log
-            echo === 上記以外の V8 platform API は SDK 宣言レベルで利用可能 ===
+            echo === all other probed V8 platform APIs are available ===
           ) else (
             echo OK: V8 platform APIs are all present in the GAMES partition
           )

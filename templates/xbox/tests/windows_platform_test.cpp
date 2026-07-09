@@ -3,9 +3,10 @@
 // windows-latest ランナーで実行して「Windows 上で実際に動く」ことを検証する。
 //
 // ビルド (Developer Command Prompt / CI):
-//   cl /std:c++17 /EHsc /Isrc tests\windows_platform_test.cpp ^
+//   cl /std:c++17 /EHsc /Isrc /I. tests\windows_platform_test.cpp ^
 //      src\platform\WicDecoder.cpp src\platform\TextRasterizer.cpp ^
 //      src\platform\AudioEngine.cpp ^
+//      src\platform\ImageDecoder.cpp src\platform\AudioDecoder.cpp ^
 //      ole32.lib windowscodecs.lib d2d1.lib dwrite.lib ^
 //      mfplat.lib mfreadwrite.lib mfuuid.lib xaudio2.lib shlwapi.lib
 //
@@ -16,6 +17,8 @@
 #endif
 
 #include "../src/platform/WicDecoder.h"
+#include "../src/platform/ImageDecoder.h"
+#include "../src/platform/AudioDecoder.h"
 #include "../src/platform/TextRasterizer.h"
 #include "../src/platform/AudioEngine.h"
 
@@ -89,6 +92,24 @@ static void TestWicDecode()
     CHECK(!next2d::DecodeImageWithWIC(garbage, bad));
 }
 
+// --- ImageDecoder: 本番の第一経路 (stb_image。コンソールでも同一コード) --------
+static void TestImageDecoder()
+{
+    std::vector<uint8_t> png(kTestPng, kTestPng + sizeof(kTestPng));
+    next2d::DecodedImage img;
+    CHECK(next2d::DecodeImage(png, img));
+    CHECK(img.width == 2 && img.height == 2);
+    CHECK(img.rgba.size() == 16);
+    CHECK(img.rgba[0] == 255 && img.rgba[1] == 0 && img.rgba[2] == 0 && img.rgba[3] == 255);
+    CHECK(img.rgba[4] == 0 && img.rgba[5] == 255 && img.rgba[6] == 0);
+    CHECK(img.rgba[8] == 0 && img.rgba[9] == 0 && img.rgba[10] == 255);
+    CHECK(img.rgba[15] == 128);
+
+    std::vector<uint8_t> garbage(32, 0xAB);
+    next2d::DecodedImage bad;
+    CHECK(!next2d::DecodeImage(garbage, bad));
+}
+
 // --- DirectWrite: メトリクスとグリフラスタライズ (fillText の実体) ----------
 static void TestTextRasterizer()
 {
@@ -131,7 +152,9 @@ static void TestTextRasterizer()
     CHECK(!next2d::RasterizeTextWithDWrite("24px Segoe UI", L"", 0, 0, 0, empty));
 }
 
-// --- Media Foundation: 音声デコード (decodeAudioData の実体) -----------------
+// --- 音声デコード (decodeAudioData の実体) -----------------------------------
+// AudioEngine::Decode は第一経路 dr_wav/dr_mp3/stb_vorbis (コンソールでも同一)、
+// フォールバックが Media Foundation。両経路を検証する。
 static void TestAudioDecode()
 {
     std::vector<uint8_t> wav(kTestWav, kTestWav + sizeof(kTestWav));
@@ -139,11 +162,21 @@ static void TestAudioDecode()
     CHECK(next2d::AudioEngine::Decode(wav, pcm));
     CHECK(pcm.sample_rate == 48000);
     CHECK(pcm.channels == 1);
-    CHECK(pcm.samples.size() >= 40);   // 48 サンプル前後 (MF は端数調整あり)
+    CHECK(pcm.samples.size() >= 40);   // 48 サンプル前後
     // 振幅 0.5 の矩形波 → ピーク絶対値が 0.4〜0.6
     float peak = 0;
     for (float s : pcm.samples) peak = std::max(peak, std::fabs(s));
     CHECK(peak > 0.4f && peak < 0.6f);
+
+    // ポータブルデコーダ単体 (本番の第一経路) も直接検証
+    next2d::PcmBuffer pcm2;
+    CHECK(next2d::DecodeAudio(wav, pcm2));
+    CHECK(pcm2.sample_rate == 48000 && pcm2.channels == 1);
+    CHECK(pcm2.samples.size() >= 40);
+
+    std::vector<uint8_t> garbage(32, 0xAB);
+    next2d::PcmBuffer bad;
+    CHECK(!next2d::DecodeAudio(garbage, bad));
 }
 
 // --- XAudio2: 初期化 (ヘッドレス CI では音声デバイスが無く失敗し得る → warn) --
@@ -175,6 +208,7 @@ int main()
     MFStartup(MF_VERSION);
 
     TestWicDecode();
+    TestImageDecoder();
     TestTextRasterizer();
     TestAudioDecode();
     TestAudioEngineInit();

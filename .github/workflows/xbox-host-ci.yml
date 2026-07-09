@@ -56,15 +56,19 @@ jobs:
           if errorlevel 1 exit /b 1
           raster_test.exe
 
-      - name: Build & run Windows platform tests (WIC/DirectWrite/MF/XAudio2)
+      - name: Build & run Windows platform tests (WIC/DirectWrite/MF/XAudio2/stb/dr)
         shell: cmd
         working-directory: templates/xbox
         run: |
-          cl /nologo /std:c++17 /EHsc /W3 /DNOMINMAX /Isrc ^
+          rem /I. は third_party/ (stb_image, dr_mp3 等) の include 用。
+          rem ImageDecoder/AudioDecoder はポータブルな第一経路 (AudioEngine::Decode が参照)。
+          cl /nologo /std:c++17 /EHsc /W3 /DNOMINMAX /Isrc /I. ^
              tests\windows_platform_test.cpp ^
              src\platform\WicDecoder.cpp ^
              src\platform\TextRasterizer.cpp ^
              src\platform\AudioEngine.cpp ^
+             src\platform\ImageDecoder.cpp ^
+             src\platform\AudioDecoder.cpp ^
              /Fe:platform_test.exe ^
              ole32.lib uuid.lib windowscodecs.lib d2d1.lib dwrite.lib ^
              mfplat.lib mfreadwrite.lib mfuuid.lib xaudio2.lib shlwapi.lib

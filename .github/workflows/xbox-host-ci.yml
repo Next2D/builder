@@ -96,12 +96,12 @@ jobs:
           echo SDK: %WindowsSDKVersion%
           cl /nologo /std:c++17 /W3 /c /DWINAPI_FAMILY=WINAPI_FAMILY_GAMES ^
              tests\gamecore_api_probe.cpp > host_probe.log 2>&1
-          set CL_EXIT=%errorlevel%
-          type host_probe.log
-          if not "%CL_EXIT%"=="0" (
+          if errorlevel 1 (
+            type host_probe.log
             echo ::error::ホスト使用 API のプローブが失敗 (全文は上の host_probe.log 出力)
             exit /b 1
           )
+          type host_probe.log
           echo OK: host APIs are all present in the GAMES partition
 
       # V8 platform 層の API: 欠落 = 移植時の置換 TODO リスト (情報提供、fail しない)

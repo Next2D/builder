@@ -47,9 +47,13 @@ FILES=(
     src/bindings/Canvas.cpp
     src/bindings/Audio.cpp
     src/bindings/Gamepad.cpp
+    src/platform/DecodeQueue.cpp
+    src/platform/AudioDecoder.cpp
+    src/platform/ImageDecoder.cpp
+    src/platform/StbTextRasterizer.cpp
 )
 for f in "${FILES[@]}"; do
-    c++ -fsyntax-only -std=c++20 -Isrc -isystem "${V8INC}" \
+    c++ -fsyntax-only -std=c++20 -Isrc -I. -isystem "${V8INC}" \
         -DV8_COMPRESS_POINTERS "$f"
     echo "OK   $f"
 done

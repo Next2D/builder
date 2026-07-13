@@ -1,7 +1,9 @@
 #include "V8Runtime.h"
 
 #include "V8Util.h"
+#include "CodeCache.h"
 #include "HostContext.h"
+#include "EmbeddedAssets.h"
 #include "bindings/Bindings.h"
 
 #include <filesystem>
@@ -46,7 +48,14 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     // - JS: --jitless (Ignition インタプリタのみ・RWX ページ無し)
     // - WebAssembly: --wasm-jitless (DrumBrake = V8 の wasm インタープリタ。
     //   prebuilt V8 r2 は v8_enable_drumbrake=true でビルドされている)
-    v8::V8::SetFlagsFromString("--jitless --wasm-jitless");
+    // - --no-flush-bytecode: V8 は既定でしばらく実行されない関数のバイトコードを
+    //   破棄し、次回実行時に再パースする (メモリ最適化)。ゲームでは画面遷移で
+    //   久々に呼ばれる関数の再パースがフレームヒッチになるため無効化する
+    //   (ゲームバンドル数 MB 程度ならバイトコード常駐のメモリ増は許容範囲)。
+    // 注: PC ビルドも意図的に jitless で統一する。コンソール実機の性能を PC 検証で
+    //     忠実に再現するため (PC だけ JIT で速くするとレギュレーション下の実機で
+    //     性能問題が再発する)。
+    v8::V8::SetFlagsFromString("--jitless --wasm-jitless --no-flush-bytecode");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);
     v8::V8::InitializeExternalStartupData(exec_path);
@@ -78,6 +87,14 @@ bool V8Runtime::Initialize(HostContext* host)
 
     create_params_.array_buffer_allocator =
         v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+
+    // 60fps のゲームはフレーム毎に短命オブジェクト (ディスクリプタ/一時配列) を
+    // 大量生成する。young generation を既定 (十数 MB) から 64MB へ拡大して
+    // scavenge (minor GC) の頻度を下げ、マイクロヒッチを減らす。
+    // scavenge の停止時間は生存オブジェクト量に比例し空間サイズには比例しないため、
+    // 拡大はほぼ純粋に頻度低減として効く。
+    create_params_.constraints.set_max_young_generation_size_in_bytes(
+        64 * 1024 * 1024);
 
     isolate_ = v8::Isolate::New(create_params_);
     isolate_->SetData(kHostContextSlot, host);
@@ -162,8 +179,9 @@ bool V8Runtime::RunScript(const std::string& source, const std::string& name)
     v8::ScriptOrigin origin(v8util::Str(isolate_, name));
     v8::Local<v8::String> src = v8util::Str(isolate_, source);
 
+    // バイトコードキャッシュ込みでコンパイル (2回目以降の起動でパースを省略)
     v8::Local<v8::Script> script;
-    if (!v8::Script::Compile(ctx, src, &origin).ToLocal(&script)) {
+    if (!codecache::Compile(ctx, src, origin, name, source).ToLocal(&script)) {
         ReportException(&try_catch);
         return false;
     }
@@ -188,35 +206,17 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         return cached->second.Get(isolate_);
     }
 
-    std::string source = ReadTextFile(abs);
-    if (source.empty() && !fs::exists(abs)) {
-        v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
-        return v8::MaybeLocal<v8::Module>();
-    }
-
-    // «診断» Tween(Job) の凍結調査: app.js の Job 更新コードへトレースを注入する。
-    // rAF が 2 本 (ticker + 1 Job) のまま描画が止まる現象の currentTime/duration の
-    // 実値を観測する。パターン不一致なら無変更 (ログのみ)。
-    if (source.find("(e.currentTime=(t-e.startTime)/1e3,") != std::string::npos) {
-        const auto patch = [&source](const std::string& from, const std::string& to) {
-            const auto pos = source.find(from);
-            if (pos != std::string::npos) {
-                source.replace(pos, from.size(), to);
-            } else {
-                std::cerr << "[V8] job trace patch not applied: "
-                          << from.substr(0, 40) << std::endl;
-            }
-        };
-        patch("(e.currentTime=(t-e.startTime)/1e3,",
-              "(e.currentTime=(t-e.startTime)/1e3,"
-              "((globalThis.__jt=(globalThis.__jt||0)+1)<=60||globalThis.__jt%600===0)&&"
-              "console.info(\"[jobtrace] #\"+globalThis.__jt,"
-              "\"ct=\"+e.currentTime.toFixed(3),\"dur=\"+e.duration,"
-              "\"t=\"+t.toFixed(1),\"st=\"+e.startTime.toFixed(1)),");
-        patch("e.currentTime>=e.duration?(",
-              "e.currentTime>=e.duration?("
-              "console.info(\"[jobtrace] COMPLETE dur=\"+e.duration),");
-        std::cerr << "[V8] job trace patch applied to " << abs << std::endl;
+    // 埋め込みモード優先: exe 内に格納された assets/app を先に探す (平文 JS を置かない)。
+    // 埋め込みが無い開発ビルドでは nullptr が返り、従来どおりファイルから読む。
+    std::string source;
+    if (const auto* embedded = GetEmbeddedAssetByAbsPath(abs)) {
+        source.assign(embedded->begin(), embedded->end());
+    } else {
+        source = ReadTextFile(abs);
+        if (source.empty() && !fs::exists(abs)) {
+            v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
+            return v8::MaybeLocal<v8::Module>();
+        }
     }
 
     v8::Local<v8::String> src = v8util::Str(isolate_, source);
@@ -227,9 +227,10 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         false, false, /*is_module*/ true
     );
 
-    v8::ScriptCompiler::Source compiler_source(src, origin);
+    // バイトコードキャッシュ込みでコンパイル。アプリ本体 (数 MB の ESM バンドル) の
+    // 毎起動フルパースを 2 回目以降省略する (起動時間の主要因)。
     v8::Local<v8::Module> module;
-    if (!v8::ScriptCompiler::CompileModule(isolate_, &compiler_source).ToLocal(&module)) {
+    if (!codecache::CompileModule(isolate_, src, origin, abs, source).ToLocal(&module)) {
         return v8::MaybeLocal<v8::Module>();
     }
 

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,10 +27,18 @@ struct SubPath {
 
 struct RGBA { uint8_t r=0,g=0,b=0,a=255; };
 
-// クリップ矩形 (デバイス座標, [x0,x1) x [y0,y1))。active=false なら無制限。
+// クリップ領域 (デバイス座標)。
+//   active=false          … 無制限
+//   active=true, mask=null … 矩形クリップ [x0,x1) x [y0,y1) (厳密)
+//   mask!=null            … 任意形状クリップ。x0..y1 は外接矩形 (高速リジェクト用)、
+//                            mask は surface と同寸のカバレッジ (1=内側/0=外側)。
+// mask は shared_ptr のため save()/restore() の state コピーで安価に共有される
+// (clip() は既存 mask を破壊せず新しい mask を割り当てるので復元が壊れない)。
 struct ClipRect {
     bool   active = false;
     double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    std::shared_ptr<const std::vector<uint8_t>> mask;
+    int mask_w = 0, mask_h = 0;
 };
 
 // RGBA8 のピクセルバッファ。
@@ -101,6 +110,9 @@ inline void Blend(Surface& s, const ClipRect& clip, int x, int y, const RGBA& co
 {
     if (x < 0 || y < 0 || x >= s.width || y >= s.height) return;
     if (clip.active && (x < clip.x0 || x >= clip.x1 || y < clip.y0 || y >= clip.y1)) return;
+    // 任意形状クリップ: マスクの外なら書き込まない。
+    if (clip.mask && (x >= clip.mask_w || y >= clip.mask_h ||
+                      (*clip.mask)[static_cast<size_t>(y) * clip.mask_w + x] == 0)) return;
     size_t i = (static_cast<size_t>(y) * s.width + x) * 4;
     double a = (col.a / 255.0) * alpha;
     s.pixels[i+0] = static_cast<uint8_t>(col.r * a + s.pixels[i+0] * (1 - a));
@@ -213,6 +225,98 @@ inline void IntersectClip(ClipRect& clip, double nx0, double ny0, double nx1, do
         clip.active = true;
         clip.x0 = nx0; clip.y0 = ny0; clip.x1 = nx1; clip.y1 = ny1;
     }
+}
+
+// パスが単一の軸並行矩形か判定する (矩形なら外接矩形クリップで厳密に足りる)。
+// beginPath→rect() は 4 or 5 点 (閉路点重複) の矩形サブパスになる。
+inline bool IsAxisAlignedRect(const std::vector<SubPath>& path)
+{
+    if (path.size() != 1) return false;
+    const std::vector<Point>& p = path[0].pts;
+    // 末尾が始点と重複する 5 点表現も許容する
+    size_t n = p.size();
+    if (n == 5 && std::abs(p[4].x - p[0].x) < 1e-6 && std::abs(p[4].y - p[0].y) < 1e-6) {
+        n = 4;
+    }
+    if (n != 4) return false;
+    // 各辺が水平または垂直であること
+    for (size_t i = 0; i < 4; ++i) {
+        const Point& a = p[i];
+        const Point& b = p[(i + 1) % 4];
+        const bool horizontal = std::abs(a.y - b.y) < 1e-6;
+        const bool vertical   = std::abs(a.x - b.x) < 1e-6;
+        if (!horizontal && !vertical) return false;
+    }
+    return true;
+}
+
+// パスを nonzero winding でカバレッジマスク (surface 同寸, 1=内側) にラスタライズする。
+// スキャンライン規約は FillPath と一致させる (塗りと同じ形にクリップされる)。
+inline std::shared_ptr<std::vector<uint8_t>> RasterizePathMask(
+    const std::vector<SubPath>& path, int width, int height)
+{
+    auto mask = std::make_shared<std::vector<uint8_t>>(
+        static_cast<size_t>(width) * height, 0);
+    if (width <= 0 || height <= 0) return mask;
+
+    double miny = 1e18, maxy = -1e18;
+    for (auto& sp : path) for (auto& p : sp.pts) { miny = std::min(miny,p.y); maxy = std::max(maxy,p.y); }
+    if (maxy < miny) return mask;
+    int y0 = std::max(0, static_cast<int>(std::floor(miny)));
+    int y1 = std::min(height - 1, static_cast<int>(std::ceil(maxy)));
+    for (int y = y0; y <= y1; ++y) {
+        double sy = y + 0.5;
+        std::vector<std::pair<double,int>> xs;
+        for (auto& sp : path) {
+            size_t n = sp.pts.size();
+            if (n < 2) continue;
+            for (size_t i = 0; i < n; ++i) {
+                Point a = sp.pts[i];
+                Point b = sp.pts[(i+1) % n];
+                if ((a.y <= sy && b.y > sy) || (b.y <= sy && a.y > sy)) {
+                    double t = (sy - a.y) / (b.y - a.y);
+                    xs.push_back({a.x + t * (b.x - a.x), a.y < b.y ? 1 : -1});
+                }
+            }
+        }
+        std::sort(xs.begin(), xs.end());
+        int wind = 0;
+        for (size_t i = 0; i + 1 < xs.size(); ++i) {
+            wind += xs[i].second;
+            if (wind != 0) {
+                int xa = std::max(0, static_cast<int>(std::floor(xs[i].first)));
+                int xb = std::min(width - 1, static_cast<int>(std::ceil(xs[i+1].first)));
+                for (int x = xa; x <= xb; ++x) {
+                    (*mask)[static_cast<size_t>(y) * width + x] = 1;
+                }
+            }
+        }
+    }
+    return mask;
+}
+
+// 任意形状パスをクリップへ積集合で反映する (非矩形 clip() の実体)。
+// 外接矩形 (高速リジェクト) も同時に反映し、既存 mask があれば AND を取って
+// 新しい mask を割り当てる (save/restore 安全)。
+inline void IntersectClipMask(ClipRect& clip, const std::vector<SubPath>& path,
+                              int width, int height)
+{
+    double minx, miny, maxx, maxy;
+    if (PathBounds(path, &minx, &miny, &maxx, &maxy)) {
+        IntersectClip(clip, std::floor(minx), std::floor(miny),
+                      std::ceil(maxx), std::ceil(maxy));
+    }
+    auto next = RasterizePathMask(path, width, height);
+    if (clip.mask) {
+        const std::vector<uint8_t>& prev = *clip.mask;
+        const size_t n = std::min(next->size(), prev.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (prev[i] == 0) { (*next)[i] = 0; }
+        }
+    }
+    clip.mask = next;
+    clip.mask_w = width;
+    clip.mask_h = height;
 }
 
 // 3次ベジェを現在サブパスへフラット化して追記する。p0 は変換済みの直前点。

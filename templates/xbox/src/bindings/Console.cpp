@@ -30,7 +30,12 @@ void Log(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 void Error(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
-    std::cerr << FormatArgs(args.GetIsolate(), args) << std::endl;
+    // console.error / console.warn は GUI 実行では stderr が見えないため、
+    // next2d-error.log にもミラーする (player 側のエラー・警告や WebGPU の
+    // error scope 結果などを掴む)。
+    const std::string msg = FormatArgs(args.GetIsolate(), args);
+    std::cerr << msg << std::endl;
+    v8util::AppendErrorLog("[console] " + msg);
 }
 
 } // namespace

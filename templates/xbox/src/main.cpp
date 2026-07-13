@@ -4,28 +4,47 @@
 // bootstrap.js とアプリ本体(ESM)の読み込み -> ゲームループ、という流れ。
 #include <Windows.h>
 #include <windowsx.h>
-#include <timeapi.h>
 #include <XGameRuntime.h>
 
+// winmm (timeBeginPeriod) と DbgHelp (StackWalk64) はコンソール (Game Core OS) に
+// 存在しないデスクトップ専用 API。コンソールは全画面 VSync 固定でペーシング不要、
+// クラッシュ解析はプラットフォーム側の仕組みに任せる。
+#if !NEXT2D_XBOX_CONSOLE
+#include <timeapi.h>
+#include <DbgHelp.h>
 #pragma comment(lib, "winmm.lib")
+#endif
 
 #include "HostContext.h"
 #include "AssetLoader.h"
+#include "EmbeddedAssets.h"
 #include "EventLoop.h"
 #include "gpu/DawnContext.h"
+#include "platform/DecodeQueue.h"
 #include "platform/GamepadManager.h"
 #include "platform/AudioEngine.h"
+#include "platform/StbTextRasterizer.h"
 #include "worker/WorkerRuntime.h"
 #include "bindings/Bindings.h"
 #include "bindings/EventTarget.h"
 #include "v8/V8Runtime.h"
 
+#include "v8/V8Util.h"
+
+#include <v8-profiler.h>
+
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
+#include <cstdio>
+#include <cstring>
 
 namespace fs = std::filesystem;
 using namespace next2d;
@@ -33,6 +52,137 @@ using namespace next2d;
 namespace {
 
 bool g_running = true;
+
+// --- --perf: フレーム統計 ---------------------------------------------------
+// メインループの各区間の所要時間 (ms) を集計し、300 フレーム毎に 1 行で出力する。
+// avg でボトルネックの区間を、max でヒッチ (スパイク) の在り処を特定する。
+// GUI 実行では stderr が見えないため next2d-perf.log にも追記する。
+struct PerfSection {
+    double sum = 0.0;
+    double max = 0.0;
+    void Add(double ms)
+    {
+        sum += ms;
+        if (ms > max) {
+            max = ms;
+        }
+    }
+};
+
+struct PerfStats {
+    static constexpr int kWindow = 300;   // 60fps で約 5 秒
+    PerfSection tasks;     // 入力/音声/タイマー/マイクロタスク
+    PerfSection js;        // メイン rAF (アプリロジック/描画コマンド生成)
+    PerfSection worker;    // レンダラ worker (WebGPU コマンド発行 + submit)
+    PerfSection tick;      // V8 プラットフォームタスク + Dawn Tick
+    PerfSection present;   // Present (GPU/VSync 待ちを含む)
+    PerfSection busy;      // 上記合計 (ペーシング Sleep を除く実働)
+    PerfSection frame;     // フレーム間隔 (実効フレームレートの逆数)
+    int frames = 0;
+
+    void Flush()
+    {
+        if (frames == 0) {
+            return;
+        }
+        const auto avg = [this](const PerfSection& s) { return s.sum / frames; };
+        char line[320];
+        std::snprintf(line, sizeof(line),
+            "[perf] frame %.1fms (max %.1f) busy %.1fms | "
+            "tasks %.2f/%.1f js %.2f/%.1f worker %.2f/%.1f "
+            "tick %.2f/%.1f present %.2f/%.1f (avg/max, %d frames)",
+            avg(frame), frame.max, avg(busy),
+            avg(tasks), tasks.max, avg(js), js.max, avg(worker), worker.max,
+            avg(tick), tick.max, avg(present), present.max, frames);
+        std::cerr << line << std::endl;
+        std::ofstream ofs("next2d-perf.log", std::ios::app);
+        if (ofs) {
+            ofs << line << std::endl;
+        }
+        *this = PerfStats{};
+    }
+};
+
+// --profile: CPU プロファイル結果を self サンプル数の降順で next2d-cpuprofile.log へ。
+// ノードツリーを再帰集計し「関数 (script:line)」毎の self 時間を出す。
+constexpr unsigned kProfileIntervalUs = 500;
+
+void DumpCpuProfileNode(const v8::CpuProfileNode* node,
+                        std::map<std::string, unsigned>& self_hits)
+{
+    const char* name = node->GetFunctionNameStr();
+    const char* script = node->GetScriptResourceNameStr();
+    std::string key = (name && *name) ? name : "(anonymous)";
+    if (script && *script) {
+        // pak 内キーの末尾だけで十分読める
+        std::string s(script);
+        const auto slash = s.find_last_of('/');
+        if (slash != std::string::npos) {
+            s = s.substr(slash + 1);
+        }
+        key += " (" + s + ":" + std::to_string(node->GetLineNumber()) + ")";
+    }
+    self_hits[key] += node->GetHitCount();
+    for (int i = 0; i < node->GetChildrenCount(); ++i) {
+        DumpCpuProfileNode(node->GetChild(i), self_hits);
+    }
+}
+
+void WriteCpuProfile(v8::CpuProfile* profile, unsigned interval_us, const char* reason)
+{
+    std::map<std::string, unsigned> self_hits;
+    DumpCpuProfileNode(profile->GetTopDownRoot(), self_hits);
+
+    unsigned total = 0;
+    for (const auto& [key, hits] : self_hits) {
+        total += hits;
+    }
+    std::vector<std::pair<std::string, unsigned>> sorted(self_hits.begin(), self_hits.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    std::ofstream ofs("next2d-cpuprofile.log", std::ios::app);
+    const double dur_ms =
+        static_cast<double>(profile->GetEndTime() - profile->GetStartTime()) / 1000.0;
+    char head[224];
+    std::snprintf(head, sizeof(head),
+        "[cpuprofile] %s: window %.1fs, %u samples (interval %uus), top self-time:",
+        reason, dur_ms / 1000.0, total, interval_us);
+    std::cerr << head << std::endl;
+    if (ofs) {
+        ofs << head << std::endl;
+    }
+    int rank = 0;
+    for (const auto& [key, hits] : sorted) {
+        if (hits == 0 || ++rank > 50) {
+            break;
+        }
+        char line[512];
+        std::snprintf(line, sizeof(line), "  %5.1f%%  %8.1fms  %s",
+            total ? 100.0 * hits / total : 0.0,
+            hits * (interval_us / 1000.0), key.c_str());
+        std::cerr << line << std::endl;
+        if (ofs) {
+            ofs << line << std::endl;
+        }
+    }
+}
+
+// 現在のプロファイル窓を書き出して新しい窓を開始する。
+// 遷移スパイク (単発の長い rAF) 直後に呼ぶことで、スパイクを含む窓と含まない窓の
+// 比較から犯人関数を分離する (セッション全体の集計では定常コストに埋もれるため)。
+void DumpAndRestartProfile(v8::CpuProfiler* profiler, v8::Isolate* isolate,
+                           const char* reason)
+{
+    v8::HandleScope hs(isolate);
+    v8::CpuProfile* p = profiler->StopProfiling(
+        v8::String::NewFromUtf8Literal(isolate, "next2d"));
+    if (p) {
+        WriteCpuProfile(p, kProfileIntervalUs, reason);
+        p->Delete();
+    }
+    profiler->StartProfiling(v8::String::NewFromUtf8Literal(isolate, "next2d"));
+}
 DawnContext* g_dawn = nullptr;
 HostContext* g_host = nullptr;
 V8Runtime* g_runtime = nullptr;
@@ -196,7 +346,9 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
     // ウィンドウが画面(作業領域)より大きいと画面外にはみ出し、提示が
     // 見切れる/非等倍でスケールされて歪む (CI の低解像度ディスプレイで
     // 1920x1080 ウィンドウ → 描画が縦長になっていた)。作業領域に収まるよう
-    // クランプする。実機コンソールでは作業領域=全画面のため 1920x1080 のまま。
+    // クランプする。コンソールは常に全画面のためクランプ不要
+    // (SystemParametersInfo は Game Core に無い)。
+#if !NEXT2D_XBOX_CONSOLE
     RECT wa = {};
     if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
         const int maxW = wa.right - wa.left;
@@ -204,6 +356,7 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
         if (maxW > 0 && width  > maxW) { width  = maxW; }
         if (maxH > 0 && height > maxH) { height = maxH; }
     }
+#endif
 
     // コンソールでは全画面相当。PC(GDK) 検証ではウィンドウ。
     const DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
@@ -215,15 +368,119 @@ HWND CreateHostWindow(HINSTANCE instance, int width, int height)
 
 } // namespace
 
+// 未処理例外(segfault/AV 等)発生時にコールスタックを next2d-error.log へ書き出す。
+// GUI 実行では stderr が見えないため、C++ クラッシュ地点を掴む唯一の手段。
+// DbgHelp の StackWalk64 で例外コンテキストからフレームを辿り、可能なら
+// シンボル名 (関数+行) とモジュールを添える (PDB があれば関数/行まで解決)。
+// コンソールには DbgHelp が無いためデスクトップ専用 (クラッシュ解析は実機ツール側)。
+#if !NEXT2D_XBOX_CONSOLE
+static LONG WINAPI CrashHandler(EXCEPTION_POINTERS* ep)
+{
+    std::ofstream ofs("next2d-error.log", std::ios::app);
+    if (!ofs || !ep || !ep->ExceptionRecord || !ep->ContextRecord) {
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    ofs << "\n[CRASH] code=0x" << std::hex
+        << ep->ExceptionRecord->ExceptionCode
+        << " addr=" << ep->ExceptionRecord->ExceptionAddress
+        << std::dec << std::endl;
+
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread  = GetCurrentThread();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, nullptr, TRUE);
+
+    CONTEXT ctx = *ep->ContextRecord;
+    STACKFRAME64 frame = {};
+    DWORD machine = 0;
+#if defined(_M_X64)
+    machine = IMAGE_FILE_MACHINE_AMD64;
+    frame.AddrPC.Offset    = ctx.Rip;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrStack.Offset = ctx.Rsp;
+#elif defined(_M_ARM64)
+    machine = IMAGE_FILE_MACHINE_ARM64;
+    frame.AddrPC.Offset    = ctx.Pc;
+    frame.AddrFrame.Offset = ctx.Fp;
+    frame.AddrStack.Offset = ctx.Sp;
+#endif
+    frame.AddrPC.Mode    = AddrModeFlat;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Mode = AddrModeFlat;
+
+    char symbuf[sizeof(SYMBOL_INFO) + 256] = {};
+    SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen   = 255;
+
+    for (int i = 0; i < 48; ++i) {
+        if (!StackWalk64(machine, process, thread, &frame, &ctx,
+                         nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) {
+            break;
+        }
+        const DWORD64 pc = frame.AddrPC.Offset;
+        if (!pc) {
+            break;
+        }
+
+        ofs << "  #" << i << " 0x" << std::hex << pc << std::dec;
+
+        DWORD64 disp = 0;
+        if (SymFromAddr(process, pc, &disp, sym)) {
+            ofs << " " << sym->Name << "+0x" << std::hex << disp << std::dec;
+        }
+
+        const DWORD64 modbase = SymGetModuleBase64(process, pc);
+        if (modbase) {
+            char modname[MAX_PATH] = {};
+            if (GetModuleFileNameA(reinterpret_cast<HMODULE>(modbase), modname, MAX_PATH)) {
+                const char* base = std::strrchr(modname, '\\');
+                ofs << " [" << (base ? base + 1 : modname) << "]";
+            }
+        }
+
+        IMAGEHLP_LINE64 line = {};
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD line_disp = 0;
+        if (SymGetLineFromAddr64(process, pc, &line_disp, &line) && line.FileName) {
+            const char* fbase = std::strrchr(line.FileName, '\\');
+            ofs << " (" << (fbase ? fbase + 1 : line.FileName) << ":" << line.LineNumber << ")";
+        }
+        ofs << std::endl;
+    }
+
+    ofs.flush();
+    SymCleanup(process);
+    return EXCEPTION_EXECUTE_HANDLER;   // プロセスを終了させる (無限再入回避)
+}
+#endif // !NEXT2D_XBOX_CONSOLE
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 {
+#if !NEXT2D_XBOX_CONSOLE
+    // 最初にクラッシュハンドラを設置し、以降の segfault 等でスタックを記録する。
+    SetUnhandledExceptionFilter(CrashHandler);
+
     // Sleep() の分解能を 1ms に上げる (フレームペーシング用。既定 15.6ms では
-    // 60Hz を刻めない)
+    // 60Hz を刻めない)。コンソールは全画面 VSync 提示でペーシングされるため不要。
     timeBeginPeriod(1);
+#endif
 
     // --selftest: アプリの代わりに js/selftest.js を実行し、全バインディングを
     // 実機/PC(GDK) 上で検証して終了する (テスト完了で自動終了)。
     const bool selftest = cmd_line && wcsstr(cmd_line, L"--selftest") != nullptr;
+
+    // --perf: フレーム統計を 300 フレーム (約 5 秒) 毎に stderr と next2d-perf.log
+    // へ出力する。どの区間 (JS / レンダラ worker / GPU / Present) にフレーム時間を
+    // 使っているかを数値化し、以降の最適化 (worker 並列化等) の要否判断に使う。
+    const bool perf = cmd_line && wcsstr(cmd_line, L"--perf") != nullptr;
+
+    // --profile: V8 の sampling CPU プロファイラを起動から終了まで回し、
+    // 終了時に self 時間の上位関数を next2d-cpuprofile.log へ出力する。
+    // jitless でも動作し、GC は "(garbage collector)" として現れる。
+    // --perf で見つかった js 区間の遷移スパイク (~1.2s) の中身を特定する用途。
+    const bool profile = cmd_line && wcsstr(cmd_line, L"--profile") != nullptr;
 
     // 1. GDK ランタイム初期化。
     // デスクトップでは Gaming Services 未導入の環境 (CI ランナー等) でも
@@ -244,6 +501,51 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     const fs::path assets_app = exe_dir / "assets" / "app";
     const fs::path bootstrap_js = exe_dir / "js" / "bootstrap.js";
     const fs::path selftest_js = exe_dir / "js" / "selftest.js";
+
+    // 埋め込みアセット (exe 内 RCDATA "N2DASSETS") を初期化する。存在すれば
+    // assets/app 一式と js/bootstrap.js を exe 内から読み、隣接平文 JS は不要になる。
+    // 無ければ全読み込みはファイルへフォールバックする (開発ビルド)。
+    if (InitEmbeddedAssets()) {
+        SetEmbeddedAssetsRoot(assets_app.string());
+        std::cerr << "[Assets] using embedded pak" << std::endl;
+    }
+
+    // フォント登録 (stb_truetype 用)。コンソールにはシステムフォント/DirectWrite が
+    // 無いため、資材内の TTF/OTF を stbtext レジストリへ登録しておく
+    // (デスクトップは DirectWrite が主経路のため未使用でも無害)。
+    // 対象: 埋め込み pak 内の *.ttf/*.otf + exe 隣接 fonts/ (開発ビルド用)。
+    {
+        const auto register_font = [](const std::string& name,
+                                      std::vector<uint8_t> bytes) {
+            if (stbtext::RegisterFont(name, std::move(bytes))) {
+                std::cerr << "[Font] registered: " << name << std::endl;
+            }
+        };
+        const auto is_font_key = [](const std::string& key) {
+            const auto dot = key.find_last_of('.');
+            if (dot == std::string::npos) return false;
+            const std::string ext = key.substr(dot + 1);
+            return ext == "ttf" || ext == "otf" || ext == "TTF" || ext == "OTF";
+        };
+        ForEachEmbeddedAsset(
+            [&](const std::string& key, const std::vector<uint8_t>& data) {
+                if (is_font_key(key)) {
+                    register_font(fs::path(key).stem().string(), data);
+                }
+            });
+        std::error_code fonts_ec;
+        for (const auto& entry :
+             fs::directory_iterator(exe_dir / "fonts", fonts_ec)) {
+            const std::string p = entry.path().string();
+            if (is_font_key(p)) {
+                std::ifstream ifs(entry.path(), std::ios::binary);
+                std::vector<uint8_t> bytes(
+                    (std::istreambuf_iterator<char>(ifs)),
+                    std::istreambuf_iterator<char>());
+                register_font(entry.path().stem().string(), std::move(bytes));
+            }
+        }
+    }
 
     // 2. HostContext と論理ビューポート
     HostContext host;
@@ -318,9 +620,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         InstallWorker(runtime.isolate(), ctx->Global(), &host);
     }
 
+    // --profile: 起動直後からサンプリング開始 (0.5ms 間隔)
+    v8::CpuProfiler* cpu_profiler = nullptr;
+    if (profile) {
+        v8::Isolate::Scope iso_scope(runtime.isolate());
+        v8::HandleScope hs(runtime.isolate());
+        cpu_profiler = v8::CpuProfiler::New(runtime.isolate());
+        cpu_profiler->SetSamplingInterval(kProfileIntervalUs);
+        cpu_profiler->StartProfiling(
+            v8::String::NewFromUtf8Literal(runtime.isolate(), "next2d"));
+        std::cerr << "[cpuprofile] profiling started" << std::endl;
+    }
+
     // 6. bootstrap.js -> アプリ本体(ESM) の順で読み込み
     {
-        const std::string boot = ReadFile(bootstrap_js);
+        // 埋め込み pak を優先し、無ければ隣接ファイルから読む host スクリプトローダ。
+        const auto load_host_script = [&](const std::string& key, const fs::path& file) {
+            if (const auto* embedded = GetEmbeddedAsset(key)) {
+                return std::string(embedded->begin(), embedded->end());
+            }
+            return ReadFile(file);
+        };
+
+        const std::string boot = load_host_script("js/bootstrap.js", bootstrap_js);
         if (boot.empty()) {
             std::cerr << "bootstrap.js not found: " << bootstrap_js << std::endl;
         } else if (!runtime.RunScript(boot, "js/bootstrap.js")) {
@@ -328,7 +650,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         }
 
         if (selftest) {
-            const std::string script = ReadFile(selftest_js);
+            const std::string script = load_host_script("js/selftest.js", selftest_js);
             if (script.empty()) {
                 std::cerr << "selftest.js not found: " << selftest_js << std::endl;
                 return 1;
@@ -350,6 +672,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     // 7. ゲームループ
     MSG msg = {};
     int exit_code = 0;
+    PerfStats perf_stats;
+    double perf_prev_frame = 0.0;
     // Isolate::Scope はループ内に限定する。Enter されたままの isolate を
     // Dispose すると V8 の fatal (Disposing the isolate that is entered) になる。
     {
@@ -369,6 +693,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
         const double now = event_loop.Now();
 
+        // --perf: 直前の計測点からの経過を各区間へ記録する軽量マーカー
+        double perf_cursor = now;
+        const auto perf_mark = [&](PerfSection& section) {
+            if (!perf) {
+                return;
+            }
+            const double t = event_loop.Now();
+            section.Add(t - perf_cursor);
+            perf_cursor = t;
+        };
+
         v8::HandleScope handle_scope(runtime.isolate());
         v8::Local<v8::Context> ctx = runtime.context();
         v8::Context::Scope context_scope(ctx);
@@ -379,24 +714,54 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         // 音声: 再生終了した source へ "ended" を配送する
         PumpAudioEvents(runtime.isolate());
 
+        // バックグラウンドデコード完了の反映 (画像 load イベント / 音声 Promise)
+        decodequeue::Pump();
+
         // タイマー -> マイクロタスク
         event_loop.PumpTimers();
         runtime.PumpMicrotasks();
+        perf_mark(perf_stats.tasks);
 
         // メインスレッドの requestAnimationFrame (アプリのロジック/描画コマンド生成)
+        const double profile_js_start = cpu_profiler ? event_loop.Now() : 0.0;
         event_loop.RunAnimationFrame(now);
         runtime.PumpMicrotasks();
+        perf_mark(perf_stats.js);
+
+        // --profile: 遷移スパイク (単発の長い rAF) を検出したら窓を切り出す
+        if (cpu_profiler) {
+            const double js_ms = event_loop.Now() - profile_js_start;
+            if (js_ms > 300.0) {
+                char reason[64];
+                std::snprintf(reason, sizeof(reason), "spike (js %.0fms)", js_ms);
+                DumpAndRestartProfile(cpu_profiler, runtime.isolate(), reason);
+            }
+        }
 
         // Worker (レンダラ等) のメッセージ配送 + rAF。
         // レンダラ worker はここで WebGPU コマンドを発行し submit する。
         workers.Pump(now);
+        perf_mark(perf_stats.worker);
 
         // V8 プラットフォームタスク + Dawn の非同期処理
         runtime.PumpPlatformTasks();
         dawn.Tick();
+        perf_mark(perf_stats.tick);
 
         // 提示
         dawn.Present();
+        perf_mark(perf_stats.present);
+
+        if (perf) {
+            perf_stats.busy.Add(perf_cursor - now);
+            if (perf_prev_frame > 0.0) {
+                perf_stats.frame.Add(now - perf_prev_frame);
+            }
+            perf_prev_frame = now;
+            if (++perf_stats.frames >= PerfStats::kWindow) {
+                perf_stats.Flush();
+            }
+        }
 
         // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える。
         // Present はスキップ時にブロックしないため、これが無いとループが
@@ -405,17 +770,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
             const double frame_ms = event_loop.Now() - now;
             if (frame_ms < 15.0) {
                 Sleep(static_cast<DWORD>(15.0 - frame_ms));
-            }
-        }
-
-        // 診断: ループ統計 (5 秒毎)
-        {
-            static uint64_t iteration = 0;
-            ++iteration;
-            if (iteration % 300 == 0) {
-                std::cerr << "[Loop] it=" << iteration
-                          << " rAF=" << event_loop.PendingAnimationFrameCount()
-                          << " timers=" << event_loop.PendingTimerCount() << std::endl;
             }
         }
 
@@ -433,9 +787,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
 
     }
 
+    // --profile: 終了時に集計して出力する (Isolate 破棄前に必ず行う)
+    if (cpu_profiler) {
+        v8::Isolate::Scope iso_scope(runtime.isolate());
+        v8::HandleScope hs(runtime.isolate());
+        v8::CpuProfile* p = cpu_profiler->StopProfiling(
+            v8::String::NewFromUtf8Literal(runtime.isolate(), "next2d"));
+        if (p) {
+            WriteCpuProfile(p, kProfileIntervalUs, "final");
+            p->Delete();
+        }
+        cpu_profiler->Dispose();
+        cpu_profiler = nullptr;
+    }
+
     // 8. 後始末: v8::Global を保持するものは Isolate 破棄前に必ず明示解放する。
     //    (スタック変数はスコープ終了 = runtime.Dispose() の後に巻き戻されるため、
     //     デストラクタ任せにすると破棄済み Isolate への Global::Reset で fail-fast する)
+    decodequeue::Shutdown(); // デコードスレッド join + 保留 complete (v8::Global) の破棄
     workers.Shutdown();      // WorkerInstance の Global<Context> / EventLoop
     event_loop.Shutdown();   // main の setTimeout/rAF コールバック (Global<Function>)
     ShutdownAudioEvents();

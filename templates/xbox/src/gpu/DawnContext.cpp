@@ -1,22 +1,160 @@
 #include "DawnContext.h"
 
 #include <Windows.h>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 
 namespace next2d {
 
 namespace {
 
+// GUI 実行では stderr が見えないため、GPU の致命的エラー/検証エラーを
+// next2d-error.log にも残す。描画が黒くなる/表示されない等の原因(検証エラー・
+// device lost・リソース枯渇)を掴む唯一の手段。氾濫防止に総数を制限する。
+void AppendGpuLog(const std::string& line)
+{
+    static int count = 0;
+    if (count >= 60) {
+        return;
+    }
+    ++count;
+    std::ofstream ofs("next2d-error.log", std::ios::app);
+    if (ofs) {
+        ofs << line << std::endl;
+    }
+}
+
 void HandleDeviceLost(const wgpu::Device&, wgpu::DeviceLostReason reason, wgpu::StringView message)
 {
-    std::cerr << "[Dawn] Device lost (" << static_cast<int>(reason) << "): "
-              << std::string(message.data, message.length) << std::endl;
+    const std::string line = "[Dawn] Device lost (" + std::to_string(static_cast<int>(reason))
+        + "): " + std::string(message.data, message.length);
+    std::cerr << line << std::endl;
+    AppendGpuLog(line);
 }
 
 void HandleUncapturedError(const wgpu::Device&, wgpu::ErrorType type, wgpu::StringView message)
 {
-    std::cerr << "[Dawn] Uncaptured error (" << static_cast<int>(type) << "): "
-              << std::string(message.data, message.length) << std::endl;
+    const std::string line = "[Dawn] Uncaptured error (" + std::to_string(static_cast<int>(type))
+        + "): " + std::string(message.data, message.length);
+    std::cerr << line << std::endl;
+    AppendGpuLog(line);
+}
+
+// --- GPU Blob キャッシュ (シェーダ/パイプラインのコンパイル結果) -------------
+// D3D12 の HLSL コンパイル (FXC) はパイプライン初回生成時に走り、起動直後や
+// 新しいエフェクト初出時のフレームヒッチの原因になる。Dawn の BlobCache を
+// %LOCALAPPDATA%\Next2D\gpucache に永続化し、2 回目以降の起動で再利用する
+// (V8 バイトコードキャッシュの GPU 版)。
+// 呼び出し規約 (dawn/native/BlobCache.cpp LoadInternal で検証済み):
+//   load は 2 段階 — まず value=nullptr でサイズ問い合わせ (戻り値 0 = miss)、
+//   次に確保済みバッファへの読み込み (戻り値がサイズと不一致なら miss 扱い)。
+// キーには Dawn がアダプタ/ドライバ情報を織り込むため、環境が変われば自然に
+// 別エントリになる。あらゆる失敗は 0 / 何もしない (graceful degrade)。
+
+uint64_t Fnv1a(const void* data, size_t size, uint64_t hash = 1469598103934665603ull)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+const std::filesystem::path& GpuCacheDir()
+{
+    static const std::filesystem::path dir = []() -> std::filesystem::path {
+        const char* base = std::getenv("LOCALAPPDATA");
+        if (!base || !*base) {
+            return {};
+        }
+        std::error_code ec;
+        std::filesystem::path d = std::filesystem::path(base) / "Next2D" / "gpucache";
+        std::filesystem::create_directories(d, ec);
+        if (ec) {
+            return {};
+        }
+        // ドライバ/Dawn 更新でキーが変わると旧 blob は孤児になる。
+        // 30 日アクセスの無い .blob を掃除する (load ヒット時に touch する LRU)。
+        const auto now = std::filesystem::file_time_type::clock::now();
+        std::error_code iter_ec;
+        for (const auto& entry : std::filesystem::directory_iterator(d, iter_ec)) {
+            std::error_code e2;
+            if (entry.path().extension() != ".blob") {
+                continue;
+            }
+            const auto t = std::filesystem::last_write_time(entry.path(), e2);
+            if (!e2 && now - t > std::chrono::hours(24 * 30)) {
+                std::filesystem::remove(entry.path(), e2);
+            }
+        }
+        return d;
+    }();
+    return dir;
+}
+
+std::filesystem::path GpuCacheFileFor(const void* key, size_t key_size)
+{
+    const std::filesystem::path& dir = GpuCacheDir();
+    if (dir.empty()) {
+        return {};
+    }
+    char buf[17] = {};
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(Fnv1a(key, key_size)));
+    return dir / (std::string(buf) + ".blob");
+}
+
+size_t LoadGpuCacheData(const void* key, size_t key_size,
+                        void* value, size_t value_size, void*)
+{
+    const std::filesystem::path file = GpuCacheFileFor(key, key_size);
+    if (file.empty()) {
+        return 0;
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(file, ec);
+    if (ec || size == 0) {
+        return 0;
+    }
+    if (value == nullptr) {
+        // 1 段階目: サイズ問い合わせ
+        return static_cast<size_t>(size);
+    }
+    if (value_size < size) {
+        return 0;
+    }
+    std::ifstream ifs(file, std::ios::binary);
+    if (!ifs || !ifs.read(static_cast<char*>(value), static_cast<std::streamsize>(size))) {
+        return 0;
+    }
+    // 使用時に touch して 30 日掃除を LRU として機能させる
+    std::filesystem::last_write_time(
+        file, std::filesystem::file_time_type::clock::now(), ec);
+    return static_cast<size_t>(size);
+}
+
+void StoreGpuCacheData(const void* key, size_t key_size,
+                       const void* value, size_t value_size, void*)
+{
+    if (!value || value_size == 0) {
+        return;
+    }
+    const std::filesystem::path file = GpuCacheFileFor(key, key_size);
+    if (file.empty()) {
+        return;
+    }
+    std::ofstream ofs(file, std::ios::binary | std::ios::trunc);
+    if (ofs) {
+        ofs.write(static_cast<const char*>(value),
+                  static_cast<std::streamsize>(value_size));
+    }
 }
 
 } // namespace
@@ -95,6 +233,28 @@ bool DawnContext::AcquireDevice()
     device_desc.SetDeviceLostCallback(wgpu::CallbackMode::AllowProcessEvents, HandleDeviceLost);
     device_desc.SetUncapturedErrorCallback(HandleUncapturedError);
 
+    // GPU Blob キャッシュを接続する (シェーダコンパイル結果の永続化)。
+    // 関数ポインタは Dawn が device 生成時に BlobCache へコピーするため、
+    // この記述子自体は RequestDevice 完了までの生存で足りる。
+    wgpu::DawnCacheDeviceDescriptor cache_desc = {};
+    cache_desc.loadDataFunction  = LoadGpuCacheData;
+    cache_desc.storeDataFunction = StoreGpuCacheData;
+    device_desc.nextInChain = &cache_desc;
+
+#ifdef NDEBUG
+    // Release では Dawn の API 検証 (skip_validation) と robustness (OOB クランプ) を
+    // 無効化する。両方とも全描画コマンドのエンコードで毎フレーム CPU を消費する
+    // 安全網で、検証済みタイトルの出荷ビルドでは Chrome も同様に外す定番最適化。
+    // Debug ビルドでは有効のままにして検証エラーを検出できるようにする
+    // (エラーは HandleUncapturedError -> next2d-error.log へ出る)。
+    // toggle 名は Dawn 本体 src/dawn/native/Toggles.cpp 定義 (いずれも ToggleStage::Device)。
+    static const char* kReleaseToggles[] = {"skip_validation", "disable_robustness"};
+    wgpu::DawnTogglesDescriptor device_toggles = {};
+    device_toggles.enabledToggles     = kReleaseToggles;
+    device_toggles.enabledToggleCount = 2;
+    cache_desc.nextInChain = &device_toggles;  // device -> cache -> toggles
+#endif
+
     wgpu::Future device_future = adapter_.RequestDevice(
         &device_desc,
         wgpu::CallbackMode::AllowProcessEvents,
@@ -137,11 +297,10 @@ void DawnContext::Configure(uint32_t width, uint32_t height)
     wgpu::SurfaceConfiguration config = {};
     config.device      = device_;
     config.format      = format_;
+    // RenderAttachment のみ。CopySrc を足すと swapchain の flip 提示最適化が無効化され
+    // 提示ごとにコピーが挟まって重くなるため、描画確認が済んだ今は付けない
+    // (以前は DebugProbeSurface の黒画面調査用に付けていた)。
     config.usage       = wgpu::TextureUsage::RenderAttachment;
-    if (can_copy_src_) {
-        // 黒画面デバッグ用の surface 読み戻し (DebugProbeSurface) を可能にする
-        config.usage |= wgpu::TextureUsage::CopySrc;
-    }
     config.width       = width_;
     config.height      = height_;
     config.presentMode = wgpu::PresentMode::Fifo;
@@ -231,17 +390,9 @@ void DawnContext::Present()
     // 取得なしで Present すると Dawn の検証エラーになる (描画しないフレームは提示しない)。
     if (surface_ && configured_ && frame_texture_acquired_) {
         ++present_count_;
-        if (present_count_ <= 3 || present_count_ == 60 || present_count_ % 300 == 0) {
-            DebugProbeSurface();
-        }
         surface_.Present();
     } else {
         ++present_skipped_;
-        if (present_skipped_ <= 3 || present_skipped_ % 300 == 0) {
-            std::cerr << "[GPU] present skipped #" << present_skipped_
-                      << " (configured=" << configured_
-                      << " acquired=" << frame_texture_acquired_ << ")" << std::endl;
-        }
     }
     frame_texture_acquired_ = false;
     current_texture_ = nullptr;

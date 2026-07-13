@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +25,10 @@ namespace next2d {
 class HostContext;
 class EventLoop;
 class WorkerRuntime;
+
+// worker context の embedder slot。1 は EventLoop (kEventLoopEmbedderSlot) が使用。
+// ESM の ResolveModule コールバックが context から WorkerInstance を引くために使う。
+constexpr int kWorkerInstanceEmbedderSlot = 2;
 
 // 1 メッセージ = ValueSerializer 出力バイト列 + transfer された ArrayBuffer の実体。
 // transfer_list の ArrayBuffer は中身を bytes に埋め込まず所有権ごと移す
@@ -35,7 +40,8 @@ struct WorkerMessage {
 
 class WorkerInstance {
 public:
-    WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url);
+    WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url,
+                   bool is_module = false);
     ~WorkerInstance();
 
     bool Start();                 // Context 生成 + ワーカースクリプト評価
@@ -62,14 +68,28 @@ private:
     void DeliverToWorker(double now_ms);
     void DeliverToMain();
 
+    // ESM worker (type: "module")。分類スクリプトは Script、モジュールは Module として評価。
+    bool EvaluateModule(v8::Local<v8::Context> context, const std::string& source);
+    v8::MaybeLocal<v8::Module> LoadModule(const std::string& url);
+    static v8::MaybeLocal<v8::Module> ResolveModule(
+        v8::Local<v8::Context> context,
+        v8::Local<v8::String> specifier,
+        v8::Local<v8::FixedArray> import_attributes,
+        v8::Local<v8::Module> referrer);
+
     WorkerRuntime* runtime_;
     v8::Isolate* isolate_;
     std::string url_;
+    bool module_ = false;
     v8::Global<v8::Context> context_;
     std::unique_ptr<EventLoop> loop_;
     std::deque<WorkerMessage> to_worker_;
     std::deque<WorkerMessage> to_main_;
     bool terminated_ = false;
+
+    // ESM 解決: url -> Module、Module identity hash -> url (referrer 特定用)。
+    std::map<std::string, v8::Global<v8::Module>> modules_;
+    std::map<int, std::string> module_paths_;
 };
 
 class WorkerRuntime {
@@ -83,8 +103,8 @@ public:
     // main / worker グローバルに Worker コンストラクタ等を設置する。
     void InstallOnGlobal(v8::Local<v8::Object> global);
 
-    // new Worker(url) の実体
-    v8::Local<v8::Object> CreateWorker(const std::string& url);
+    // new Worker(url, { type }) の実体
+    v8::Local<v8::Object> CreateWorker(const std::string& url, bool is_module = false);
 
     // 全 worker のメッセージ配送とイベントループ前進
     void Pump(double now_ms);

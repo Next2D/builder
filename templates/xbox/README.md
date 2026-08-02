@@ -378,3 +378,21 @@ xbox/
       ├─ Gamepad.cpp DomShims.cpp
       └─ webgpu/{WebGPU.cpp,WebGPUCommon.h,WebGPUEnums.h}
 ```
+
+---
+
+## コンソール (Game Core OS) とテキスト描画・フォント
+
+コンソールには DirectWrite / システムフォントが存在しないため、`fillText`/`measureText`
+は同梱の stb_truetype 実装 (`platform/StbTextRasterizer`) が担う。フォントは実行時登録:
+
+- **ゲーム資材に TTF/OTF を含める**(推奨): Web ビルドの資材 (`assets/app`) に
+  `*.ttf` / `*.otf` があれば起動時に自動登録される (vite の `public/` に置く等)。
+  日本語テキストを使う場合は Noto Sans JP (OFL) などの同梱を推奨。
+- 開発ビルド: exe 隣接の `fonts/` ディレクトリからも読み込む。
+- フォント未登録の場合、テキストは近似メトリクスのみ (グリフ描画なし) になる。
+
+デスクトップ (PC/GDK) は従来どおり DirectWrite が主経路のため、フォント同梱は不要。
+同様に、画像は stb_image、音声は dr_mp3/dr_wav/stb_vorbis が全プラットフォーム共通の
+第一経路で、WIC / Media Foundation はデスクトップ限定のフォールバック
+(AAC/TIFF 等の非標準形式向け)。コンソールでの動画 (`<video>`) は未対応。

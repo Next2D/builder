@@ -89,10 +89,24 @@ file(GLOB_RECURSE NEXT2D_HOST_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
 
+# 埋め込みアセット: builder の buildXbox が assets.pak と assets.rc を必ず生成し、
+# RCDATA "N2DASSETS" として exe にリンクする (ゲーム JS/HTML は平文で隣に置かない)。
+# 埋め込みは必須。assets.rc が無いのは builder を経由せず cmake を直接叩いた
+# ホスト単体ビルド (ゲーム資材なし) のみで、その場合はゲームは起動しない。
+set(NEXT2D_ASSETS_RC "${CMAKE_CURRENT_SOURCE_DIR}/assets.rc")
+if(EXISTS "${NEXT2D_ASSETS_RC}")
+    enable_language(RC)
+    list(APPEND NEXT2D_HOST_SOURCES "${NEXT2D_ASSETS_RC}")
+    message(STATUS "Next2D: embedding assets from ${NEXT2D_ASSETS_RC}")
+else()
+    message(WARNING "Next2D: assets.rc not found - host-only build (no game assets). Run @next2d/builder to embed.")
+endif()
+
 add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
 
 target_include_directories(Next2DXboxHost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}"   # third_party/ (stb_image, dr_mp3 等)
 )
 
 # 展開レイアウト (GDK_ROOT) 使用時: include/lib を明示指定し、実行時 DLL を並べる
@@ -124,6 +138,20 @@ if(MSVC)
     # Release でも PDB を生成する (クラッシュダンプ解析でスタックを名前解決するため)
     target_compile_options(Next2DXboxHost PRIVATE /Zi)
     target_link_options(Next2DXboxHost PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+
+    # Release: リンク時コード生成 (LTCG)。翻訳単位を跨いだインライン化が効き、
+    # 毎フレーム通る V8 バインディング層 (小さな関数の呼び出し連鎖) に有効。
+    # (VS ジェネレータでは COMPILE_OPTIONS は C++ (ClCompile) にのみ渡り、
+    #  RC (assets.rc) には影響しない。/Zi と同じ流儀)
+    target_compile_options(Next2DXboxHost PRIVATE $<$<CONFIG:Release>:/GL>)
+    target_link_options(Next2DXboxHost PRIVATE $<$<CONFIG:Release>:/LTCG>)
+
+    # /arch:AVX2: Xbox Series X|S (Zen 2) と Haswell (2013) 以降の PC で動作。
+    # ソフトラスタ (RasterCore) や pak 解析などホスト C++ の自動ベクトル化が進む。
+    # Xbox One (Jaguar) は AVX2 非対応のため除外する。
+    if(NOT CMAKE_GENERATOR_PLATFORM MATCHES "XboxOne")
+        target_compile_options(Next2DXboxHost PRIVATE /arch:AVX2)
+    endif()
 endif()
 
 # webgpu_dawn は SHARED (DLL)。実行に必要なため exe の隣へステージする
@@ -135,13 +163,24 @@ if(TARGET webgpu_dawn)
         COMMENT "Staging webgpu_dawn.dll next to the executable")
 endif()
 
-# WebGPU / D3D12 / GameInput / WIC / XAudio2 / GDK
+# WebGPU / D3D12 / GameInput / XAudio2 / GDK
 target_link_libraries(Next2DXboxHost PRIVATE
     d3d12
     dxgi
     dxguid
-    windowscodecs   # WIC: 画像デコード
 )
+
+if(NOT NEXT2D_IS_CONSOLE)
+    # デスクトップ専用 (Game Core OS に存在しない):
+    #   windowscodecs = WIC (stb_image で扱えない形式の画像デコードフォールバック)
+    #   dbghelp       = クラッシュハンドラのスタックトレース (StackWalk64/SymFromAddr)
+    # MF (mfplat 等)/d2d1/dwrite/shlwapi/winmm はソース側の #pragma comment(lib) が
+    # 同じ NEXT2D_XBOX_CONSOLE ガード内でリンク指示する。
+    target_link_libraries(Next2DXboxHost PRIVATE
+        windowscodecs
+        dbghelp
+    )
+endif()
 
 if(NEXT2D_IS_CONSOLE)
     # コンソール用ライブラリ (GDK が提供)
@@ -176,18 +215,15 @@ target_compile_definitions(Next2DXboxHost PRIVATE
 
 # -----------------------------------------------------------------------------
 # ランタイム資材のステージング
-#   builder が assets/app に JS/HTML/アセットを配置する。
-#   js/bootstrap.js はブラウザ相当グローバルを整える起動スクリプト。
+#   ゲーム JS/HTML/アセット (assets/app) とホストスクリプト (js/bootstrap.js) は
+#   builder が assets.pak にまとめて exe 内 RCDATA へ**必ず**埋め込む
+#   (非埋め込みの選択肢は無い。平文 JS/HTML を配布物に残さないのが目的)。
+#   したがって exe 隣へは assets/ も js/ もコピーしない。
+#   MicrosoftGame.config (GDK タイトル設定) だけを exe の隣へステージングする。
 # -----------------------------------------------------------------------------
 add_custom_command(TARGET Next2DXboxHost POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-        "$<TARGET_FILE_DIR:Next2DXboxHost>/assets"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/js"
-        "$<TARGET_FILE_DIR:Next2DXboxHost>/js"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/MicrosoftGame.config"
         "$<TARGET_FILE_DIR:Next2DXboxHost>/MicrosoftGame.config"
-    COMMENT "Staging Next2D assets, bootstrap JS and MicrosoftGame.config"
+    COMMENT "Staging MicrosoftGame.config (assets/JS embedded in exe)"
 )

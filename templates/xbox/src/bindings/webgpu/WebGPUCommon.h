@@ -61,12 +61,15 @@ inline v8::Local<v8::ObjectTemplate> HandleTemplate(v8::Isolate* isolate)
 }
 
 // --- JS オブジェクト読み取りヘルパー ------------------------------------
+// プロパティ名はキャッシュ済み internalized string (v8util::PropName) を使う。
+// ここは全ディスクリプタ解析の合流点で毎フレーム数千回通るため、名前 v8::String の
+// 毎回生成 (ヒープ確保 + ハッシュ) を排除する効果が大きい。
 inline v8::Local<v8::Value> Prop(v8::Isolate* isolate, v8::Local<v8::Object> obj,
                                  const char* key)
 {
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
     v8::Local<v8::Value> v;
-    if (obj->Get(ctx, v8util::Str(isolate, key)).ToLocal(&v)) {
+    if (obj->Get(ctx, v8util::PropName(isolate, key)).ToLocal(&v)) {
         return v;
     }
     return v8::Undefined(isolate);

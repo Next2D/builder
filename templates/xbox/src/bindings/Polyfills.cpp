@@ -232,245 +232,10 @@ const char kPolyfills4[] = R"JS(
 })(globalThis);
 )JS";
 
-// section 5: indexedDB / TextDecoder
+// section 5: TextDecoder
 const char kPolyfills5[] = R"JS(
 (function (global) {
     "use strict";
-    // indexedDB (最小実装・ファイル永続化)。
-    // ゲームの典型用途 (open → objectStore → get/put/delete/getAll) をカバーする。
-    // 値は JSON 化可能なもの + ArrayBuffer/TypedArray (base64 でタグ付け永続化)。
-    // カーソル/インデックス/複合キーは未対応 («EXTEND»)。
-    if (typeof global.indexedDB === "undefined" &&
-        typeof global.__next2d_storage_load === "function") {
-
-        const TYPED = {
-            "Int8Array": Int8Array, "Uint8Array": Uint8Array,
-            "Uint8ClampedArray": Uint8ClampedArray,
-            "Int16Array": Int16Array, "Uint16Array": Uint16Array,
-            "Int32Array": Int32Array, "Uint32Array": Uint32Array,
-            "Float32Array": Float32Array, "Float64Array": Float64Array
-        };
-
-        const bytesToB64 = function (u8) {
-            let bin = "";
-            for (let i = 0; i < u8.length; i += 0x8000) {
-                bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
-            }
-            return global.btoa(bin);
-        };
-        const b64ToBytes = function (b64) {
-            const bin = global.atob(b64);
-            const u8 = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) { u8[i] = bin.charCodeAt(i); }
-            return u8;
-        };
-
-        const encodeValue = function (v) {
-            if (v instanceof ArrayBuffer) {
-                return { "__n2d_bin": bytesToB64(new Uint8Array(v)), "__n2d_type": "ArrayBuffer" };
-            }
-            if (ArrayBuffer.isView(v)) {
-                const name = v.constructor && v.constructor.name;
-                if (TYPED[name]) {
-                    return {
-                        "__n2d_bin": bytesToB64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)),
-                        "__n2d_type": name
-                    };
-                }
-            }
-            if (Array.isArray(v)) { return v.map(encodeValue); }
-            if (v && typeof v === "object") {
-                const out = {};
-                for (const k of Object.keys(v)) { out[k] = encodeValue(v[k]); }
-                return out;
-            }
-            return v;
-        };
-        const decodeValue = function (v) {
-            if (v && typeof v === "object") {
-                if (typeof v.__n2d_bin === "string") {
-                    const u8 = b64ToBytes(v.__n2d_bin);
-                    if (v.__n2d_type === "ArrayBuffer") { return u8.buffer; }
-                    const Ctor = TYPED[v.__n2d_type] || Uint8Array;
-                    return new Ctor(u8.buffer, 0, u8.byteLength / Ctor.BYTES_PER_ELEMENT);
-                }
-                if (Array.isArray(v)) { return v.map(decodeValue); }
-                const out = {};
-                for (const k of Object.keys(v)) { out[k] = decodeValue(v[k]); }
-                return out;
-            }
-            return v;
-        };
-
-        const loadDb = function (name) {
-            try {
-                const raw = global.__next2d_storage_load("idb_" + name);
-                if (raw) { return JSON.parse(raw); }
-            } catch (e) { /* 破損時は初期化 */ }
-            return { "version": 0, "stores": {} };
-        };
-        const saveDb = function (name, db) {
-            try { global.__next2d_storage_save("idb_" + name, JSON.stringify(db)); } catch (e) { /* 無視 */ }
-        };
-
-        const makeRequest = function () {
-            return { "onsuccess": null, "onerror": null, "result": undefined, "error": null };
-        };
-        const fireSuccess = function (r) {
-            global.queueMicrotask(function () {
-                if (typeof r.onsuccess === "function") { r.onsuccess({ "target": r }); }
-            });
-        };
-        const fireError = function (r, e) {
-            r.error = e;
-            global.queueMicrotask(function () {
-                if (typeof r.onerror === "function") { r.onerror({ "target": r }); }
-            });
-        };
-
-        global.indexedDB = {
-            open(name, version) {
-                const req = makeRequest();
-                req.onupgradeneeded = null;
-                req.onblocked = null;
-                global.queueMicrotask(function () {
-                    const data = loadDb(name);
-
-                    const storeApi = function (storeName) {
-                        const entry = data.stores[storeName] ||
-                            (data.stores[storeName] = { "keyPath": null, "data": {} });
-                        const run = function (fn) {
-                            const r = makeRequest();
-                            global.queueMicrotask(function () {
-                                try { r.result = fn(); fireSuccess(r); }
-                                catch (e) { fireError(r, e); }
-                            });
-                            return r;
-                        };
-                        return {
-                            "keyPath": entry.keyPath,
-                            get(key) {
-                                return run(function () {
-                                    const raw = entry.data[String(key)];
-                                    return raw === undefined ? undefined : decodeValue(raw);
-                                });
-                            },
-                            put(value, key) {
-                                return run(function () {
-                                    let k = key;
-                                    if (k === undefined && entry.keyPath && value &&
-                                        typeof value === "object") {
-                                        k = value[entry.keyPath];
-                                    }
-                                    if (k === undefined) { throw new Error("key required"); }
-                                    entry.data[String(k)] = encodeValue(value);
-                                    saveDb(name, data);
-                                    return k;
-                                });
-                            },
-                            add(value, key) { return this.put(value, key); },
-                            "delete": function (key) {
-                                return run(function () {
-                                    delete entry.data[String(key)];
-                                    saveDb(name, data);
-                                });
-                            },
-                            clear() {
-                                return run(function () {
-                                    entry.data = {};
-                                    saveDb(name, data);
-                                });
-                            },
-                            count() { return run(function () { return Object.keys(entry.data).length; }); },
-                            getAll() {
-                                return run(function () {
-                                    return Object.keys(entry.data).map(function (k) {
-                                        return decodeValue(entry.data[k]);
-                                    });
-                                });
-                            },
-                            getAllKeys() { return run(function () { return Object.keys(entry.data); }); }
-                        };
-                    };
-
-                    const dbObj = {
-                        "name": name,
-                        "objectStoreNames": {
-                            contains(s) { return Object.prototype.hasOwnProperty.call(data.stores, s); },
-                            get length() { return Object.keys(data.stores).length; }
-                        },
-                        createObjectStore(storeName, options) {
-                            if (!data.stores[storeName]) {
-                                data.stores[storeName] = {
-                                    "keyPath": options && options.keyPath ? options.keyPath : null,
-                                    "data": {}
-                                };
-                                saveDb(name, data);
-                            }
-                            return storeApi(storeName);
-                        },
-                        deleteObjectStore(storeName) {
-                            delete data.stores[storeName];
-                            saveDb(name, data);
-                        },
-                        transaction(_names, _mode) {
-                            const tx = {
-                                "oncomplete": null, "onerror": null, "onabort": null,
-                                objectStore(s) { return storeApi(s); },
-                                abort() { /* 未対応 */ },
-                                commit() { /* 自動コミット */ }
-                            };
-                            // 全リクエストのマイクロタスク消化後に complete を発火
-                            global.queueMicrotask(function () {
-                                global.queueMicrotask(function () {
-                                    global.queueMicrotask(function () {
-                                        if (typeof tx.oncomplete === "function") {
-                                            tx.oncomplete({ "target": tx });
-                                        }
-                                    });
-                                });
-                            });
-                            return tx;
-                        },
-                        close() { /* no-op */ },
-                        "onversionchange": null
-                    };
-
-                    const oldVersion = data.version || 0;
-                    const newVersion = typeof version === "number" ? version : Math.max(1, oldVersion);
-                    req.result = dbObj;
-                    if (newVersion > oldVersion) {
-                        data.version = newVersion;
-                        if (typeof req.onupgradeneeded === "function") {
-                            req.onupgradeneeded({
-                                "target": req,
-                                "oldVersion": oldVersion,
-                                "newVersion": newVersion
-                            });
-                        }
-                        saveDb(name, data);
-                    }
-                    if (typeof req.onsuccess === "function") {
-                        req.onsuccess({ "target": req });
-                    }
-                });
-                return req;
-            },
-            deleteDatabase(name) {
-                const req = makeRequest();
-                global.queueMicrotask(function () {
-                    try {
-                        global.__next2d_storage_save("idb_" + name, "");
-                        fireSuccess(req);
-                    } catch (e) {
-                        fireError(req, e);
-                    }
-                });
-                return req;
-            }
-        };
-    }
-
     if (typeof global.TextDecoder === "undefined") {
         global.TextDecoder = class TextDecoder {
             constructor(label) { this._label = label || "utf-8"; }
@@ -764,6 +529,661 @@ const char kPolyfills6[] = R"JS(
 })(globalThis);
 )JS";
 
+// section 7: indexedDB (完全実装: cursor/index/複合キー/IDBKeyRange/autoIncrement)。
+// 31KB あり MSVC の文字列リテラル上限(~16KB)を超えるため 3 リテラルに分割し、
+// InstallPolyfills で連結して 1 スクリプトとして評価する。atob/btoa(section3)と
+// queueMicrotask(section4)に依存するため、それらの後で評価すること。
+const char kIndexedDB1[] = R"JS(
+(function (global) {
+    "use strict";
+    // indexedDB (ファイル永続化・単一スレッド同期ストア + 非同期 API 面)。
+    // 対応: open/upgrade, objectStore(keyPath / 複合keyPath / autoIncrement),
+    //       get/getKey/getAll/getAllKeys/count/put/add/delete/clear,
+    //       createIndex/index/deleteIndex(unique/multiEntry),
+    //       openCursor/openKeyCursor(next/nextunique/prev/prevunique, IDBKeyRange),
+    //       IDBKeyRange(only/lowerBound/upperBound/bound)。
+    // 値は JSON 化可能なもの + ArrayBuffer/TypedArray (base64 タグ付け)。
+    if (typeof global.indexedDB !== "undefined" ||
+        typeof global.__next2d_storage_load !== "function") {
+        return;
+    }
+
+    const TYPED = {
+        "Int8Array": Int8Array, "Uint8Array": Uint8Array,
+        "Uint8ClampedArray": Uint8ClampedArray,
+        "Int16Array": Int16Array, "Uint16Array": Uint16Array,
+        "Int32Array": Int32Array, "Uint32Array": Uint32Array,
+        "Float32Array": Float32Array, "Float64Array": Float64Array
+    };
+
+    const bytesToB64 = function (u8) {
+        let bin = "";
+        for (let i = 0; i < u8.length; i += 0x8000) {
+            bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+        }
+        return global.btoa(bin);
+    };
+    const b64ToBytes = function (b64) {
+        const bin = global.atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) { u8[i] = bin.charCodeAt(i); }
+        return u8;
+    };
+    const encodeValue = function (v) {
+        if (v instanceof ArrayBuffer) {
+            return { "__n2d_bin": bytesToB64(new Uint8Array(v)), "__n2d_type": "ArrayBuffer" };
+        }
+        if (ArrayBuffer.isView(v)) {
+            const name = v.constructor && v.constructor.name;
+            if (TYPED[name]) {
+                return {
+                    "__n2d_bin": bytesToB64(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)),
+                    "__n2d_type": name
+                };
+            }
+        }
+        if (Array.isArray(v)) { return v.map(encodeValue); }
+        if (v && typeof v === "object") {
+            const out = {};
+            for (const k of Object.keys(v)) { out[k] = encodeValue(v[k]); }
+            return out;
+        }
+        return v;
+    };
+    const decodeValue = function (v) {
+        if (v && typeof v === "object") {
+            if (typeof v.__n2d_bin === "string") {
+                const u8 = b64ToBytes(v.__n2d_bin);
+                if (v.__n2d_type === "ArrayBuffer") { return u8.buffer; }
+                const Ctor = TYPED[v.__n2d_type] || Uint8Array;
+                return new Ctor(u8.buffer, 0, u8.byteLength / Ctor.BYTES_PER_ELEMENT);
+            }
+            if (Array.isArray(v)) { return v.map(decodeValue); }
+            const out = {};
+            for (const k of Object.keys(v)) { out[k] = decodeValue(v[k]); }
+            return out;
+        }
+        return v;
+    };
+
+    // --- キー順序 (IndexedDB 仕様: number < string < array) -------------------
+    const keyType = function (k) {
+        if (Array.isArray(k)) { return 3; }
+        if (typeof k === "number") { return 0; }
+        if (typeof k === "string") { return 2; }
+        return -1;
+    };
+    const cmpKeys = function (a, b) {
+        const ta = keyType(a), tb = keyType(b);
+        if (ta !== tb) { return ta < tb ? -1 : 1; }
+        if (ta === 3) {
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+                const c = cmpKeys(a[i], b[i]);
+                if (c !== 0) { return c; }
+            }
+            return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+        }
+        if (a < b) { return -1; }
+        if (a > b) { return 1; }
+        return 0;
+    };
+    const isValidKey = function (k) { return keyType(k) !== -1; };
+    // ストレージのマップ用一意文字列
+    const encKey = function (k) { return JSON.stringify(k); };
+
+    // objectStoreNames / indexNames は配列 + DOMStringList 互換 (contains/item)。
+    const nameList = function (names) {
+        names.sort();
+        names.contains = function (n) { return names.indexOf(n) !== -1; };
+        names.item = function (i) { return names[i] != null ? names[i] : null; };
+        return names;
+    };
+
+    // --- keyPath 抽出 (ネスト "a.b" / 複合 ["a","b"]) -------------------------
+    const evalPath = function (value, path) {
+        if (path === "") { return value; }
+        const parts = path.split(".");
+        let cur = value;
+        for (let i = 0; i < parts.length; i++) {
+            if (cur == null || typeof cur !== "object") { return undefined; }
+            cur = cur[parts[i]];
+        }
+        return cur;
+    };
+    const extractKey = function (value, keyPath) {
+        if (keyPath == null) { return undefined; }
+        if (Array.isArray(keyPath)) {
+            const out = [];
+            for (let i = 0; i < keyPath.length; i++) {
+                const k = evalPath(value, keyPath[i]);
+                if (k === undefined) { return undefined; }
+                out.push(k);
+            }
+            return out;
+        }
+        return evalPath(value, keyPath);
+    };
+    // in-line key を value へ書き戻す (autoIncrement 生成キー用、ネスト対応)
+    const injectKey = function (value, keyPath, key) {
+        if (typeof keyPath !== "string" || value == null || typeof value !== "object") { return; }
+        const parts = keyPath.split(".");
+        let cur = value;
+        for (let i = 0; i < parts.length - 1; i++) {
+            if (cur[parts[i]] == null || typeof cur[parts[i]] !== "object") { cur[parts[i]] = {}; }
+            cur = cur[parts[i]];
+        }
+        cur[parts[parts.length - 1]] = key;
+    };
+
+    // --- IDBKeyRange --------------------------------------------------------
+    const makeRange = function (lower, upper, lowerOpen, upperOpen) {
+        return {
+            "lower": lower, "upper": upper,
+            "lowerOpen": !!lowerOpen, "upperOpen": !!upperOpen,
+            includes(key) { return rangeIncludes(this, key); }
+        };
+    };
+    const rangeIncludes = function (range, key) {
+        if (range == null) { return true; }
+        // 素のキー (range でない) は only 相当
+        if (typeof range !== "object" || !("lower" in range)) {
+            return cmpKeys(key, range) === 0;
+        }
+        if (range.lower !== undefined) {
+            const c = cmpKeys(key, range.lower);
+            if (c < 0 || (c === 0 && range.lowerOpen)) { return false; }
+        }
+        if (range.upper !== undefined) {
+            const c = cmpKeys(key, range.upper);
+            if (c > 0 || (c === 0 && range.upperOpen)) { return false; }
+        }
+        return true;
+    };
+    global.IDBKeyRange = {
+        only(v) { return makeRange(v, v, false, false); },
+        lowerBound(v, open) { return makeRange(v, undefined, open, false); },
+        upperBound(v, open) { return makeRange(undefined, v, false, open); },
+        bound(l, u, lo, uo) { return makeRange(l, u, lo, uo); }
+    };
+
+    // --- 永続化 -------------------------------------------------------------
+    const loadDb = function (name) {
+        try {
+            const raw = global.__next2d_storage_load("idb_" + name);
+            if (raw) { return JSON.parse(raw); }
+        } catch (e) { /* 破損時は初期化 */ }
+        return { "version": 0, "stores": {} };
+    };
+    const saveDb = function (name, db) {
+        try { global.__next2d_storage_save("idb_" + name, JSON.stringify(db)); } catch (e) { /* 無視 */ }
+    };
+
+    // --- 非同期 request/event ----------------------------------------------
+    const makeRequest = function () {
+        return {
+            "onsuccess": null, "onerror": null, "onupgradeneeded": null, "onblocked": null,
+            "result": undefined, "error": null, "readyState": "pending", "source": null,
+            "transaction": null
+        };
+    };
+    const fireSuccess = function (r) {
+        global.queueMicrotask(function () {
+            r.readyState = "done";
+            if (typeof r.onsuccess === "function") { r.onsuccess({ "target": r }); }
+        });
+    };
+    const fireError = function (r, e) {
+        r.error = e;
+        global.queueMicrotask(function () {
+            r.readyState = "done";
+            if (typeof r.onerror === "function") { r.onerror({ "target": r }); }
+        });
+    };
+
+    global.indexedDB = {
+        open(name, version) {
+            const req = makeRequest();
+            global.queueMicrotask(function () {
+                const data = loadDb(name);
+
+)JS";
+const char kIndexedDB2[] = R"JS(
+                // records: encKey -> { "key": rawKey, "value": encodedValue }
+                const storeApi = function (storeName, tx) {
+                    const entry = data.stores[storeName];
+                    if (!entry) { throw new Error("NotFoundError: object store '" + storeName + "'"); }
+                    if (!entry.records) { entry.records = {}; }
+                    if (!entry.indexes) { entry.indexes = {}; }
+
+                    const run = function (fn) {
+                        const r = makeRequest();
+                        r.transaction = tx;
+                        global.queueMicrotask(function () {
+                            try { r.result = fn(); fireSuccess(r); }
+                            catch (e) { fireError(r, e); }
+                        });
+                        return r;
+                    };
+
+                    const allRecords = function () {
+                        return Object.keys(entry.records).map(function (ek) {
+                            return entry.records[ek];
+                        });
+                    };
+                    const sortedRecords = function () {
+                        return allRecords().sort(function (a, b) { return cmpKeys(a.key, b.key); });
+                    };
+
+                    const resolveKey = function (value, key) {
+                        let k = key;
+                        if (k === undefined && entry.keyPath != null) {
+                            k = extractKey(value, entry.keyPath);
+                        }
+                        if (k === undefined && entry.autoIncrement) {
+                            entry.keyGen = (entry.keyGen || 0) + 1;
+                            k = entry.keyGen;
+                            if (typeof entry.keyPath === "string") { injectKey(value, entry.keyPath, k); }
+                        } else if (typeof k === "number" && entry.autoIncrement && k > (entry.keyGen || 0)) {
+                            entry.keyGen = Math.floor(k);
+                        }
+                        return k;
+                    };
+
+                    const putImpl = function (value, key, noOverwrite) {
+                        const k = resolveKey(value, key);
+                        if (k === undefined || !isValidKey(k)) { throw new Error("DataError: invalid key"); }
+                        const ek = encKey(k);
+                        if (noOverwrite && Object.prototype.hasOwnProperty.call(entry.records, ek)) {
+                            throw new Error("ConstraintError: key already exists");
+                        }
+                        entry.records[ek] = { "key": k, "value": encodeValue(value) };
+                        saveDb(name, data);
+                        return k;
+                    };
+
+                    // カーソル生成 (records: 配列 [{key, primaryKey, value(encoded)}])
+                    const makeCursor = function (req2, source, records, direction, keyOnly) {
+                        const dir = direction || "next";
+                        records.sort(function (a, b) {
+                            return cmpKeys(a.key, b.key) || cmpKeys(a.primaryKey, b.primaryKey);
+                        });
+                        if (dir === "prev" || dir === "prevunique") { records.reverse(); }
+                        if (dir === "nextunique" || dir === "prevunique") {
+                            const seen = [];
+                            const uniq = [];
+                            for (let i = 0; i < records.length; i++) {
+                                const ek = encKey(records[i].key);
+                                if (seen.indexOf(ek) === -1) { seen.push(ek); uniq.push(records[i]); }
+                            }
+                            records = uniq;
+                        }
+                        let pos = -1;
+                        const cursor = {
+                            "direction": dir,
+                            "source": source,
+                            get key() { return pos >= 0 && pos < records.length ? records[pos].key : undefined; },
+                            get primaryKey() { return pos >= 0 && pos < records.length ? records[pos].primaryKey : undefined; },
+                            get value() {
+                                if (keyOnly || pos < 0 || pos >= records.length) { return undefined; }
+                                return decodeValue(records[pos].value);
+                            },
+                            continue(key) {
+                                if (key === undefined) { pos++; }
+                                else {
+                                    const forward = (dir === "next" || dir === "nextunique");
+                                    let np = pos + 1;
+                                    while (np < records.length) {
+                                        const c = cmpKeys(records[np].key, key);
+                                        if ((forward && c >= 0) || (!forward && c <= 0)) { break; }
+                                        np++;
+                                    }
+                                    pos = np;
+                                }
+                                step();
+                            },
+                            advance(count) { pos += (count > 0 ? count : 1); step(); },
+                            "delete": function () {
+                                const rec = records[pos];
+                                return run(function () {
+                                    if (rec) { delete entry.records[encKey(rec.primaryKey)]; saveDb(name, data); }
+                                });
+                            },
+                            update(value) {
+                                const rec = records[pos];
+                                return run(function () {
+                                    if (!rec) { throw new Error("InvalidStateError"); }
+                                    entry.records[encKey(rec.primaryKey)] = {
+                                        "key": rec.primaryKey, "value": encodeValue(value)
+                                    };
+                                    saveDb(name, data);
+                                    return rec.primaryKey;
+                                });
+                            }
+                        };
+                        const step = function () {
+                            if (pos >= 0 && pos < records.length) { req2.result = cursor; }
+                            else { req2.result = null; }
+                            fireSuccess(req2);
+                        };
+                        // カーソルを最初のレコードへ位置づけて success を発火する
+                        pos++;
+                        step();
+                    };
+
+                    const api = {
+                        "name": storeName,
+                        "keyPath": entry.keyPath != null ? entry.keyPath : null,
+                        "autoIncrement": !!entry.autoIncrement,
+                        get indexNames() { return nameList(Object.keys(entry.indexes)); },
+                        "transaction": tx,
+                        get(key) {
+                            return run(function () {
+                                const recs = sortedRecords();
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(key, recs[i].key)) { return decodeValue(recs[i].value); }
+                                }
+                                return undefined;
+                            });
+                        },
+                        getKey(key) {
+                            return run(function () {
+                                const recs = sortedRecords();
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(key, recs[i].key)) { return recs[i].key; }
+                                }
+                                return undefined;
+                            });
+                        },
+                        put(value, key) { return run(function () { return putImpl(value, key, false); }); },
+                        add(value, key) { return run(function () { return putImpl(value, key, true); }); },
+                        "delete": function (key) {
+                            return run(function () {
+                                const recs = sortedRecords();
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(key, recs[i].key)) { delete entry.records[encKey(recs[i].key)]; }
+                                }
+                                saveDb(name, data);
+                            });
+                        },
+                        clear() { return run(function () { entry.records = {}; saveDb(name, data); }); },
+                        count(key) {
+                            return run(function () {
+                                const recs = sortedRecords();
+                                let n = 0;
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(key, recs[i].key)) { n++; }
+                                }
+                                return n;
+                            });
+                        },
+                        getAll(query, count) {
+                            return run(function () {
+                                const out = [];
+                                const recs = sortedRecords();
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(query, recs[i].key)) { out.push(decodeValue(recs[i].value)); }
+                                    if (count && out.length >= count) { break; }
+                                }
+                                return out;
+                            });
+                        },
+                        getAllKeys(query, count) {
+                            return run(function () {
+                                const out = [];
+                                const recs = sortedRecords();
+                                for (let i = 0; i < recs.length; i++) {
+                                    if (rangeIncludes(query, recs[i].key)) { out.push(recs[i].key); }
+                                    if (count && out.length >= count) { break; }
+                                }
+                                return out;
+                            });
+                        },
+                        openCursor(query, direction) {
+                            const r = makeRequest();
+                            r.transaction = tx;
+                            global.queueMicrotask(function () {
+                                const recs = sortedRecords()
+                                    .filter(function (rec) { return rangeIncludes(query, rec.key); })
+                                    .map(function (rec) {
+                                        return { "key": rec.key, "primaryKey": rec.key, "value": rec.value };
+                                    });
+                                makeCursor(r, api, recs, direction, false);
+                            });
+                            return r;
+                        },
+                        openKeyCursor(query, direction) {
+                            const r = makeRequest();
+                            r.transaction = tx;
+                            global.queueMicrotask(function () {
+                                const recs = sortedRecords()
+                                    .filter(function (rec) { return rangeIncludes(query, rec.key); })
+                                    .map(function (rec) {
+                                        return { "key": rec.key, "primaryKey": rec.key, "value": rec.value };
+                                    });
+                                makeCursor(r, api, recs, direction, true);
+                            });
+)JS";
+const char kIndexedDB3[] = R"JS(
+                            return r;
+                        },
+                        createIndex(indexName, keyPath, options) {
+                            entry.indexes[indexName] = {
+                                "keyPath": keyPath,
+                                "unique": !!(options && options.unique),
+                                "multiEntry": !!(options && options.multiEntry)
+                            };
+                            saveDb(name, data);
+                            return indexApi(indexName);
+                        },
+                        deleteIndex(indexName) {
+                            delete entry.indexes[indexName];
+                            saveDb(name, data);
+                        },
+                        index(indexName) { return indexApi(indexName); }
+                    };
+
+                    // インデックス: レコードを走査してインデックスキーを抽出する。
+                    const indexApi = function (indexName) {
+                        const meta = entry.indexes[indexName];
+                        if (!meta) { throw new Error("NotFoundError: index '" + indexName + "'"); }
+                        // [{ indexKey, primaryKey, value }] を multiEntry 展開込みで生成
+                        const indexRecords = function () {
+                            const out = [];
+                            const recs = allRecords();
+                            for (let i = 0; i < recs.length; i++) {
+                                const decoded = decodeValue(recs[i].value);
+                                let ik = extractKey(decoded, meta.keyPath);
+                                if (ik === undefined) { continue; }
+                                if (meta.multiEntry && Array.isArray(ik)) {
+                                    for (let j = 0; j < ik.length; j++) {
+                                        if (isValidKey(ik[j])) {
+                                            out.push({ "key": ik[j], "primaryKey": recs[i].key, "value": recs[i].value });
+                                        }
+                                    }
+                                } else if (isValidKey(ik)) {
+                                    out.push({ "key": ik, "primaryKey": recs[i].key, "value": recs[i].value });
+                                }
+                            }
+                            out.sort(function (a, b) {
+                                return cmpKeys(a.key, b.key) || cmpKeys(a.primaryKey, b.primaryKey);
+                            });
+                            return out;
+                        };
+                        return {
+                            "name": indexName,
+                            "keyPath": meta.keyPath,
+                            "unique": meta.unique,
+                            "multiEntry": meta.multiEntry,
+                            "objectStore": api,
+                            get(key) {
+                                return run(function () {
+                                    const recs = indexRecords();
+                                    for (let i = 0; i < recs.length; i++) {
+                                        if (rangeIncludes(key, recs[i].key)) { return decodeValue(recs[i].value); }
+                                    }
+                                    return undefined;
+                                });
+                            },
+                            getKey(key) {
+                                return run(function () {
+                                    const recs = indexRecords();
+                                    for (let i = 0; i < recs.length; i++) {
+                                        if (rangeIncludes(key, recs[i].key)) { return recs[i].primaryKey; }
+                                    }
+                                    return undefined;
+                                });
+                            },
+                            getAll(query, count) {
+                                return run(function () {
+                                    const out = [];
+                                    const recs = indexRecords();
+                                    for (let i = 0; i < recs.length; i++) {
+                                        if (rangeIncludes(query, recs[i].key)) { out.push(decodeValue(recs[i].value)); }
+                                        if (count && out.length >= count) { break; }
+                                    }
+                                    return out;
+                                });
+                            },
+                            getAllKeys(query, count) {
+                                return run(function () {
+                                    const out = [];
+                                    const recs = indexRecords();
+                                    for (let i = 0; i < recs.length; i++) {
+                                        if (rangeIncludes(query, recs[i].key)) { out.push(recs[i].primaryKey); }
+                                        if (count && out.length >= count) { break; }
+                                    }
+                                    return out;
+                                });
+                            },
+                            count(key) {
+                                return run(function () {
+                                    const recs = indexRecords();
+                                    let n = 0;
+                                    for (let i = 0; i < recs.length; i++) {
+                                        if (rangeIncludes(key, recs[i].key)) { n++; }
+                                    }
+                                    return n;
+                                });
+                            },
+                            openCursor(query, direction) {
+                                const r = makeRequest();
+                                r.transaction = tx;
+                                global.queueMicrotask(function () {
+                                    const recs = indexRecords().filter(function (rec) {
+                                        return rangeIncludes(query, rec.key);
+                                    });
+                                    makeCursor(r, this, recs, direction, false);
+                                });
+                                return r;
+                            },
+                            openKeyCursor(query, direction) {
+                                const r = makeRequest();
+                                r.transaction = tx;
+                                global.queueMicrotask(function () {
+                                    const recs = indexRecords().filter(function (rec) {
+                                        return rangeIncludes(query, rec.key);
+                                    });
+                                    makeCursor(r, this, recs, direction, true);
+                                });
+                                return r;
+                            }
+                        };
+                    };
+
+                    return api;
+                };
+
+                const dbObj = {
+                    "name": name,
+                    "version": 0,
+                    get objectStoreNames() { return nameList(Object.keys(data.stores)); },
+                    createObjectStore(storeName, options) {
+                        if (!data.stores[storeName]) {
+                            data.stores[storeName] = {
+                                "keyPath": options && options.keyPath !== undefined ? options.keyPath : null,
+                                "autoIncrement": !!(options && options.autoIncrement),
+                                "records": {}, "indexes": {}, "keyGen": 0
+                            };
+                            saveDb(name, data);
+                        }
+                        return storeApi(storeName, currentTx);
+                    },
+                    deleteObjectStore(storeName) {
+                        delete data.stores[storeName];
+                        saveDb(name, data);
+                    },
+                    transaction(_names, _mode) {
+                        const tx = {
+                            "oncomplete": null, "onerror": null, "onabort": null,
+                            "db": dbObj, "mode": _mode || "readonly", "error": null,
+                            objectStore(s) { return storeApi(s, tx); },
+                            abort() { /* 単純化: ロールバック無し */ },
+                            commit() { /* 自動コミット */ }
+                        };
+                        // 全リクエストのマイクロタスク消化後に complete
+                        let depth = 0;
+                        const settle = function () {
+                            if (depth++ < 4) { global.queueMicrotask(settle); return; }
+                            if (typeof tx.oncomplete === "function") { tx.oncomplete({ "target": tx }); }
+                        };
+                        global.queueMicrotask(settle);
+                        return tx;
+                    },
+                    close() { /* no-op */ },
+                    "onversionchange": null, "onabort": null, "onerror": null, "onclose": null
+                };
+
+                const oldVersion = data.version || 0;
+                const newVersion = typeof version === "number" ? version : Math.max(1, oldVersion);
+                dbObj.version = newVersion;
+                let currentTx = null;
+
+                req.result = dbObj;
+                req.readyState = "done";
+                if (newVersion > oldVersion) {
+                    data.version = newVersion;
+                    // upgrade トランザクション (versionchange)
+                    currentTx = {
+                        "oncomplete": null, "onerror": null, "onabort": null,
+                        "db": dbObj, "mode": "versionchange", "error": null,
+                        objectStore(s) { return storeApi(s, currentTx); },
+                        abort() {}, commit() {}
+                    };
+                    if (typeof req.onupgradeneeded === "function") {
+                        req.onupgradeneeded({
+                            "target": req, "oldVersion": oldVersion, "newVersion": newVersion
+                        });
+                    }
+                    saveDb(name, data);
+                    currentTx = null;
+                }
+                if (typeof req.onsuccess === "function") {
+                    req.onsuccess({ "target": req });
+                }
+            });
+            return req;
+        },
+        deleteDatabase(name) {
+            const req = makeRequest();
+            global.queueMicrotask(function () {
+                try {
+                    global.__next2d_storage_save("idb_" + name, "");
+                    fireSuccess(req);
+                } catch (e) {
+                    fireError(req, e);
+                }
+            });
+            return req;
+        },
+        cmp(a, b) { return cmpKeys(a, b); }
+    };
+})(globalThis);
+)JS";
+const char* const kIndexedDBChunks[] = {
+    kIndexedDB1, kIndexedDB2, kIndexedDB3,
+};
+
 const char* const kPolyfillSections[] = {
     kPolyfills1,
     kPolyfills2,
@@ -781,6 +1201,21 @@ void InstallPolyfills(v8::Isolate* isolate, v8::Local<v8::Context> context)
     for (const char* source : kPolyfillSections) {
         v8::TryCatch tc(isolate);
         v8::Local<v8::String> src = v8util::Str(isolate, source);
+        v8::Local<v8::Script> script;
+        if (v8::Script::Compile(context, src).ToLocal(&script)) {
+            (void) script->Run(context);
+        }
+    }
+
+    // indexedDB は 3 リテラルを連結して 1 スクリプトとして評価する
+    // (単一 IIFE のため分割評価できない)。
+    {
+        std::string idb;
+        for (const char* chunk : kIndexedDBChunks) {
+            idb += chunk;
+        }
+        v8::TryCatch tc(isolate);
+        v8::Local<v8::String> src = v8util::Str(isolate, idb);
         v8::Local<v8::Script> script;
         if (v8::Script::Compile(context, src).ToLocal(&script)) {
             (void) script->Run(context);

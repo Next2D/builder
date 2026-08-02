@@ -1,5 +1,10 @@
 #include "WicDecoder.h"
 
+// WIC はコンソール (Game Core OS) に存在しないデスクトップ専用 API。
+// 第一経路は ImageDecoder (stb_image) で、本ファイルはデスクトップの
+// フォールバック (TIFF/HEIF 等 stb 非対応形式) のみを担う。
+#if !NEXT2D_XBOX_CONSOLE
+
 #include <wincodec.h>
 #include <wrl/client.h>
 
@@ -61,3 +66,17 @@ bool DecodeImageWithWIC(const std::vector<uint8_t>& input, DecodedImage& out)
 }
 
 } // namespace next2d
+
+#else // NEXT2D_XBOX_CONSOLE
+
+namespace next2d {
+
+// コンソール: WIC 無し。ImageDecoder (stb_image) が全デコードを担う。
+bool DecodeImageWithWIC(const std::vector<uint8_t>&, DecodedImage&)
+{
+    return false;
+}
+
+} // namespace next2d
+
+#endif // !NEXT2D_XBOX_CONSOLE

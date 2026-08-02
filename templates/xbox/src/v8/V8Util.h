@@ -3,8 +3,10 @@
 
 #include <v8.h>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace next2d::v8util {
 
@@ -15,6 +17,32 @@ inline v8::Local<v8::String> Str(v8::Isolate* isolate, std::string_view s)
         isolate, s.data(), v8::NewStringType::kNormal,
         static_cast<int>(s.size())
     ).ToLocalChecked();
+}
+
+// プロパティ名 v8::String のキャッシュ。
+// バインディングのディスクリプタ解析 (webgpu::Prop/HasProp/U32 等) は毎フレーム
+// 数千回呼ばれ、その度に NewFromUtf8 が JS ヒープ確保 + ハッシュ計算をしていた。
+// internalized string (isolate 内で重複排除され、プロパティ検索がポインタ比較で済む)
+// を v8::Eternal で保持し、2 回目以降はハッシュマップ参照のみにする。
+// jitless では JS↔C++ 境界のコストが相対的に重いため、ここの削減が全体に効く。
+// キーは内容比較 (std::string) なので呼び出し元がリテラル以外を渡しても安全。
+// ホストは単一 Isolate 運用 (worker も同一 Isolate の別 Context) だが、
+// 念のため isolate が変わったらキャッシュを破棄する (Eternal は isolate 寿命に紐づく)。
+inline v8::Local<v8::String> PropName(v8::Isolate* isolate, const char* key)
+{
+    static v8::Isolate* cached_isolate = nullptr;
+    static std::unordered_map<std::string, v8::Eternal<v8::String>> cache;
+    if (cached_isolate != isolate) {
+        cache.clear();
+        cached_isolate = isolate;
+    }
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        v8::Local<v8::String> s = v8::String::NewFromUtf8(
+            isolate, key, v8::NewStringType::kInternalized).ToLocalChecked();
+        it = cache.emplace(key, v8::Eternal<v8::String>(isolate, s)).first;
+    }
+    return it->second.Get(isolate);
 }
 
 // v8::Value -> std::string (UTF-8)
@@ -58,6 +86,23 @@ inline void ThrowTypeError(v8::Isolate* isolate, std::string_view message)
 // rAF / タイマー / onmessage / イベントリスナーのコールバックは TryCatch で
 // 保護されるが、報告しないと例外が無音で消えて原因究明が不可能になる
 // (レンダラ worker が毎フレーム throw していても黒画面にしか見えない)。
+// 例外を stderr に加えてログファイルにも残す。GUI 実行(ダブルクリック)では stderr が
+// 捨てられて例外が見えないため、rAF/タイマー/リスナーで無音死する不具合(例: Tween の
+// rAF チェーンが UPDATE リスナの throw で再登録されず停止)を実行後に追跡できるように
+// する。暴走ログ防止に先頭 200 件までに制限。ファイルは実行ディレクトリの next2d-error.log。
+inline void AppendErrorLog(const std::string& line)
+{
+    static int written = 0;
+    if (written >= 200) {
+        return;
+    }
+    ++written;
+    std::ofstream ofs("next2d-error.log", std::ios::app);
+    if (ofs) {
+        ofs << line << std::endl;
+    }
+}
+
 inline void ReportCaught(v8::Isolate* isolate, v8::TryCatch* tc, const char* where)
 {
     if (!tc->HasCaught()) {
@@ -66,19 +111,24 @@ inline void ReportCaught(v8::Isolate* isolate, v8::TryCatch* tc, const char* whe
     v8::HandleScope hs(isolate);
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
     const std::string text = ToStdString(isolate, tc->Exception());
-    std::cerr << "[JS] exception in " << where << ": " << text << std::endl;
+    const std::string head = std::string("[JS] exception in ") + where + ": " + text;
+    std::cerr << head << std::endl;
+    AppendErrorLog(head);
     v8::Local<v8::Value> stack;
     if (!ctx.IsEmpty() && tc->StackTrace(ctx).ToLocal(&stack)) {
         const std::string s = ToStdString(isolate, stack);
         if (!s.empty() && s != text) {
             std::cerr << s << std::endl;
+            AppendErrorLog(s);
         }
     }
     v8::Local<v8::Message> message = tc->Message();
     if (!message.IsEmpty() && !ctx.IsEmpty()) {
-        std::cerr << "  at "
-                  << ToStdString(isolate, message->GetScriptOrigin().ResourceName())
-                  << ":" << message->GetLineNumber(ctx).FromMaybe(0) << std::endl;
+        const std::string loc = std::string("  at ")
+            + ToStdString(isolate, message->GetScriptOrigin().ResourceName())
+            + ":" + std::to_string(message->GetLineNumber(ctx).FromMaybe(0));
+        std::cerr << loc << std::endl;
+        AppendErrorLog(loc);
     }
 }
 

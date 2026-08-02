@@ -4,7 +4,8 @@
 #include "AssetLoader.h"
 #include "EventTarget.h"
 #include "ImageSource.h"
-#include "platform/WicDecoder.h"
+#include "platform/DecodeQueue.h"
+#include "platform/ImageDecoder.h"
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
@@ -12,6 +13,8 @@
 
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace next2d {
@@ -49,34 +52,11 @@ bool ImageDecodeBase64(const std::string& in, std::vector<uint8_t>* out)
     return true;
 }
 
-// 遅延発火する load/error イベント (img.src = url; img.onload = fn の順でも拾えるよう
-// microtask で発火する。メインループの PerformMicrotaskCheckpoint が実行する)
-struct PendingImageEvent {
-    v8::Isolate* isolate;
-    v8::Global<v8::Object> image;
-    bool ok;
-};
-
-void FireImageEvent(void* data)
-{
-    auto* p = static_cast<PendingImageEvent*>(data);
-    v8::Isolate* isolate = p->isolate;
-    v8::HandleScope hs(isolate);
-    v8::Local<v8::Object> img = p->image.Get(isolate);
-    v8::Local<v8::Context> ctx = img->GetCreationContextChecked();
-    v8::Context::Scope cs(ctx);
-
-    v8::Local<v8::Object> ev = v8::Object::New(isolate);
-    v8util::SetValue(isolate, ev, "type", Str(isolate, p->ok ? "load" : "error"));
-    v8util::SetValue(isolate, ev, "target", img);
-    DispatchEvent(isolate, img, ev);
-
-    p->image.Reset();
-    delete p;
-}
-
-// src に指定された URL (assets 相対 / data:) を読み込み WIC でデコードする。
-// 成否イベントは microtask で発火する。
+// src に指定された URL (assets 相対 / data:) を読み込み、WIC デコードを
+// バックグラウンドスレッド (DecodeQueue) へ逃がす。完了はメインループの
+// decodequeue::Pump() から反映される (ブラウザ同様、src 設定後に非同期で
+// load イベントが届く。img.src = url; img.onload = fn の順でも拾える)。
+// 同期デコードは画面遷移時に 1 秒超のフレームヒッチになる (--perf で計測済み)。
 void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const std::string& url)
 {
     std::vector<uint8_t> input;
@@ -90,6 +70,7 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
             }
         }
     } else {
+        // pak (メモリ) 読みなので同期で問題ない。重いのはデコードのみ。
         AssetLoader* assets = HostContext::From(isolate)->assets;
         auto bytes = assets->ReadBinary(url);
         if (bytes) {
@@ -97,31 +78,55 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
         }
     }
 
-    auto* img = new DecodedImage();
-    const bool ok = !input.empty() && DecodeImageWithWIC(input, *img);
-    if (ok) {
-        self->SetInternalField(0, v8::External::New(isolate, img));
-        v8util::AttachWeak(isolate, self, img);
-        v8util::SetValue(isolate, self, "width",
-                         v8::Integer::NewFromUnsigned(isolate, img->width));
-        v8util::SetValue(isolate, self, "height",
-                         v8::Integer::NewFromUnsigned(isolate, img->height));
-        v8util::SetValue(isolate, self, "naturalWidth",
-                         v8::Integer::NewFromUnsigned(isolate, img->width));
-        v8util::SetValue(isolate, self, "naturalHeight",
-                         v8::Integer::NewFromUnsigned(isolate, img->height));
-        v8util::SetValue(isolate, self, "complete", v8::Boolean::New(isolate, true));
-    } else {
-        delete img;
-        std::cerr << "[Image] load failed: "
-                  << (url.size() > 96 ? url.substr(0, 96) + "..." : url) << std::endl;
-    }
+    auto image_ref = std::make_shared<v8::Global<v8::Object>>(isolate, self);
+    auto decoded = std::make_shared<DecodedImage>();
+    auto ok = std::make_shared<bool>(false);
 
-    auto* pending = new PendingImageEvent();
-    pending->isolate = isolate;
-    pending->image.Reset(isolate, self);
-    pending->ok = ok;
-    isolate->EnqueueMicrotask(FireImageEvent, pending);
+    decodequeue::Submit(
+        // プールスレッド: WIC デコードのみ (V8 に触れない)
+        [input = std::move(input), decoded, ok]() {
+            *ok = DecodeImage(input, *decoded);
+        },
+        // メインスレッド: 結果を image オブジェクトへ反映し load を発火
+        [isolate, image_ref, decoded, ok]() {
+            v8::HandleScope hs(isolate);
+            v8::Local<v8::Object> img_obj = image_ref->Get(isolate);
+            v8::Local<v8::Context> ctx = img_obj->GetCreationContextChecked();
+            v8::Context::Scope cs(ctx);
+
+            // «堅牢化» デコード失敗時の扱い。
+            // player の ShapeLoadSrcUseCase は image に "load" ハンドラのみ登録し
+            // "error" を監視しない。"error" だと Event.COMPLETE が来ず ImageShapeAtom
+            // .load() の Promise が永久未解決になり、ページ build (=画面遷移) が
+            // ローディングのままフリーズする。失敗時は 1x1 透明のプレースホルダを
+            // 割り当てて "load" として扱う (該当画像だけが空になる)。
+            auto* img = new DecodedImage(std::move(*decoded));
+            if (!*ok) {
+                img->width = 1;
+                img->height = 1;
+                img->rgba.assign(4, 0);
+            }
+
+            img_obj->SetInternalField(0, v8::External::New(isolate, img));
+            v8util::AttachWeak(isolate, img_obj, img);
+            v8util::SetValue(isolate, img_obj, "width",
+                             v8::Integer::NewFromUnsigned(isolate, img->width));
+            v8util::SetValue(isolate, img_obj, "height",
+                             v8::Integer::NewFromUnsigned(isolate, img->height));
+            v8util::SetValue(isolate, img_obj, "naturalWidth",
+                             v8::Integer::NewFromUnsigned(isolate, img->width));
+            v8util::SetValue(isolate, img_obj, "naturalHeight",
+                             v8::Integer::NewFromUnsigned(isolate, img->height));
+            v8util::SetValue(isolate, img_obj, "complete", v8::Boolean::New(isolate, true));
+
+            // 常に "load" を発火し、遷移を進行させる
+            v8::Local<v8::Object> ev = v8::Object::New(isolate);
+            v8util::SetValue(isolate, ev, "type", Str(isolate, "load"));
+            v8util::SetValue(isolate, ev, "target", img_obj);
+            DispatchEvent(isolate, img_obj, ev);
+
+            image_ref->Reset();
+        });
 }
 
 // Image コンストラクタ: src セッターで読み込み+デコードし load イベントを発火する。
@@ -255,14 +260,35 @@ void CreateImageBitmap(const v8::FunctionCallbackInfo<v8::Value>& args)
         }
     }
 
-    auto* img = new DecodedImage();
-    if (input.empty() || !DecodeImageWithWIC(input, *img)) {
-        delete img;
+    if (input.empty()) {
         resolver->Reject(ctx, v8::Exception::Error(Str(isolate, "Image decode failed"))).Check();
         return;
     }
 
-    resolver->Resolve(ctx, WrapImageBitmap(isolate, img)).Check();
+    // WIC デコードはバックグラウンドスレッドへ (Promise なので元々非同期契約)
+    auto resolver_ref =
+        std::make_shared<v8::Global<v8::Promise::Resolver>>(isolate, resolver);
+    auto decoded = std::make_shared<DecodedImage>();
+    auto ok = std::make_shared<bool>(false);
+
+    decodequeue::Submit(
+        [input = std::move(input), decoded, ok]() {
+            *ok = DecodeImage(input, *decoded);
+        },
+        [isolate, resolver_ref, decoded, ok]() {
+            v8::HandleScope hs(isolate);
+            v8::Local<v8::Promise::Resolver> r = resolver_ref->Get(isolate);
+            v8::Local<v8::Context> c = r->GetCreationContextChecked();
+            v8::Context::Scope cs(c);
+            if (*ok) {
+                auto* img = new DecodedImage(std::move(*decoded));
+                r->Resolve(c, WrapImageBitmap(isolate, img)).Check();
+            } else {
+                r->Reject(c, v8::Exception::Error(
+                    Str(isolate, "Image decode failed"))).Check();
+            }
+            resolver_ref->Reset();
+        });
 }
 
 } // namespace

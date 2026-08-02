@@ -1,12 +1,18 @@
 #include "AudioEngine.h"
+#include "AudioDecoder.h"
 
 #include <xaudio2.h>
+#include <iostream>
+
+// Media Foundation / shlwapi はコンソール (Game Core OS) に無いデスクトップ専用 API。
+// 第一経路は AudioDecoder (dr_mp3/dr_wav/stb_vorbis) で、MF は AAC 等の
+// デスクトップ限定フォールバックのみ。XAudio2 は両プラットフォームで使える。
+#if !NEXT2D_XBOX_CONSOLE
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <shlwapi.h>
 #include <wrl/client.h>
-#include <iostream>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -14,6 +20,7 @@
 #pragma comment(lib, "shlwapi.lib")
 
 using Microsoft::WRL::ComPtr;
+#endif
 
 namespace next2d {
 
@@ -97,15 +104,19 @@ AudioEngine::~AudioEngine()
     if (xaudio_) {
         xaudio_->Release();
     }
+#if !NEXT2D_XBOX_CONSOLE
     MFShutdown();
+#endif
 }
 
 bool AudioEngine::Initialize()
 {
+#if !NEXT2D_XBOX_CONSOLE
     if (FAILED(MFStartup(MF_VERSION))) {
         std::cerr << "[Audio] MFStartup failed" << std::endl;
         return false;
     }
+#endif
     if (FAILED(XAudio2Create(&xaudio_, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
         std::cerr << "[Audio] XAudio2Create failed" << std::endl;
         return false;
@@ -119,8 +130,21 @@ bool AudioEngine::Initialize()
 
 bool AudioEngine::Decode(const std::vector<uint8_t>& input, PcmBuffer& out)
 {
-    // メモリストリームから Media Foundation の SourceReader を作り、
-    // 32bit float PCM へ変換して読み出す。
+    // 第一候補: ポータブルデコーダ (dr_mp3/dr_wav/stb_vorbis)。
+    // コンソール (Game Core) には Media Foundation が無いため、共通経路を先に
+    // 通すことで PC 検証と実機の挙動を一致させる。
+    if (DecodeAudio(input, out)) {
+        return true;
+    }
+
+#if NEXT2D_XBOX_CONSOLE
+    // コンソール: MF が無いため共通デコーダで扱えない形式は失敗とする
+    // (呼び出し側の graceful degradation = 無音バッファで進行)。
+    return false;
+#else
+    // フォールバック (デスクトップのみ): Media Foundation の SourceReader。
+    // AAC/WMA 等、MP3/WAV/OGG 以外の形式への保険。
+    // メモリストリームから 32bit float PCM へ変換して読み出す。
     ComPtr<IStream> stream =
         SHCreateMemStream(input.data(), static_cast<UINT>(input.size()));
     if (!stream) {
@@ -180,6 +204,7 @@ bool AudioEngine::Decode(const std::vector<uint8_t>& input, PcmBuffer& out)
     }
 
     return !out.samples.empty();
+#endif // NEXT2D_XBOX_CONSOLE
 }
 
 std::shared_ptr<AudioVoice> AudioEngine::CreateVoice(std::shared_ptr<PcmBuffer> buffer)

@@ -151,8 +151,15 @@ void CryptoRandomUUID(const v8::FunctionCallbackInfo<v8::Value>& args)
 // --- 名前付きストレージの永続化バックエンド ---------------------------------
 // localStorage / indexedDB のセマンティクスは Polyfills.cpp の JS 側が実装し、
 // ここは名前ごとのファイル I/O のみを担う。
-// 保存先: %LOCALAPPDATA%\Next2D\<name>.json
-// «EXTEND» コンソール実機では XGameSave への置き換えが必要 (devkit 後の作業)。
+// 保存先: %LOCALAPPDATA%\Next2D\<name>.json (PC / Gaming.Desktop / CI)。
+//
+// コンソール実機 (Gaming.Xbox.*) のストレージ対応 (要 devkit 検証):
+//   - localStorage / indexedDB のようなタイトルローカル永続化は XPersistentLocalStorage
+//     (XPersistentLocalStorageGetPath で得たパス配下へ同じファイル I/O) が対応先。
+//     同期 API のため現行の同期ストレージ契約 (StorageLoad/StorageSave) にそのまま載る。
+//   - ユーザー毎のクラウド同期セーブが要る場合のみ XGameSave (非同期・XUser 必須) を使う。
+// いずれも console GDK ヘッダと signed-in user / SCID 構成が必要で、devkit 実機でしか
+// コンパイル・実行検証できないため未実装 (現状はファイルパスのフォールバックで動作)。
 std::wstring StorageFilePath(const std::string& name)
 {
     // ファイル名として安全な文字だけを残す
@@ -277,6 +284,15 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     // innerWidth / innerHeight
     SetValue(isolate, global, "innerWidth", v8::Integer::New(isolate, host->viewport_width));
     SetValue(isolate, global, "innerHeight", v8::Integer::New(isolate, host->viewport_height));
+
+    // scrollX / scrollY (非スクロールの全画面アプリでは常に 0)。
+    // 未定義だと player の PlayerSetCurrentMousePointService 冒頭
+    // `let x = window.scrollX;` が undefined になり、以降 x が NaN 化して
+    // stage.pointer 全体が NaN → ヒットテストが全 miss → ボタンが一切反応しない。
+    SetValue(isolate, global, "scrollX", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "scrollY", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "pageXOffset", v8::Integer::New(isolate, 0));
+    SetValue(isolate, global, "pageYOffset", v8::Integer::New(isolate, 0));
 
     // navigator (gpu/getGamepads は後段のバインディングが付与)
     v8::Local<v8::Object> navigator = v8::Object::New(isolate);

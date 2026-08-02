@@ -105,6 +105,16 @@ void TransferControlToOffscreen(const v8::FunctionCallbackInfo<v8::Value>& args)
     if (args.This()->Get(ctx, Str(isolate, "height")).ToLocal(&hv) && hv->IsNumber()) {
         height = static_cast<int>(hv.As<v8::Number>()->Value());
     }
+
+    // このソース canvas (args.This()) こそがプレイヤーの主表示 canvas。
+    // player は「document.createElement('canvas') → pointer リスナ登録 → その canvas を
+    // transferControlToOffscreen()」の順で主 canvas を作る (input と描画で同一要素)。
+    // 一方 createElement は毎回 main_canvas を上書きするため、後続のヒットテスト用
+    // Canvas2D 生成 (getContext('2d') 用に 7 個も作る) で main_canvas が別要素に化け、
+    // WndProc の入力配送先とリスナ登録先がズレて「ボタンが全く反応しない」状態になる。
+    // transferControlToOffscreen が呼ばれる唯一の canvas = 正しい入力要素なので確定させる。
+    host->main_canvas.Reset(isolate, args.This());
+
     args.GetReturnValue().Set(CreateOffscreenCanvas(isolate, host, width, height));
 }
 
@@ -147,6 +157,18 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
     SetValue(isolate, canvas, "style", v8::Object::New(isolate));
     SetMethod(isolate, canvas, "getContext", Canvas_GetContext);
     SetMethod(isolate, canvas, "transferControlToOffscreen", TransferControlToOffscreen);
+    // Pointer capture: player の pointerdown ハンドラは t.setPointerCapture(pointerId) を
+    // 呼ぶ。未実装だと TypeError で DispatchEvent の TryCatch に飲まれ、以降の座標解決
+    // (dl) に到達せずボタンが反応しない。no-op として実装する (単一ウィンドウでは
+    // capture の有無で挙動は変わらない)。hasPointerCapture は false を返す。
+    SetMethod(isolate, canvas, "setPointerCapture",
+        [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+    SetMethod(isolate, canvas, "releasePointerCapture",
+        [](const v8::FunctionCallbackInfo<v8::Value>&) {});
+    SetMethod(isolate, canvas, "hasPointerCapture",
+        [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+            a.GetReturnValue().Set(false);
+        });
     InstallEventTarget(isolate, canvas);   // pointer/wheel リスナを保持
     SetMethod(isolate, canvas, "getBoundingClientRect", GetBoundingClientRect);
 
@@ -191,8 +213,16 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
                 (void) attrs.As<v8::Object>()->Delete(c, a[0]);
             }
         });
-    // 主要 canvas を HostContext から参照できるよう記録 (WndProc の入力配送先)
-    HostContext::From(isolate)->main_canvas.Reset(isolate, canvas);
+    // 主要 canvas の記録 (WndProc の入力配送先)。
+    // 確定は transferControlToOffscreen 側で行う (player が input を張る主 canvas はそちら)。
+    // ここでは「まだ未設定なら暫定で最初の canvas を採用」するフォールバックに留め、
+    // 後続の Canvas2D 生成で上書きしない (上書きすると入力配送先がヒットテスト用 canvas に化ける)。
+    {
+        HostContext* host = HostContext::From(isolate);
+        if (host->main_canvas.IsEmpty()) {
+            host->main_canvas.Reset(isolate, canvas);
+        }
+    }
     return canvas;
 }
 

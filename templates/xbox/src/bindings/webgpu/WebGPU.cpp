@@ -8,6 +8,8 @@
 #include "gpu/DawnContext.h"
 #include "bindings/ImageSource.h"
 
+#include "v8/V8Util.h"
+
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -1211,9 +1213,13 @@ static void Device_CreateBindGroupLayout(const v8::FunctionCallbackInfo<v8::Valu
     v8::Local<v8::Object> d = args[0].As<v8::Object>();
 
     std::vector<wgpu::BindGroupLayoutEntry> entries;
+    // externalTexture の nextInChain 構造体は CreateBindGroupLayout 完了まで生存が必要。
+    // reserve でベクタ再割当を防ぎ、back() のアドレスを安定させる。
+    std::vector<wgpu::ExternalTextureBindingLayout> ext_layouts;
     v8::Local<v8::Value> ev = Prop(isolate, d, "entries");
     if (ev->IsArray()) {
         auto arr = ev.As<v8::Array>();
+        ext_layouts.reserve(arr->Length());
         for (uint32_t i = 0; i < arr->Length(); ++i) {
             v8::Local<v8::Value> v;
             if (!arr->Get(ctx, i).ToLocal(&v) || !v->IsObject()) continue;
@@ -1237,8 +1243,21 @@ static void Device_CreateBindGroupLayout(const v8::FunctionCallbackInfo<v8::Valu
                     ? ToTextureViewDimension(webgpu::Str(isolate, t, "viewDimension"))
                     : wgpu::TextureViewDimension::e2D;
                 entry.texture.multisampled = Bool(isolate, t, "multisampled", false);
+            } else if (HasProp(isolate, o, "storageTexture")) {
+                auto st = Prop(isolate, o, "storageTexture").As<v8::Object>();
+                entry.storageTexture.access = HasProp(isolate, st, "access")
+                    ? ToStorageTextureAccess(webgpu::Str(isolate, st, "access"))
+                    : wgpu::StorageTextureAccess::WriteOnly;
+                entry.storageTexture.format = ToTextureFormat(webgpu::Str(isolate, st, "format"));
+                entry.storageTexture.viewDimension = HasProp(isolate, st, "viewDimension")
+                    ? ToTextureViewDimension(webgpu::Str(isolate, st, "viewDimension"))
+                    : wgpu::TextureViewDimension::e2D;
+            } else if (HasProp(isolate, o, "externalTexture")) {
+                // GPUExternalTextureBindingLayout は空 (メンバ無し)。sType は
+                // Dawn の C++ ラッパが既定で設定するため emplace してチェーンするだけでよい。
+                ext_layouts.emplace_back();
+                entry.nextInChain = &ext_layouts.back();
             }
-            // «EXTEND» storageTexture / externalTexture は必要に応じて追加
             entries.push_back(entry);
         }
     }
@@ -1347,6 +1366,11 @@ struct RenderPipelineScratch {
     // ConstantEntry.key が指すため CreateRenderPipeline 完了まで生存させる。
     std::vector<std::string> vs_const_keys, fs_const_keys;
     std::vector<wgpu::ConstantEntry> vs_constants, fs_constants;
+    // desc.depthStencil / desc.fragment はこれらのアドレスを指す。ディスクリプタ構築を
+    // ヘルパに切り出したため、ローカルだとヘルパ return でダングリング化する。scratch に
+    // 保持して CreateRenderPipeline[Async] が同期コピーするまで生存させる。
+    wgpu::DepthStencilState depth = {};
+    wgpu::FragmentState fragment = {};
 };
 
 // { "KEY": number|bool, ... } を wgpu::ConstantEntry 配列へ変換する。
@@ -1472,7 +1496,8 @@ static void FillRenderPipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Obj
     }
 
     // depthStencil (マスク処理は stencil8 + stencilFront/Back を使う)
-    wgpu::DepthStencilState depth = {};
+    // scratch.depth を参照 (アドレスを desc.depthStencil に格納するため寿命を延ばす)。
+    wgpu::DepthStencilState& depth = scratch.depth;
     v8::Local<v8::Value> dsv = Prop(isolate, d, "depthStencil");
     if (dsv->IsObject()) {
         auto ds = dsv.As<v8::Object>();
@@ -1532,7 +1557,8 @@ static void FillRenderPipelineDescriptor(v8::Isolate* isolate, v8::Local<v8::Obj
     }
 
     // fragment
-    wgpu::FragmentState fragment = {};
+    // scratch.fragment を参照 (アドレスを desc.fragment に格納するため寿命を延ばす)。
+    wgpu::FragmentState& fragment = scratch.fragment;
     v8::Local<v8::Value> fv = Prop(isolate, d, "fragment");
     if (fv->IsObject()) {
         auto f = fv.As<v8::Object>();

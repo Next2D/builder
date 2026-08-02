@@ -4,10 +4,12 @@
 #include "AssetLoader.h"
 #include "EventTarget.h"
 #include "platform/AudioEngine.h"
+#include "platform/DecodeQueue.h"
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace next2d {
@@ -230,19 +232,36 @@ void PumpAudioEvents(v8::Isolate* isolate)
     if (sources.empty()) return;
     v8::HandleScope scope(isolate);
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+
+    // 1) 終了した source を集めて先に登録リストから外す。ここでは JS を呼ばない。
+    //    (この時点の erase による v8::Global の move は他の再入が無いので安全)
+    std::vector<v8::Global<v8::Object>> finished;
     for (size_t i = 0; i < sources.size();) {
         v8::Local<v8::Object> node = sources[i].Get(isolate);
         auto voice = Get<AudioVoice>(node);
         if (!voice || voice->IsFinished()) {
-            if (voice) {
-                v8::Local<v8::Object> ev = v8::Object::New(isolate);
-                ev->Set(ctx, Str(isolate, "type"), Str(isolate, "ended")).Check();
-                DispatchEvent(isolate, node, ev);
-            }
+            finished.push_back(std::move(sources[i]));
             sources.erase(sources.begin() + i);
         } else {
             ++i;
         }
+    }
+
+    // 2) リストが安定した状態で "ended" を配送する。
+    //    "ended" ハンドラは source.disconnect() や新規再生で PlayingSources を
+    //    再入的に変更しうる。以前は配送と erase を同一ループで行っていたため、
+    //    配送中にベクタが変更されると直後の erase 中の v8::Global move が壊れ
+    //    GlobalHandles::MoveGlobal でアクセス違反していた。独立した finished を
+    //    走査することで再入変更から隔離する。
+    for (auto& g : finished) {
+        v8::Local<v8::Object> node = g.Get(isolate);
+        auto voice = Get<AudioVoice>(node);
+        if (voice) {
+            v8::Local<v8::Object> ev = v8::Object::New(isolate);
+            ev->Set(ctx, Str(isolate, "type"), Str(isolate, "ended")).Check();
+            DispatchEvent(isolate, node, ev);
+        }
+        g.Reset();
     }
 }
 
@@ -266,21 +285,49 @@ void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
                      static_cast<uint8_t*>(store->Data()) + store->ByteLength());
     }
 
+    // Media Foundation デコードはバックグラウンドスレッドへ (Promise なので元々
+    // 非同期契約)。BGM の同期デコードは画面遷移時の数百 ms ヒッチになっていた。
+    auto resolver_ref =
+        std::make_shared<v8::Global<v8::Promise::Resolver>>(isolate, resolver);
     auto pcm = std::make_shared<PcmBuffer>();
-    if (input.empty() || !AudioEngine::Decode(input, *pcm)) {
-        resolver->Reject(ctx, v8::Exception::Error(Str(isolate, "audio decode failed"))).Check();
-        return;
-    }
+    auto decoded = std::make_shared<bool>(false);
 
-    v8::Local<v8::Object> buffer = InternalTemplate(isolate)->NewInstance(ctx).ToLocalChecked();
-    Attach<PcmBuffer>(isolate, buffer, pcm);
-    v8util::SetValue(isolate, buffer, "sampleRate", v8::Number::New(isolate, pcm->sample_rate));
-    v8util::SetValue(isolate, buffer, "numberOfChannels", v8::Integer::New(isolate, pcm->channels));
-    v8util::SetValue(isolate, buffer, "duration",
-        v8::Number::New(isolate, pcm->channels
-            ? static_cast<double>(pcm->samples.size()) / pcm->channels / pcm->sample_rate
-            : 0.0));
-    resolver->Resolve(ctx, buffer).Check();
+    decodequeue::Submit(
+        [input = std::move(input), pcm, decoded]() {
+            *decoded = !input.empty() && AudioEngine::Decode(input, *pcm);
+        },
+        [isolate, resolver_ref, pcm, decoded]() {
+            v8::HandleScope hs(isolate);
+            v8::Local<v8::Promise::Resolver> r = resolver_ref->Get(isolate);
+            v8::Local<v8::Context> c = r->GetCreationContextChecked();
+            v8::Context::Scope cs(c);
+
+            // 重要: デコード失敗でも Reject しない。@next2d/media の SoundDecodeService は
+            // decodeAudioData の reject を catch して先頭バイトをスキップし再帰リトライするが、
+            // そのループ条件 (`idx > byteLength`) が常に false のため同一バッファで無限再帰し、
+            // マイクロタスクが枯渇してフレームワークのローディング画面ごとフリーズする。
+            // ここで無音の空バッファを resolve すれば、そのサウンドは無音になるだけでアプリは
+            // 進行できる (graceful degradation)。実データが壊れているか MF 非対応かは上のログで判別。
+            if (!*decoded) {
+                pcm->samples.clear();      // 0 サンプル = 無音
+                pcm->channels = pcm->channels ? pcm->channels : 2;
+                pcm->sample_rate = pcm->sample_rate ? pcm->sample_rate : 48000;
+            }
+
+            v8::Local<v8::Object> buffer =
+                InternalTemplate(isolate)->NewInstance(c).ToLocalChecked();
+            Attach<PcmBuffer>(isolate, buffer, pcm);
+            v8util::SetValue(isolate, buffer, "sampleRate",
+                             v8::Number::New(isolate, pcm->sample_rate));
+            v8util::SetValue(isolate, buffer, "numberOfChannels",
+                             v8::Integer::New(isolate, pcm->channels));
+            v8util::SetValue(isolate, buffer, "duration",
+                v8::Number::New(isolate, pcm->channels
+                    ? static_cast<double>(pcm->samples.size()) / pcm->channels / pcm->sample_rate
+                    : 0.0));
+            r->Resolve(c, buffer).Check();
+            resolver_ref->Reset();
+        });
 }
 
 // --- Audio (HTMLAudioElement 最小実装) -------------------------------------
@@ -335,17 +382,49 @@ void AudioElementConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Local<v8::Object> self = args.This();
     Attach<AudioVoice>(isolate, self, nullptr);
 
-    // URL 指定があれば同期でロード+デコードして voice を作る (失敗時は無音の no-op)
+    // URL 指定があればロードし、デコードはバックグラウンドスレッドへ (失敗時は
+    // 無音の no-op)。デコード完了前に play() が呼ばれていた場合 (paused=false) は
+    // 完了時に再生を開始する (同期デコード時代の「即時再生」挙動を維持)。
     if (args.Length() > 0 && args[0]->IsString()) {
         const std::string src = ToStdString(isolate, args[0]);
         v8util::SetValue(isolate, self, "src", args[0]);
         HostContext* host = HostContext::From(isolate);
         auto bytes = host->assets->ReadBinary(src);
         if (bytes) {
+            auto self_ref = std::make_shared<v8::Global<v8::Object>>(isolate, self);
             auto pcm = std::make_shared<PcmBuffer>();
-            if (AudioEngine::Decode(*bytes, *pcm)) {
-                Attach<AudioVoice>(isolate, self, host->audio->CreateVoice(pcm));
-            }
+            auto decoded = std::make_shared<bool>(false);
+            decodequeue::Submit(
+                [input = std::move(*bytes), pcm, decoded]() {
+                    *decoded = AudioEngine::Decode(input, *pcm);
+                },
+                [isolate, self_ref, pcm, decoded, host]() {
+                    v8::HandleScope hs(isolate);
+                    v8::Local<v8::Object> el = self_ref->Get(isolate);
+                    v8::Local<v8::Context> c = el->GetCreationContextChecked();
+                    v8::Context::Scope cs(c);
+                    if (*decoded) {
+                        auto voice = host->audio->CreateVoice(pcm);
+                        Attach<AudioVoice>(isolate, el, voice);
+                        // デコード中に play() 済みなら開始する
+                        v8::Local<v8::Value> paused_v, loop_v, vol_v;
+                        const bool paused =
+                            !el->Get(c, Str(isolate, "paused")).ToLocal(&paused_v) ||
+                            paused_v->BooleanValue(isolate);
+                        if (!paused && voice) {
+                            if (el->Get(c, Str(isolate, "volume")).ToLocal(&vol_v) &&
+                                vol_v->IsNumber()) {
+                                voice->SetVolume(static_cast<float>(
+                                    vol_v.As<v8::Number>()->Value()));
+                            }
+                            const bool loop =
+                                el->Get(c, Str(isolate, "loop")).ToLocal(&loop_v) &&
+                                loop_v->BooleanValue(isolate);
+                            voice->Start(loop);
+                        }
+                    }
+                    self_ref->Reset();
+                });
         }
     }
 
@@ -374,6 +453,23 @@ void AudioContextConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8util::SetMethod(isolate, self, "createBufferSource", CreateBufferSource);
     v8util::SetMethod(isolate, self, "createGain", CreateGain);
     v8util::SetMethod(isolate, self, "decodeAudioData", DecodeAudioData);
+
+    // state / resume / suspend / close: ブラウザの AudioContext はユーザージェスチャまで
+    // suspended だが、ホストの XAudio2 は常に有効なので "running" 固定。player の音声
+    // アンロック (初回 pointerup で ctx.resume()) が未実装だと TypeError で throw し、
+    // そのハンドラ(ミュート解除等)以降が中断する。解決済み Promise を返す no-op にする。
+    v8util::SetValue(isolate, self, "state", v8util::Str(isolate, "running"));
+    auto resolvedPromise = [](const v8::FunctionCallbackInfo<v8::Value>& a) {
+        v8::Isolate* iso = a.GetIsolate();
+        v8::Local<v8::Context> c = iso->GetCurrentContext();
+        auto r = v8::Promise::Resolver::New(c).ToLocalChecked();
+        (void) r->Resolve(c, v8::Undefined(iso));
+        a.GetReturnValue().Set(r->GetPromise());
+    };
+    v8util::SetMethod(isolate, self, "resume", resolvedPromise);
+    v8util::SetMethod(isolate, self, "suspend", resolvedPromise);
+    v8util::SetMethod(isolate, self, "close", resolvedPromise);
+
     args.GetReturnValue().Set(self);
 }
 

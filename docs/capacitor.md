@@ -4,8 +4,6 @@
 
 ## 日本語
 
-[共通準備](setup.md#日本語)を済ませてから、対象OSの手順を進める。
-
 ### STEP1：対象OSのIDE・SDKを用意する
 
 | 対象 | ユーザーが用意するもの |
@@ -104,8 +102,6 @@ SDKキャッシュは書き出し後もGradle / CocoaPodsが参照するため�
 npxキャッシュを削除した場合は、STEP3またはSTEP4で参照先を再同期する。
 
 ## English
-
-Complete the [common setup](setup.md#english), then follow the steps for your target OS.
 
 ### STEP1: Prepare the platform IDE and SDK
 

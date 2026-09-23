@@ -4,7 +4,6 @@
 
 ## 日本語
 
-[共通準備](setup.md#日本語)を済ませてから、以下を順に進める。
 ローカル書き出しだけなら、Steamworks・SteamCMD・配布用の署名認証は不要。
 
 ### STEP1：対象OSの実行環境とアイコンを用意する
@@ -306,7 +305,6 @@ STEP6のインストール・起動確認に加えて、以下を検証する。
 
 ## English
 
-Complete the [common setup](setup.md#english), then follow these steps.
 Local exports do not require Steamworks, SteamCMD or distribution signing credentials.
 
 ### STEP1: Prepare target environments and icons

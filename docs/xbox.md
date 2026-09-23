@@ -5,13 +5,13 @@
 ## 日本語
 
 Xbox対応はGDK向けネイティブホストの試作・開発段階。Xbox実機での動作確認・配布対応は完了していない。
-以下は開発環境での検証手順。[共通準備](setup.md#日本語)を先に済ませる。
+以下は開発環境での検証手順。
 
 ### STEP1：検証範囲に必要な環境を用意する
 
 | 検証範囲 | ユーザーが用意するもの |
 |---|---|
-| ホスト生成・アセット準備のみ | 共通準備の環境。macOS / Linuxでもここまで実行できる。 |
+| ホスト生成・アセット準備のみ | macOS / Linuxでも実行できる。 |
 | C++ホストのビルド | Windows、Visual Studio 2022、Microsoft GDK、CMake 3.26以降。現行builderはVisual Studio 2022ジェネレーターを指定する。 |
 | Xbox実機での検証 | コンソール向けGDK開発環境とXbox開発機（devkit）。PC向けのGDK検証環境とは区別して用意する。 |
 
@@ -76,13 +76,13 @@ Dawn / GDKを含む統合ビルドと、ゲームを使った実機検証が必�
 ## English
 
 Xbox support is a prototype GDK native host under development. Xbox hardware validation and distribution support are not complete.
-The following steps are for development testing. Complete the [common setup](setup.md#english) first.
+The following steps are for development testing.
 
 ### STEP1: Prepare the environment for your validation scope
 
 | Validation scope | What you need to prepare |
 |---|---|
-| Host generation and asset preparation only | The common setup environment; this also works on macOS / Linux. |
+| Host generation and asset preparation only | Also works on macOS / Linux. |
 | Building the C++ host | Windows, Visual Studio 2022, Microsoft GDK and CMake 3.26 or later. The current builder selects the Visual Studio 2022 generator. |
 | Testing on Xbox hardware | A console GDK development environment and Xbox development hardware (devkit), distinct from a PC GDK testing environment. |
 

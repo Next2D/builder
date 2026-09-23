@@ -1,7 +1,8 @@
 // Web ビルド: vite 設定の読み込みと HTML/JavaScript の書き出し。
-import pc from "picocolors";
+import pc from "./colors.js";
 import fs from "fs";
-import { loadConfigFromFile } from "vite";
+import path from "node:path";
+import { loadProjectVite } from "./project-vite.js";
 import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
 
@@ -31,6 +32,7 @@ export const loadConfig = async (): Promise<void> =>
 
     const ext: string = fs.existsSync(`${process.cwd()}/vite.config.ts`) ? "ts" : "js";
 
+    const { loadConfigFromFile } = await loadProjectVite();
     const config = await loadConfigFromFile(
         {
             "command": "build",
@@ -41,8 +43,8 @@ export const loadConfig = async (): Promise<void> =>
 
     // update config
     ctx.configObject = config;
-    ctx.outDir       = ctx.configObject.config?.build?.outDir || "dist";
-    ctx.buildDir     = `${process.cwd()}/${ctx.outDir}/${ctx.platformDir}/${ctx.environment}`;
+    ctx.outDir       = ctx.configObject?.config.build?.outDir || "dist";
+    ctx.buildDir     = path.resolve(ctx.outDir, ctx.platformDir, ctx.environment);
 
     if (!fs.existsSync(`${ctx.buildDir}`)) {
         fs.mkdirSync(`${ctx.buildDir}`, { "recursive": true });
@@ -67,10 +69,12 @@ export const buildWeb = (): Promise<void> =>
             "@next2d/vite-plugin-next2d-auto-loader"
         ], { "stdio": "inherit" });
 
+        stream.once("error", reject);
         stream.on("close", (code: number): void =>
         {
             if (code !== 0) {
                 reject("vite plugin command failed.");
+                return;
             }
 
             const stream = $spawn("npx", [
@@ -80,10 +84,12 @@ export const buildWeb = (): Promise<void> =>
                 "build"
             ], { "stdio": "inherit" });
 
+            stream.once("error", reject);
             stream.on("close", (code: number): void =>
             {
                 if (code !== 0) {
                     reject("Export of `HTML` and `JavaScript` failed.");
+                    return;
                 }
 
                 console.log();

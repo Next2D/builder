@@ -55,3 +55,8 @@ test("SUPPORTED_PLATFORMS: 期待するプラットフォームを含む", () =>
     }
     assert.equal(SUPPORTED_PLATFORMS.has("bogus"), false);
 });
+
+test("parseArgv: Electron architecture and missing value", () => {
+    assert.equal(parseArgv(["--platform", "steam:macos", "--env", "prd", "--arch", "universal"]).arch, "universal");
+    assert.equal(parseArgv(["--platform", "steam:linux", "--env", "prd", "--arch"]).hasHelp, true);
+});

@@ -1,158 +1,73 @@
-// iOS / Android (Capacitor) ビルド。
-import pc from "picocolors";
-import fs from "fs";
+// iOS / Android (Capacitor) ビルド。SDKとCLIはnpxで必要時に取得する。
+import fs from "node:fs";
+import path from "node:path";
 import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
 import { CAPACITOR_CONFIG_NAME } from "./constants.js";
+import { resolveToolPackages } from "./tool-packages.js";
 
-/**
- * @description iOS/Androidのプロジェクトを生成
- *              Generate iOS/Android project
- *
- * @return {Promise}
- * @method
- * @private
- */
-const generateNativeProject = (): Promise<void> =>
-{
-    return new Promise((resolve, reject): void =>
-    {
-        if (fs.existsSync(`${process.cwd()}/${ctx.platform}`)) {
-            return resolve();
-        }
+/** Resolve from npm's persistent tool cache without installing into the game. */
+export const getCapacitorCommand = async (): Promise<{ cli: string; env: NodeJS.ProcessEnv }> => {
+    const resolved = await resolveToolPackages("capacitor");
+    const packages = ["cli", "core", "ios", "android"].map((name) =>
+        resolved[`@capacitor/${name}`]);
+    // Keep the game's cwd for plugin discovery/hooks; supply SDKs through NODE_PATH.
+    const roots = [...new Set(packages.map((file) => path.dirname(path.dirname(path.dirname(file)))))];
+    return {
+        "cli": path.join(path.dirname(packages[0]), "bin", "capacitor"),
+        "env": { ...process.env, "NODE_PATH": [...roots, process.env.NODE_PATH].filter(Boolean).join(path.delimiter) }
+    };
+};
 
-        const stream = $spawn("npx", [
-            "cap",
-            "add",
-            ctx.platform
-        ], { "stdio": "inherit" });
-
-        stream.on("close", (code: number): void =>
-        {
+/** Await every CLI operation so failures propagate to the builder and CI. */
+export const runCapacitor = async (args: string[], root = process.cwd()): Promise<void> => {
+    const { cli, env } = await getCapacitorCommand();
+    return new Promise((resolve, reject) => {
+        const child = $spawn(process.execPath, [cli, ...args], { "cwd": root, env, "stdio": "inherit" });
+        child.once("error", reject);
+        child.once("close", (code, signal) => {
             if (code !== 0) {
-                reject(`Failed generated ${ctx.platform} project.`);
+                reject(new Error(`Capacitor ${args.join(" ")} failed (${signal || code}).`));
+                return;
             }
-
-            console.log(pc.green(`Successfully generated ${ctx.platform} project.`));
-            console.log();
-
             resolve();
         });
     });
 };
 
-/**
- * @description Capacitor の webDir を現在のビルド出力へ書き換える
- *              Point the Capacitor webDir at the current build output
- *
- * @return {void}
- * @method
- * @private
- */
-const applyCapacitorWebDir = (): void =>
-{
-    const config = JSON.parse(
-        fs.readFileSync(`${process.cwd()}/${CAPACITOR_CONFIG_NAME}`, { "encoding": "utf8" })
-    );
-
-    config.webDir = `${ctx.outDir}/${ctx.platformDir}/${ctx.environment}/`;
-
-    fs.writeFileSync(
-        `${process.cwd()}/${CAPACITOR_CONFIG_NAME}`,
-        JSON.stringify(config, null, 2)
-    );
+const prepareNativeProject = async (): Promise<void> => {
+    if (ctx.platform !== "ios" && ctx.platform !== "android") {
+        throw new Error(`Unsupported Capacitor platform: ${ctx.platform}`);
+    }
+    const root = process.cwd();
+    const file = path.join(root, CAPACITOR_CONFIG_NAME);
+    const config = JSON.parse(fs.readFileSync(file, "utf8"));
+    // cap add performs an initial sync, so it must see the new webDir too.
+    config.webDir = path.relative(root, path.resolve(ctx.outDir, ctx.platformDir, ctx.environment)).replace(/\\/g, "/") + "/";
+    fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
+    const platformDir = path.resolve(root, config[ctx.platform]?.path ?? ctx.platform);
+    if (!fs.existsSync(platformDir)) {
+        await runCapacitor(["add", ctx.platform]);
+    }
 };
 
-/**
- * @description iOS用アプリの書き出し関数
- *              Export function for iOS apps
- *
- * @return {Promise}
- * @method
- * @public
- */
-export const runNative = async (): Promise<void> =>
-{
-    await generateNativeProject();
-
-    // Capacitorの書き出しに必要な設定を生成
-    applyCapacitorWebDir();
-
-    $spawn("npx", [
-        "cap",
-        "run",
-        ctx.platform
-    ], { "stdio": "inherit" });
+/** Keep native customizations and update web assets/dependency paths in place. */
+export const syncNative = async (): Promise<void> => {
+    await prepareNativeProject();
+    await runCapacitor(["sync", ctx.platform]);
 };
 
-/**
- * @description iOS/Androidアプリのオープン関数
- *              Open function for iOS/Android apps
- *
- * @return {Promise}
- * @method
- * @public
- */
-export const openNative = async (): Promise<void> =>
-{
-    await generateNativeProject();
-
-    // Capacitorの書き出しに必要な設定を生成
-    applyCapacitorWebDir();
-
-    const stream = $spawn("npx", [
-        "cap",
-        "sync",
-        ctx.platform
-    ], { "stdio": "inherit" });
-
-    stream.on("close", (code: number): void =>
-    {
-        if (code !== 0) {
-            console.log(pc.red(`Failed to sync ${ctx.platform} project.`));
-            return;
-        }
-
-        $spawn("npx", [
-            "cap",
-            "open",
-            ctx.platform
-        ], { "stdio": "inherit" });
-    });
+export const runNative = async (): Promise<void> => {
+    await prepareNativeProject();
+    await runCapacitor(["run", ctx.platform]);
 };
 
-/**
- * @description iOS/Androidアプリのビルド関数
- *              Build function for iOS/Android apps
- *
- * @return {Promise}
- * @method
- * @public
- */
-export const buildNative = async (): Promise<void> =>
-{
-    await generateNativeProject();
+export const openNative = async (): Promise<void> => {
+    await syncNative();
+    await runCapacitor(["open", ctx.platform]);
+};
 
-    // Capacitorの書き出しに必要な設定を生成
-    applyCapacitorWebDir();
-
-    const stream = $spawn("npx", [
-        "cap",
-        "sync",
-        ctx.platform
-    ], { "stdio": "inherit" });
-
-    stream.on("close", (code: number): void =>
-    {
-        if (code !== 0) {
-            console.log(pc.red(`Failed to sync ${ctx.platform} project.`));
-            return;
-        }
-
-        $spawn("npx", [
-            "cap",
-            "build",
-            ctx.platform
-        ], { "stdio": "inherit" });
-    });
+export const buildNative = async (): Promise<void> => {
+    await syncNative();
+    await runCapacitor(["build", ctx.platform]);
 };

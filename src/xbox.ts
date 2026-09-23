@@ -1,12 +1,12 @@
 // Xbox (GDK ネイティブ) ビルド。V8 に Next2D の JS を載せ、Dawn(WebGPU/D3D12)で
 // 描画する C++ ホストを、テンプレートのスキャフォールド → 資材配置 → pak 埋め込み →
 // CMake/GDK ビルドの順で書き出す。
-import pc from "picocolors";
+import pc from "./colors.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import cp from "child_process";
-import { minifySync } from "vite";
+import { loadProjectVite } from "./project-vite.js";
 import { ctx } from "./context.js";
 import { getTemplateDir } from "./utils.js";
 import {
@@ -208,12 +208,18 @@ export const renderAssetsRc = (pakAbsPath: string): string =>
  * @method
  * @public
  */
-export const minifyJs = (name: string, code: string): string =>
+export const minifyJs = async (name: string, code: string): Promise<string> =>
 {
     try {
-        const result = minifySync(name, code);
+        const vite = await loadProjectVite();
+        if (typeof vite.minifySync !== "function") {
+            // Vite 7 exposes esbuild rather than the Oxc minifier used by Vite 8.
+            const result = await vite.transformWithEsbuild(code, name, { "minify": true, "legalComments": "none" });
+            return result.code;
+        }
+        const result = vite.minifySync(name, code);
         if (result.errors && result.errors.length > 0) {
-            const msg = (result.errors[0] as any)?.message ?? String(result.errors[0]);
+            const msg = result.errors[0]?.message ?? String(result.errors[0]);
             console.log(pc.yellow(`Xbox: minify skipped for ${name} (${msg}); embedding as-is.`));
             return code;
         }
@@ -240,74 +246,70 @@ export const minifyJs = (name: string, code: string): string =>
  * @method
  * @private
  */
-const embedXboxAssets = (): Promise<void> =>
+const embedXboxAssets = async (): Promise<void> =>
 {
-    return new Promise<void>((resolve, reject): void =>
-    {
-        const xboxDir: string   = `${process.cwd()}/${XBOX_DIR_NAME}`;
-        const pakPath: string   = `${xboxDir}/assets.pak`;
-        const rcPath: string    = `${xboxDir}/assets.rc`;
+    const xboxDir: string   = `${process.cwd()}/${XBOX_DIR_NAME}`;
+    const pakPath: string   = `${xboxDir}/assets.pak`;
+    const rcPath: string    = `${xboxDir}/assets.rc`;
 
-        try {
-            // 収集: assets/app 一式 (キーは app 基準) + host スクリプト (js/ 基準)。
-            const entries: [string, string][] = [];
-            entries.push(...walkFiles(`${xboxDir}/assets/app`, ""));
-            const bootstrap: string = `${xboxDir}/js/bootstrap.js`;
-            if (fs.existsSync(bootstrap)) {
-                entries.push(["js/bootstrap.js", bootstrap]);
-            }
-            const selftest: string = `${xboxDir}/js/selftest.js`;
-            if (fs.existsSync(selftest)) {
-                entries.push(["js/selftest.js", selftest]);
-            }
-
-            if (entries.length === 0) {
-                return reject("No Xbox assets found to embed (assets/app is empty).");
-            }
-
-            // (key, データ) を読み込み、pak バイナリへ直列化する。
-            // js/ のホストスクリプト(bootstrap.js/selftest.js)は minify + 難読化する。
-            // assets/app の JS は vite が本番ビルドで minify 済みのためそのまま。
-            let minified = 0;
-            const pakEntries: [string, Buffer][] = entries.map(
-                ([key, abs]): [string, Buffer] => {
-                    if (key.startsWith("js/") && key.endsWith(".js")) {
-                        const src = fs.readFileSync(abs, { "encoding": "utf8" });
-                        const out = minifyJs(key, src);
-                        if (out.length < src.length) {
-                            ++minified;
-                        }
-                        return [key, Buffer.from(out, "utf8")];
-                    }
-                    return [key, fs.readFileSync(abs)];
-                }
-            );
-            const pak: Buffer = buildPak(pakEntries);
-            if (minified > 0) {
-                console.log(pc.green(`Minified ${minified} host script(s) before embedding.`));
-            }
-            fs.writeFileSync(pakPath, pak);
-
-            // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む .rc を生成する。
-            fs.writeFileSync(rcPath, renderAssetsRc(path.resolve(pakPath)), "utf8");
-
-            console.log(pc.green(
-                `Embedded ${entries.length} Xbox asset file(s) into assets.pak `
-                + `(${(pak.length / 1024 / 1024).toFixed(2)} MB).`
-            ));
-
-            // 埋め込み済みの平文 `assets/`・`js/` は書き出し一覧から除外する。
-            // これらは assets.pak (=exe 内 RCDATA) に格納済みで、CMake も埋め込みモードでは
-            // exe 隣へステージしないため、xbox/ 直下に残しても不要かつ平文流出になる。
-            fs.rmSync(`${xboxDir}/assets`, { "recursive": true, "force": true });
-            fs.rmSync(`${xboxDir}/js`, { "recursive": true, "force": true });
-            console.log(pc.green("Excluded plaintext `assets/` and `js/` from the export (embedded in exe)."));
-
-            resolve();
-        } catch (error) {
-            reject(`Failed to embed Xbox assets. ${error}`);
+    try {
+        // 収集: assets/app 一式 (キーは app 基準) + host スクリプト (js/ 基準)。
+        const entries: [string, string][] = [];
+        entries.push(...walkFiles(`${xboxDir}/assets/app`, ""));
+        const bootstrap: string = `${xboxDir}/js/bootstrap.js`;
+        if (fs.existsSync(bootstrap)) {
+            entries.push(["js/bootstrap.js", bootstrap]);
         }
-    });
+        const selftest: string = `${xboxDir}/js/selftest.js`;
+        if (fs.existsSync(selftest)) {
+            entries.push(["js/selftest.js", selftest]);
+        }
+
+        if (entries.length === 0) {
+            throw new Error("No Xbox assets found to embed (assets/app is empty).");
+        }
+
+        // (key, データ) を読み込み、pak バイナリへ直列化する。
+        // js/ のホストスクリプト(bootstrap.js/selftest.js)は minify + 難読化する。
+        // assets/app の JS は vite が本番ビルドで minify 済みのためそのまま。
+        let minified = 0;
+        const pakEntries: [string, Buffer][] = await Promise.all(entries.map(
+            async ([key, abs]): Promise<[string, Buffer]> => {
+                if (key.startsWith("js/") && key.endsWith(".js")) {
+                    const src = fs.readFileSync(abs, { "encoding": "utf8" });
+                    const out = await minifyJs(key, src);
+                    if (out.length < src.length) {
+                        ++minified;
+                    }
+                    return [key, Buffer.from(out, "utf8")];
+                }
+                return [key, fs.readFileSync(abs)];
+            }
+        ));
+        const pak: Buffer = buildPak(pakEntries);
+        if (minified > 0) {
+            console.log(pc.green(`Minified ${minified} host script(s) before embedding.`));
+        }
+        fs.writeFileSync(pakPath, pak);
+
+        // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む .rc を生成する。
+        fs.writeFileSync(rcPath, renderAssetsRc(path.resolve(pakPath)), "utf8");
+
+        console.log(pc.green(
+            `Embedded ${entries.length} Xbox asset file(s) into assets.pak `
+                + `(${(pak.length / 1024 / 1024).toFixed(2)} MB).`
+        ));
+
+        // 埋め込み済みの平文 `assets/`・`js/` は書き出し一覧から除外する。
+        // これらは assets.pak (=exe 内 RCDATA) に格納済みで、CMake も埋め込みモードでは
+        // exe 隣へステージしないため、xbox/ 直下に残しても不要かつ平文流出になる。
+        fs.rmSync(`${xboxDir}/assets`, { "recursive": true, "force": true });
+        fs.rmSync(`${xboxDir}/js`, { "recursive": true, "force": true });
+        console.log(pc.green("Excluded plaintext `assets/` and `js/` from the export (embedded in exe)."));
+
+    } catch (error) {
+        throw new Error(`Failed to embed Xbox assets. ${error}`);
+    }
 };
 
 /**

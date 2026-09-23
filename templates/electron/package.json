@@ -1,0 +1,11 @@
+{
+  "name": "next2d-game",
+  "version": "1.0.0",
+  "description": "Next2D desktop game",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "devDependencies": {
+    "electron": "44.4.3"
+  }
+}

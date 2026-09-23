@@ -4,9 +4,54 @@
 
 ## 日本語
 
-### 設定
+[共通準備](setup.md#日本語)を済ませてから、以下を順に進める。
+ローカル書き出しだけなら、Steamworks・SteamCMD・配布用の署名認証は不要。
+
+### STEP1：対象OSの実行環境とアイコンを用意する
+
+- macOSのUniversalアプリと配布用の署名・公証はmacOS上で行う。
+- 配布する各OSで起動・入力・保存を確認できる実行環境を用意する。
+- ゲームの `src/assets/icons/` にWindows用ICO、macOS用ICNS、Linux用PNGを用意する。
+  テンプレートの仮アイコンは配布前に差し替える。設定の省略時の扱いはSTEP3の表を参照。
+
+#### 対応OS・CPU
+
+| OS | 既定値 | `architectures` / `--arch` の対応値 |
+|---|---|---|
+| Windows | `x64` | `x64`, `arm64` |
+| macOS | `universal` | `x64`, `arm64`, `universal` |
+| Linux | `x64` | `x64`, `arm64` |
+
+32bit版Windows（`ia32`）には対応しない。`win32` はElectron内部のWindowsのOS名で、
+32bitを意味しない。例えば `My Game-win32-x64/` は64bit版Windows向けの成果物。
+`--platform` には `windows` または `steam:windows` を指定する。
+
+macOSの `universal` はx64とarm64を含む1つの `.app`。
+
+### STEP2：SteamworksのApp・Depot・テスト用ブランチを用意する（Steam配布時）
+
+1. 対象アプリのSteamworks管理画面で、発行済みのApp IDを確認する。
+2. SteamPipe > DepotsでDepotを作成し、対象OSを設定する。言語共通ならAll languagesを選び、
+   開発用・販売用Packageにも対象Depotを含める。**Depot IDはApp IDから推測せず、実際の値を使う。**
+3. SteamPipe > Buildsで `internal` ブランチを作成し、**パスワードを設定して関係者だけに共有する。**
+   名前だけでは非公開にならず、builderはブランチ作成・パスワード設定や確認を行わない。
+4. テスターにゲームと対象Depotの利用権を用意する。未発売ゲームの外部テスターには
+   Release State Override（beta）キー等を使う。ブランチのパスワードだけでは利用権は付与されない。
+   パスワードを第三者に共有しないよう運用し、JSONやリポジトリにも保存しない。
+
+OS別Depotと共有Depotのどちらも使用できる。共有するOSには同じDepot IDを設定し、
+Steamworks側の対象OSをAll OSesなど共有構成に合わせる。
+共有Depotは全OSのファイルを配布するため容量が増える。ValveはOS固有ファイルには別Depotを推奨する。
+
+[Depotの設定](https://partner.steamgames.com/doc/store/application/depots) /
+[betaブランチ](https://partner.steamgames.com/doc/store/application/branches) /
+[Steamでのテスト](https://partner.steamgames.com/doc/store/testing) /
+[Release State Overrideキー](https://partner.steamgames.com/doc/features/keys)
+
+### STEP3：electron.config.jsonを設定する
 
 プロジェクトルートの `electron.config.json` でゲーム固有設定を管理する。
+JavaScript / TypeScriptの両テンプレートに含まれるので、初期値を自分のゲームの値に変更する。
 `appId` は macOS bundle ID・保存先識別子、`steam.appId` は Valve の数値 App ID。
 これらは別のID。バージョンはゲームルートの `package.json` を使う。
 
@@ -38,279 +83,35 @@
 | `appName` / `executableName` | `appName` はウィンドウ・アプリケーション名。`executableName` は実行ファイル名。 | 表示名と実行ファイル名を個別に設定できる。 |
 | `description` | 任意の説明文。生成するElectronホストの `package.json` とWindowsのファイル説明に反映する。 | JSONの値を優先。未指定または `null` ならルートの `package.json` の `description` を使う。両方未指定なら空文字。明示的な `""` も空文字として扱う。 |
 | `icons` | アイコン画像のパス。プロジェクトルートからの相対パス、または絶対パスを指定する。WindowsはICO、macOSはICNS、LinuxはPNG。 | 各キーは省略可。省略したOSにはbuilder同梱の仮のNext2Dアイコンを使う。`"icons": {}` なら全OSで仮アイコンを使える。指定したファイルがなければ失敗する。 |
-| `architectures` | OSごとのCPU設定。対応する値と指定例は後述の「対応OS・CPU」を参照。 | 省略時はWindows/Linuxが `x64`、macOSが `universal`。`--arch` が優先する。 |
+| `architectures` | OSごとのCPU設定。対応値はSTEP1の「対応OS・CPU」を参照。 | 省略時はWindows/Linuxが `x64`、macOSが `universal`。`--arch` が優先する。 |
 | `steam.appId` | Valveの数値App ID。未発行なら `null` を指定する。 | 未発行でもローカル書き出しは可能。SteamPipe用VDFは生成しない。 |
 | `steam.branch` | `--steam-upload` の反映先betaブランチ。 | 省略時は `internal`。`--steam-branch` が優先する。ブランチの作成・パスワード設定はSteamworks側で行う。 |
 | `steam.depots` | Steamworksで作成した実際のDepot ID。複数OSに同じIDを指定すると、同一Depotへまとめて配布する。 | App IDから推測しない。`null` / 未指定ならアプリと起動情報だけを生成し、アップロード用VDFは生成しない。 |
 | `macos` | macOSアプリの署名・公証設定。 | ローカル検証用は `sign` / `notarize` ともに `false`。本番配布では両方を有効化する。 |
 
-#### テンプレートとApp作成時の初期値
+### STEP4：署名・アップロードの認証を用意する（配布時）
 
-JavaScript / TypeScriptの両テンプレートは `electron.config.json` と
-`src/assets/icons/` の仮のNext2Dアイコン（ICO / ICNS / PNG）を含む。
-配布前にアイコンとゲーム固有の値を差し替える。Steam App ID / Depot IDの初期値は `null`。
+#### macOSの署名・公証
 
-`create-next2d-app` はプロジェクト名から `appId`、`appName`、`executableName`、
-`companyName` を設定する。例えば `my-game` なら `appId` は `app.example.my-game`、
-他の3項目は `my-game` になる。配布前にbundle IDと会社名を自分の値へ変更する。
-CPU設定が省略されている場合はOSごとの既定値を補い、テンプレートに指定済みの値は保持する。
-アイコンパスやSteam IDなどの設定も保持する。
-
-#### 対応OS・CPU
-
-| OS | 既定値 | `architectures` / `--arch` の対応値 |
-|---|---|---|
-| Windows | `x64` | `x64`, `arm64` |
-| macOS | `universal` | `x64`, `arm64`, `universal` |
-| Linux | `x64` | `x64`, `arm64` |
-
-32bit版Windows（`ia32`）には対応しない。`win32` はElectron内部のWindowsのOS名で、
-32bitを意味しない。例えば `My Game-win32-x64/` は64bit版Windows向けの成果物。
-`--platform` には `windows` または `steam:windows` を指定する。
-
-macOSの `universal` はx64とarm64を含む1つの `.app` で、macOS上で生成する。
-Windows/Linuxの既定値はx64。ARM64版は `architectures.windows` / `architectures.linux`
-に `arm64` を設定するか、書き出し時に `--arch arm64` を指定する。
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd --arch arm64
-```
-
-#### 書き出しコマンド
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd
-npx @next2d/builder --platform steam:macos --env prd
-npx @next2d/builder --platform steam:linux --env prd
-npx @next2d/builder --platform macos --env prd --preview
-```
-
-更新済みのテンプレートと `create-next2d-app` が用意するnpmコマンドでも実行できる。
-
-```sh
-npm run build:steam:windows
-npm run build:steam:macos
-npm run build:steam:linux
-npm run build:steam:windows -- --arch arm64
-npm run build:steam:windows -- --env dev
-```
-
-これらのnpmコマンドは `--env prd` を指定済み。末尾の `-- --env dev` などで上書きできる。
-builderを直接呼ぶ場合は `--env` を指定する。
-書き出しコマンドはSteamへのアップロードや公開を自動では行わない。
-
-#### builderが管理するElectronホスト
-
-Electron関連でゲーム側に必要な設定ファイルは `electron.config.json` だけ。
-ゲーム名・バージョン・説明はルートの `package.json` と合わせてホストへ反映する。
-説明は `electron.config.json` の `description` を優先する。
-アイコン画像はゲームの共通アセットを参照でき、未指定ならbuilderの仮アイコンを使う。
-
-builderはOSの一時ディレクトリにホスト・runtime設定・Web資産を配置し、書き出し後に削除する。
-ゲームルートへ `electron/` やElectron用の `node_modules` / lockfileを作らない。
-失敗時も一時ホストを削除する。Electronバージョンはbuilderの
-`templates/electron/package.json` で固定し、Packagerが実行ファイルをダウンロード・キャッシュする。
-ゲーム側でElectronをインストールする処理は不要。
-
-`@electron/packager` もbuilderのnpm依存には含めず、Electronの書き出し時だけ `npx` で取得する。
-バージョンは `src/tool-packages.ts` で固定する。npm/npxを利用できるNode.js環境が必要で、
-初回取得にはネットワーク接続が必要。取得済みツールはnpmキャッシュを再利用する。
-Web / Xboxビルドや `--steam-manifest` だけの実行ではPackagerを取得しない。
-PackagerはOS別パッケージの生成、アイコンの適用、署名・公証、Electron実行ファイルの取得を担当する。
-生成するホストにはnpm依存やネイティブアドオンがないため、ABIに合わせた再ビルドは不要。
-
-プレビューも実行ホストのOS/CPU向けアプリを書き出して起動する。
-一時ホストの削除後、`dist/<platform>/build/<env>/` のアプリを実行するので、
-本番書き出しと同じホスト・資産読み込みを確認できる。
-
-旧 `electron/` のホストコード・`config.forge`・独自npm依存は参照しない。
-移行時はアイコンを共通アセットへ移し、設定パスを更新してから `electron/` を削除する。
-独自のmain/preloadやネイティブアドオンを持つプロジェクトは、移行前にbuilder側への対応が必要。
-
-builder自体を開発中なら、ゲームのdevDependencyに `"@next2d/builder": "file:../builder"` を指定し、
-builder→ゲームの順に `npm ci` する。builder側のprepareでコンパイルされる。
-builderのソース変更後はbuilderで `npm run build` を実行する。
-公開後はこの依存を公開バージョンへ変更でき、ゲームのコマンドはそのまま使える。
-
-### 成果物と起動
-
-`dist/steam/<OS>/build/<env>/` に以下を生成する（デフォルトoutDirの場合）。
-下表のExecutableはOS別の独立したDepotを使う場合。共有Depotの場合は後述のOS名プレフィックスが付く。
-
-| OS | 配布するフォルダ全体 | SteamworksのExecutable |
-|---|---|---|
-| Windows | `My Game-win32-x64/` | `my-game.exe` |
-| macOS | `My Game-darwin-universal/` | `My Game.app` |
-| Linux | `My Game-linux-x64/` | `my-game` |
-
-`*-steampipe/launch.json` に実際の起動パス・CPU・ContentRootが記録される。
-実行ファイルだけを取り出さず、Electronのライブラリ、locales、ライセンス、resourcesを含む
-フォルダ全体を配布する。Steamにはインストーラ（DMG/DEB/MSI）は不要。
-macOSの `.app` 内のシンボリックリンクとLinuxの実行権限を保持する。
-CIの転送は `tar.gz` にしてからartifactへ格納する。
-
-テンプレートのホストは絶対パスと固定origin `next2d://game` で資産を読む。
-起動時の作業ディレクトリに依存せず、ローカルfetch・Worker・localStorageが使える。
-F11/Alt+Enterで全画面、Escapeで解除。閉じるとmacOSでもプロセスを終了する。
-Node integration無効・context isolation/sandbox有効、外部ページ遷移と新規ウィンドウは禁止。
-Next2D用CSPを付与する。外部APIを使うゲームでは接続先を明示的に追加すること。
-[Electron security](https://www.electronjs.org/docs/latest/tutorial/security) /
-[protocol](https://www.electronjs.org/docs/latest/api/protocol)
-
-保存先はElectronのappData配下の `appId` ディレクトリ。
-表示名を変えても保存先は変わらない。旧file-originの開発版セーブは自動移行しない。
-Steam Cloudは未統合。Chromiumプロファイル全体をCloud対象にせず、導入時は
-ゲーム用のセーブファイルとアカウント単位の保存方式を別途設計する。
-[Steam Cloud](https://partner.steamgames.com/doc/features/cloud)
-
-### 同じDepotを複数OSで使う場合
-
-`steam.depots` の同じIDを共有するOSを1グループとして扱う。例えば全OSに同じDepot IDを
-指定すると、Steamのインストール先を次のように分け、Electronの同名ファイルの衝突を避ける。
-
-| OS | SteamworksのExecutable（例） |
-|---|---|
-| Windows | `windows/my-game.exe` |
-| macOS | `macos/My Game.app` |
-| Linux | `linux/my-game` |
-
-Steamworks側のDepot対象OSを共有するOSまたはAll OSesに設定し、Launch Optionには
-生成された `launch.json` のExecutableを指定する。OS別の起動条件も設定する。
-同一Depot内の全OS分のファイルが配布されるため、OS別Depotよりダウンロード容量は増える。
-ValveはOS固有ファイルには別Depotを推奨しているが、OS共有自体は禁止していない。
-[公式DepotのOS設定](https://partner.steamgames.com/doc/store/application/depots)
-
-各OSの書き出しは単独で成功する。共有対象の全OSの成果物が揃うと自動で
-`dist/steam/shared/<env>/depot-<ID>/` に `app_build.vdf`、`app_preview.vdf`、
-`depot_build.vdf`、`launch.json` を生成する。未完了なら `launch.json` に不足OSを記録し、
-アップロード用VDFは生成しない。共有DepotのOS単独VDFも生成しない。
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd
-npx @next2d/builder --platform steam:macos --env prd
-npx @next2d/builder --platform steam:linux --env prd
-```
-
-統合VDFは各OSのパッケージを `FileMapping` で `windows/` / `macos/` / `linux/` へ配置する。
-資産の再コピーは行わず、元パッケージ内のmacOSシンボリックリンク・Linux実行権限を保持する。
-VDFだけではなく `dist/steam/` 全体のディレクトリ構成を保持して移動すること。
-[公式FileMapping仕様](https://partner.steamgames.com/doc/sdk/uploading)
-
-CI等で別のマシン上で書き出した場合は、各OSの `build/<env>/` を
-`steam-package.json` と `*-steampipe/` を含めて同じ `dist/steam/<OS>/build/<env>/` に集め、次を実行する。
-
-```sh
-npx @next2d/builder --platform steam:macos --env prd --steam-manifest
-```
-
-更新済みのテンプレートと `create-next2d-app` では、同じ処理を次のnpmコマンドで実行できる。
-
-```sh
-npm run build:steam:manifest
-# prd以外の成果物を統合する場合
-npm run build:steam:manifest -- --env dev
-```
-
-このコマンドはWebビルドやElectron書き出しを行わず、共有DepotのVDFだけを再生成する。
-どのOS上でも実行できる。`--platform` はVite設定を読むためのSteamターゲットで、統合対象は
-設定内のすべての共有Depot。共有対象のパッケージが不足していれば終了コード1になる。
-`build.outDir` と `--env` を使い、各OSの最後に成功した書き出しを選ぶ（`--arch` 指定も記録される）。
-同じOSのx64版とarm64版を順に書き出した場合、統合対象になるのは最後に成功したCPUの成果物。
-1つの共有Depotへ同じOSの複数CPU版を同時にまとめる処理は行わない。
-`--steam-manifest` は `--arch` / `--preview` / `--build` / `--open` と併用できない。
-App ID・Depot ID・ゲーム名・実行ファイル名・バージョンが現設定と一致する必要がある。
-同じバージョン番号で更新する場合も、配布する全OSを意図したリビジョンで揃えること。
-
-一部OSだけIDを共有する構成にも対応する。共有しないOSは従来どおり単独VDFを生成する。
-設定やバージョンを変更した場合は対象OSを再度書き出す。古い統合VDFは再生成時に無効化する。
-
-### macOSの配布用署名・公証
-
-Steam用は `darwin` であり、Mac App Store向けの `mas` ではない。
-Valveは新規macOSアプリに64bitとAppleの公証を要求している。
-テンプレートのentitlementsはJITとSteam Overlayに必要なlibrary validation / DYLD設定を含み、
-`com.apple.security.app-sandbox` は付けない（Chromiumのrenderer sandboxとは別）。
-[Valveのプラットフォーム要件](https://partner.steamgames.com/doc/store/application/platforms)
-
-macOS上でDeveloper ID Application証明書をキーチェーンへ登録し、Appleの
-`xcrun notarytool store-credentials` で公証用プロファイルを保存してから実行する。
-認証情報はJSONへ書かない。
+macOSのキーチェーンにDeveloper ID Application証明書を登録し、
+`xcrun notarytool store-credentials` で公証用プロファイルを保存する。認証情報はJSONへ書かない。
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
 export APPLE_NOTARY_PROFILE='your-notary-profile'
-NEXT2D_STEAM_RELEASE=1 npx @next2d/builder --platform steam:macos --env prd
 ```
 
-`NEXT2D_STEAM_RELEASE=1` はJSONのfalse指定に関わらず署名と公証を必須にする。
-またはJSONの `macos.sign` / `macos.notarize` を両方trueにする。
+配布用は `macos.sign` / `macos.notarize` を両方 `true` にする。
+またはSTEP5のmacOSコマンドに `NEXT2D_STEAM_RELEASE=1` を付けると、JSONのfalse指定に関わらず両方を必須にできる。
 認証情報不足・署名失敗・公証失敗はビルド失敗となる。
-署名、公証、staple後にSteamPipeへ渡す。確認例:
 
-```sh
-codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
-xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
-```
-
+Steam用のターゲットは `darwin`。Valveは新規macOSアプリに64bitとAppleの公証を要求する。
+テンプレートのentitlementsはJITとSteam Overlay用のlibrary validation / DYLD設定を含み、
+`com.apple.security.app-sandbox` は付けない（Chromiumのrenderer sandboxとは別）。
+[Valveのプラットフォーム要件](https://partner.steamgames.com/doc/store/application/platforms) /
 [Electron Packagerの署名・公証設定](https://electron.github.io/packager/main/interfaces/Options.html)
 
-### Steamworks / SteamPipe
-
-1. Steamworks > SteamPipe > Depotsで配布構成に合わせたDepotを作成し、対象OSを指定する。
-   OS別Depotと、複数OS向けの同一Depotのどちらも使用できる。
-   言語共通ならAll languages。開発用・販売用Packageにも各Depotを含める。
-2. Installation > General InstallationにOS別Launch Optionを追加する。
-   Executableには生成された `launch.json` の値を指定。Arguments/Working Directoryは空欄。
-   x64版は64bit条件を指定し、macOS UniversalはIntel/Apple Silicon両方でテストする。
-3. 変更をSteamworksでPublishする。配布したいOS・最低OS要件は、同梱するElectronの
-   対応バージョンと実機テストに合わせる（古いSteamページの最低OS表だけで決めない）。
-4. JSONへApp ID/Depot IDを設定して再ビルド。単独Depotは `*-steampipe/`、
-   共有Depotは全対象OSが揃った時点で `shared/<env>/depot-<ID>/` に次のVDFが出る。
-   `app_preview.vdf`: ファイルマッピング検証。`app_build.vdf`: アップロード。
-   `depot_build.vdf`: フォルダ内容をインストールルートへ再帰マッピングする。
-   `steam_appid.txt` は配布対象から除外する。
-5. Steamworks SDKのContentBuilder/SteamCMDを取得し、権限のあるビルドアカウントでログインする。
-   パスワードはコマンド・リポジトリへ保存しない。
-
-```text
-steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_preview.vdf" +quit
-steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_build.vdf" +quit
-```
-
-ContentRootはVDFからの相対パス。単独Depotはアプリと `*-steampipe/` をセットで、
-共有Depotは `dist/steam/` 全体の構成を保持して移動する。
-通常の書き出し・`--steam-manifest` が生成するVDFにはSetLiveを入れていない。アップロード後にSteamworksでパスワード付きbetaへ設定し、
-各OSのSteamクライアントからインストールして検証する。
-OSごとのVDFは1つのDepotを更新するため、最終BuildのDepot manifestが全OSで意図した版になっているか確認する。
-[SteamPipe公式手順・VDF仕様](https://partner.steamgames.com/doc/sdk/uploading) /
-[Depots](https://partner.steamgames.com/doc/store/application/depots)
-
-### builderからアップロードしてinternalでテストする
-
-`--steam-upload` は書き出し済みの成果物をSteamCMDで一括アップロードし、
-`SetLive` で指定したbetaブランチへの反映を要求する。Web/Electronの再ビルドは行わない。
-`--platform` は不要で、`--build` / `--preview` / `--open` / `--steam-manifest` / `--arch` とは併用しない。
-builderのnpm依存は追加していない。SteamCMDは別途用意する。
-
-#### Steamworksで関係者向けの配布先を用意する
-
-1. Steamworksのアプリ管理画面 > SteamPipe > Buildsで `internal` ブランチを作成する。
-2. **ブランチにパスワードを設定し、関係者だけに共有する。** `internal` という名前だけでは非公開にならない。
-   builderはブランチの作成やパスワード設定・確認を行わない。パスワードはJSONやリポジトリに保存しない。
-3. テスターがゲームと対象Depotを利用できるPackageのライセンスを持っていることを確認する。
-   未発売ゲームの外部テスターにはRelease State Override（beta）キー等を使用する。
-   ブランチのパスワードだけではゲームの利用権は付与されない。
-4. 関係者のSteamクライアントで、ゲームのプロパティ > ゲームバージョンとベータから
-   パスワードを入力して `internal` を選ぶ。
-
-`default` ブランチはこのコマンドでは指定できない。一般公開用ビルドの切り替えはSteamworksで行う。
-betaのパスワードは共有秘密なので、第三者に渡ればアクセスできる。個々のテスターの利用権も管理する。
-
-[公式betaブランチ設定](https://partner.steamgames.com/doc/store/application/branches) /
-[Steamでのテスト](https://partner.steamgames.com/doc/store/testing) /
-[Release State Overrideキー](https://partner.steamgames.com/doc/features/keys)
-
-#### SteamCMDの準備と認証
+#### SteamCMDとビルドアカウント
 
 [Steamworks SDKのContentBuilder](https://partner.steamgames.com/doc/sdk/uploading)にある実行OS用のSteamCMDを用意する。
 Windowsは `steamcmd.exe`、macOS / Linuxは `steamcmd.sh` を使用できる。
@@ -333,42 +134,160 @@ export STEAM_USERNAME="your_build_account"
 CIではSteamCMDの `config/config.vdf` をSecretとして復元・管理し、ビルド成果物に含めない。
 Windows PowerShellでは `$env:STEAMCMD` と `$env:STEAM_USERNAME` を設定する。
 
-#### 検証とアップロード
+### STEP5：各OSを書き出し、成果物を揃える
 
-`electron.config.json` の `steam.depots` に設定された全OSの成果物を揃え、ゲームのルートで実行する。
-同じDepot IDを使うOSはOS別サブディレクトリへまとめ、異なるDepotも1回のAppBuildでアップロードする。
+ゲームルートで必要なOSのコマンドを実行する。書き出しはアップロード・公開を行わない。
 
 ```sh
-# ローカル検証だけ。SteamCMDや認証は不要、Steamへの接続・送信も行わない
-npx @next2d/builder --steam-upload --env prd --dry-run
-
-# アップロードし、steam.branch（省略時internal）へ反映
-npx @next2d/builder --steam-upload --env prd
-
-# ブランチや成果物の収集先を明示する場合
-npx @next2d/builder --steam-upload --env prd --steam-branch internal --steam-root dist/steam
+npx @next2d/builder --platform steam:windows --env prd
+npx @next2d/builder --platform steam:macos --env prd
+npx @next2d/builder --platform steam:linux --env prd
 ```
 
-ローカル開発中は `npx @next2d/builder` を `node ../builder/dist/index.js` に置き換える。
-この機能を含むbuilderの公開後は、ゲーム側の `npm run upload:steam:check` / `npm run upload:steam` も使用できる。
+CPUを変える場合は `--arch arm64` などを追加する。
+テンプレートの `npm run build:steam:windows` / `build:steam:macos` / `build:steam:linux` も同じ処理を行い、
+`--env prd` を指定済み。npm経由の引数は `-- --arch arm64` や `-- --env dev` で渡す。
 
-`--steam-root` はゲームルートからの相対パス、または絶対パス。既定は `dist/steam`。
-アップロード処理ではVite設定を読み込まないため、独自の出力先を使う場合はこの引数を指定する。
-成果物の `steam-package.json` にあるApp ID・Depot ID・バージョン・ゲーム名・CPUと実行ファイルを検証し、
-不足や不整合があればSteamCMDを起動する前に停止する。VDFは既存ファイルを流用せず検証結果から再生成する。
+既定の出力先は `dist/steam/<OS>/build/<env>/`。
 
-各実行のVDFと `upload-plan.json` は `dist/steam/uploads/<env>/<branch>-<識別子>/` に保存する。
-dry-runでは `Preview=1` のVDFを生成して `SetLive` を付けない。これはローカル検証であり、
-SteamCMDの認証・サーバー側の権限・ブランチ・パスワード設定が正しいことを保証するものではない。
-通常の書き出し用VDFは変更しない。SteamPipeのログ・差分キャッシュは `uploads/<env>/cache/<branch>/` に置く。
+| OS | 配布するフォルダ全体 | OS別DepotのExecutable | 共有DepotのExecutable |
+|---|---|---|---|
+| Windows | `My Game-win32-x64/` | `my-game.exe` | `windows/my-game.exe` |
+| macOS | `My Game-darwin-universal/` | `My Game.app` | `macos/My Game.app` |
+| Linux | `My Game-linux-x64/` | `my-game` | `linux/my-game` |
 
-アップロード時は終了コードとSteamCMDの成功メッセージを確認し、BuildIDを `upload-result.json` に記録する。
-SteamworksのBuilds画面で、記録されたBuildIDが `internal` の現在のビルドになったことを確認する。
-アカウントやアプリの状態によって、Steam側で追加の確認が必要になる場合がある。
+実際の起動パス・CPU・ContentRootは `*-steampipe/launch.json` を参照する。
+実行ファイルだけでなく、Electronのライブラリ・locales・ライセンス・resourcesを含むフォルダ全体が配布対象。
+Steam用のDMG/DEB/MSIは不要で、書き出し後に追加のアプリビルドは行わない。
+
+別マシンやCIの成果物は、`steam-package.json` と `*-steampipe/` を含む各OSの `build/<env>/` を
+同じ `dist/steam/<OS>/build/<env>/` 構成に集める。macOSのシンボリックリンクとLinuxの実行権限を保つため、
+CI artifactは `tar.gz` にして転送する。カスタム出力先はSTEP6の `--steam-root` で指定する。
+
+設定・バージョンを変えたら対象OSを再書き出しする。同じバージョン番号でも全OSを意図したリビジョンで揃える。
+同じOSのx64とarm64を順に書き出すと、最後に成功したCPUの成果物を使う。
+同じOSの複数CPUを1つの共有Depotへ同時に統合する処理は行わない。
+
+配布用macOSアプリは署名・公証・staple完了を確認する（パスは成果物に合わせる）:
+
+```sh
+codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+```
+
+### STEP6：起動設定を反映し、アップロード・テストする
+
+SteamworksのInstallation > General InstallationにOS別Launch Optionを追加する。
+ExecutableはSTEP5の `launch.json` に合わせ、Arguments/Working Directoryは空欄にする。
+x64版は64bit条件を指定する。対応OS・最低OS要件は同梱Electronと実機検証に合わせ、Steamworksで変更をPublishする。
+
+ゲームルートで次を実行する。共有Depot・OS別Depotをまとめて1回のAppBuildでアップロードする。
+Web/Electronの再ビルドや事前の `--steam-manifest` 実行は不要。
+
+```sh
+# ローカル検証のみ。SteamCMD・認証・Steamへの接続は不要
+npx @next2d/builder --steam-upload --env prd --dry-run
+
+# 検証後、設定したブランチへアップロード
+npx @next2d/builder --steam-upload --env prd
+```
+
+| 引数・設定 | 用途 |
+|---|---|
+| `--steam-branch internal` | `steam.branch` の反映先を上書き。`SetLive` で反映を要求する。`default` は指定不可で、一般公開用ビルドの切り替えはSteamworksで行う。 |
+| `--steam-root dist/steam` | 成果物の収集先。既定は `dist/steam`。ゲームルートからの相対パスまたは絶対パス。アップロード時はVite設定を読まないため、カスタム出力先では明示する。 |
+| `--dry-run` | パッケージと設定の整合性を検証する。Steam側の権限・ブランチ・パスワードの確認は行わない。 |
+| 併用しない引数 | `--build` / `--preview` / `--open` / `--steam-manifest` / `--arch`。`--platform` も不要。 |
+
+対応するテンプレートのnpmスクリプトは `upload:steam:check` / `upload:steam`。
+
+builderは `steam.depots` に設定された全OSの `steam-package.json` と実行ファイルを検証し、
+App ID・Depot ID・バージョン・ゲーム名・CPUに不足や不整合があればSteamCMD起動前に停止する。
+VDFは検証結果から再生成する。通常の書き出し用VDFは変更しない。
+
+| 保存先（`--steam-root` 配下） | 内容 |
+|---|---|
+| `uploads/<env>/<branch>-<識別子>/` | VDF、`upload-plan.json`。dry-runは `Preview=1`、`SetLive`なし。アップロード成功時はBuildIDを `upload-result.json` に記録。 |
+| `uploads/<env>/cache/<branch>/` | SteamPipeのログ・差分キャッシュ。 |
+
+SteamworksのBuilds画面で、記録されたBuildIDが対象ブランチの現在のビルドになっていることを確認する。
+アカウントやアプリの状態によってSteam側の追加確認が必要になる場合がある。
+テスターはSteamクライアントのプロパティ > ゲームバージョンとベータでパスワードを入力し、`internal` を選ぶ。
+各OSでインストール・起動を確認し、macOS UniversalはIntel / Apple Siliconの両方でテストする。
+
+### 参照：VDFの生成と手動アップロード
+
+builderのSTEP6を使う場合、この節の操作は不要。SteamCMDを直接操作する場合に使う。
+
+| 構成 | 通常の書き出し時のVDF生成先・条件 |
+|---|---|
+| OS別Depot | 各OSの `*-steampipe/`。 |
+| 共有Depot | 全対象OSが揃うと `dist/steam/shared/<env>/depot-<ID>/`。不足OSは `launch.json` に記録し、アップロード用VDF・OS単独VDFは生成しない。 |
+
+一部OSだけDepot IDを共有する構成にも対応する。`FileMapping` でOS別サブディレクトリへ配置し、アセットは再コピーしない。
+別マシンの成果物を集めた後に共有DepotのVDFだけを再生成する場合:
+
+```sh
+npx @next2d/builder --platform steam:macos --env prd --steam-manifest
+```
+
+npmの別名は `build:steam:manifest`（別環境なら `-- --env dev`）。このコマンドはどのOSでも実行でき、
+`--platform` はVite設定を読むための指定で、設定内のすべての共有Depotを統合する。
+`build.outDir` と `--env` から最新の成功した書き出しを選び、App ID・Depot ID・ゲーム名・実行ファイル名・バージョンを検証する。
+不足パッケージは終了コード1となり、古い統合VDFは再生成時に無効化する。
+`--arch` / `--preview` / `--build` / `--open` とは併用できない。
+
+`app_preview.vdf` はファイルマッピング検証、`app_build.vdf` はアップロード、
+`depot_build.vdf` はフォルダ内容の再帰マッピング用。`steam_appid.txt` は配布対象から除外する。
+ContentRootはVDFからの相対パスなので、単独Depotはアプリと `*-steampipe/` をセットで、共有Depotは `dist/steam/` 全体の構成を保って移動する。
+
+```text
+steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_preview.vdf" +quit
+steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_build.vdf" +quit
+```
+
+通常の書き出し・`--steam-manifest` のVDFには `SetLive` がないため、アップロード後にSteamworksで対象ブランチへ設定する。
+OS別VDFは1つのDepotを更新するので、最終BuildのDepot manifestが全OSで意図した版になっているか確認する。
+[SteamPipe公式手順・VDF仕様](https://partner.steamgames.com/doc/sdk/uploading)
+
+### 参照：テンプレート・ホスト・移行
+
+`create-next2d-app` はプロジェクト名から `appId`、`appName`、`executableName`、
+`companyName` を設定する。例えば `my-game` なら `appId` は `app.example.my-game`、
+他の3項目は `my-game` になる。配布前にbundle IDと会社名を自分の値へ変更する。
+CPU設定が省略されている場合はOSごとの既定値を補い、テンプレートに指定済みの値は保持する。
+アイコンパスやSteam IDなどの設定も保持する。
+
+Electron用コードはbuilderが管理する。OSの一時ディレクトリにホスト・runtime設定・Web資産を配置し、失敗時を含め書き出し後に削除する。
+ゲーム側へ `electron/`、Electron用 `node_modules` / lockfileは作らない。
+Electronは `templates/electron/package.json`、Packagerは `src/tool-packages.ts` の固定バージョンを取得・キャッシュする。
+PackagerはElectron書き出し時のみ取得し、OS別パッケージ・アイコン・署名・公証を処理する。
+ホストにはnpm依存やネイティブアドオンがないため、ABIに合わせた再ビルドは不要。
+プレビューは実行ホストのOS/CPUで書き出した `dist/<platform>/build/<env>/` のアプリを起動する。
+
+旧 `electron/` のホストコード・`config.forge`・独自npm依存は参照しない。
+移行時はアイコンを共通アセットへ移し、JSONのパスを更新してから旧ディレクトリを削除する。
+独自main/preloadやネイティブアドオンがある場合は、先にbuilder側への対応が必要。
+
+テンプレートのホストは絶対パスと固定origin `next2d://game` で資産を読む。
+起動時の作業ディレクトリに依存せず、ローカルfetch・Worker・localStorageが使える。
+F11/Alt+Enterで全画面、Escapeで解除。閉じるとmacOSでもプロセスを終了する。
+Node integration無効・context isolation/sandbox有効、外部ページ遷移と新規ウィンドウは禁止。
+Next2D用CSPを付与する。外部APIを使うゲームでは接続先を明示的に追加すること。
+[Electron security](https://www.electronjs.org/docs/latest/tutorial/security) /
+[protocol](https://www.electronjs.org/docs/latest/api/protocol)
+
+保存先はElectronのappData配下の `appId` ディレクトリ。
+表示名を変えても保存先は変わらない。旧file-originの開発版セーブは自動移行しない。
+Steam Cloudは未統合。Chromiumプロファイル全体をCloud対象にせず、導入時は
+ゲーム用のセーブファイルとアカウント単位の保存方式を別途設計する。
+[Steam Cloud](https://partner.steamgames.com/doc/features/cloud)
 
 ### リリース前の確認範囲
 
-- 対象OSのSteamからインストール・起動・終了、オフライン起動、更新後の保存データ。
+STEP6のインストール・起動確認に加えて、以下を検証する。
+
+- 終了動作、オフライン起動、更新後の保存データ。
 - マウス/キーボード/コントローラ、解像度・全画面切替、音声、スリープ復帰。
 - Shift+Tab Overlay。Electronは複数プロセスなので、OS/GPUごとに実動作を確認する。
   この書き出しはSteamworks SDK・実績・DRM・Overlay APIを統合しない。
@@ -387,9 +306,54 @@ SteamworksのBuilds画面で、記録されたBuildIDが `internal` の現在の
 
 ## English
 
-### Configuration
+Complete the [common setup](setup.md#english), then follow these steps.
+Local exports do not require Steamworks, SteamCMD or distribution signing credentials.
+
+### STEP1: Prepare target environments and icons
+
+- Build macOS Universal applications and perform macOS signing/notarization on macOS.
+- Prepare an environment for each distributed OS to verify launch, input and saved data.
+- Place Windows ICO, macOS ICNS and Linux PNG icons in the game's `src/assets/icons/`.
+  Replace template placeholders before distribution. STEP3 documents omitted icon settings.
+
+#### Supported operating systems and architectures
+
+| OS | Default | Accepted `architectures` / `--arch` values |
+|---|---|---|
+| Windows | `x64` | `x64`, `arm64` |
+| macOS | `universal` | `x64`, `arm64`, `universal` |
+| Linux | `x64` | `x64`, `arm64` |
+
+32-bit Windows (`ia32`) is not supported. `win32` is Electron's internal OS name for Windows, not a CPU bitness indicator.
+For example, `My Game-win32-x64/` is a 64-bit Windows package.
+Use `windows` or `steam:windows` for `--platform`.
+
+macOS `universal` produces one `.app` containing both x64 and arm64.
+
+### STEP2: Prepare the Steamworks app, depots and testing branch (Steam distribution)
+
+1. Find the issued App ID in the app's Steamworks administration page.
+2. Create depots in SteamPipe > Depots and select their operating systems. Use All languages for shared language content,
+   and include the depots in development and retail Packages. **Use actual Depot IDs; do not infer them from the App ID.**
+3. Create an `internal` branch in SteamPipe > Builds and **set a password shared only with the intended testers.**
+   The name alone does not make it private. The builder does not create branches, configure passwords or verify protection.
+4. Give testers access to the game and its depots. For external testers of an unreleased game, use Release State Override
+   (beta) keys or another appropriate method. A branch password alone does not grant game access.
+   Keep the password out of JSON and the repository, and ask testers not to share it with others.
+
+Separate OS depots and shared depots are supported. Assign the same Depot ID to operating systems that share a depot,
+and set its Steamworks OS selection accordingly, such as All OSes.
+Shared depots distribute every OS's files and increase download size. Valve recommends separate depots for OS-specific files.
+
+[Depot configuration](https://partner.steamgames.com/doc/store/application/depots) /
+[Beta branches](https://partner.steamgames.com/doc/store/application/branches) /
+[Testing on Steam](https://partner.steamgames.com/doc/store/testing) /
+[Release State Override keys](https://partner.steamgames.com/doc/features/keys)
+
+### STEP3: Configure electron.config.json
 
 Manage game-specific settings in `electron.config.json` at the project root.
+Both JavaScript and TypeScript templates include it; replace the defaults with your game's values.
 `appId` is the macOS bundle ID and the identifier used for the save location; `steam.appId` is Valve's numeric App ID.
 These are separate identifiers. The game version comes from the root `package.json`.
 
@@ -421,276 +385,35 @@ These are separate identifiers. The game version comes from the root `package.js
 | `appName` / `executableName` | `appName` is the window and application name. `executableName` is the executable file name. | The display name and executable name can be set independently. |
 | `description` | Optional description used in the generated Electron host's `package.json` and the Windows file description. | The JSON value takes priority. If omitted or `null`, uses `description` from the root `package.json`. If both are absent, uses an empty string. An explicit `""` also remains empty. |
 | `icons` | Icon paths, relative to the project root or absolute. Use ICO for Windows, ICNS for macOS and PNG for Linux. | Each key is optional. Omitted platforms use the builder's placeholder Next2D icons; `"icons": {}` uses placeholders for every OS. A specified file that does not exist causes an error. |
-| `architectures` | CPU architecture per OS. See “Supported operating systems and architectures” below for accepted values and examples. | Defaults to `x64` for Windows/Linux and `universal` for macOS. `--arch` takes priority. |
+| `architectures` | CPU architecture per OS. See STEP1 for supported operating systems and architectures. | Defaults to `x64` for Windows/Linux and `universal` for macOS. `--arch` takes priority. |
 | `steam.appId` | Valve's numeric App ID. Set to `null` if it has not been issued. | Local exports still work without an App ID, but SteamPipe VDFs are not generated. |
 | `steam.branch` | Target beta branch for `--steam-upload`. | Defaults to `internal`. `--steam-branch` takes priority. Create the branch and configure its password in Steamworks. |
 | `steam.depots` | Actual Depot IDs created in Steamworks. Assigning the same ID to multiple operating systems combines them in one depot. | Do not infer Depot IDs from the App ID. If `null` or omitted, only the application and launch metadata are generated, without upload VDFs. |
 | `macos` | macOS signing and notarization settings. | Use `false` for both `sign` / `notarize` during local testing. Enable both for production distribution. |
 
-#### Templates and defaults for new apps
+### STEP4: Prepare signing and upload credentials (distribution)
 
-Both the JavaScript and TypeScript templates include `electron.config.json` and placeholder Next2D icons
-(ICO / ICNS / PNG) in `src/assets/icons/`. Replace the icons and game-specific values before distribution.
-Steam App ID / Depot IDs initially use `null`.
+#### macOS signing and notarization
 
-`create-next2d-app` initializes `appId`, `appName`, `executableName` and `companyName` from the project name.
-For example, `my-game` produces `app.example.my-game` for `appId` and `my-game` for the other three fields.
-Replace the bundle ID and company name with your own values before distribution.
-Missing CPU settings receive the defaults for each OS; values already provided by the template are preserved.
-Other settings, such as icon paths and Steam IDs, are also preserved.
-
-#### Supported operating systems and architectures
-
-| OS | Default | Accepted `architectures` / `--arch` values |
-|---|---|---|
-| Windows | `x64` | `x64`, `arm64` |
-| macOS | `universal` | `x64`, `arm64`, `universal` |
-| Linux | `x64` | `x64`, `arm64` |
-
-32-bit Windows (`ia32`) is not supported. `win32` is Electron's internal OS name for Windows, not a CPU bitness indicator.
-For example, `My Game-win32-x64/` is a 64-bit Windows package.
-Use `windows` or `steam:windows` for `--platform`.
-
-macOS `universal` produces one `.app` containing both x64 and arm64, and must be built on macOS.
-Windows/Linux default to x64. For ARM64, set `architectures.windows` / `architectures.linux` to `arm64`
-or pass `--arch arm64` when exporting.
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd --arch arm64
-```
-
-#### Export commands
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd
-npx @next2d/builder --platform steam:macos --env prd
-npx @next2d/builder --platform steam:linux --env prd
-npx @next2d/builder --platform macos --env prd --preview
-```
-
-The updated templates and `create-next2d-app` also provide these npm scripts:
-
-```sh
-npm run build:steam:windows
-npm run build:steam:macos
-npm run build:steam:linux
-npm run build:steam:windows -- --arch arm64
-npm run build:steam:windows -- --env dev
-```
-
-These npm scripts already specify `--env prd`; append an override such as `-- --env dev` when needed.
-Specify `--env` when invoking the builder directly.
-Export commands do not automatically upload to or publish on Steam.
-
-#### The Electron host managed by the builder
-
-The only Electron-specific configuration file needed in the game is `electron.config.json`.
-The builder combines it with the root `package.json` to populate the host's game name, version and description.
-For the description, `description` in `electron.config.json` takes priority.
-Icons may reference shared game assets; unspecified icons use the builder's placeholders.
-
-The builder stages the host, runtime configuration and web assets in an OS temporary directory and deletes it after export.
-It does not create an `electron/` directory or Electron-specific `node_modules` / lockfile in the game root.
-The temporary host is also removed on failure. The Electron version is pinned in the builder's
-`templates/electron/package.json`, and Packager downloads and caches the runtime.
-The game does not need a separate Electron installation step.
-
-`@electron/packager` is not an npm dependency of the builder either; it is acquired through `npx` only for Electron exports.
-Its version is pinned in `src/tool-packages.ts`. Node.js with npm/npx is required, and the initial download needs network access.
-Downloaded tools are reused from npm's cache. Web / Xbox builds and standalone `--steam-manifest` runs do not acquire Packager.
-Packager handles OS-specific packages, icons, signing/notarization and Electron runtime downloads.
-The generated host has no npm dependencies or native addons, so rebuilding for a specific ABI is unnecessary.
-
-Preview also exports an application for the host OS/CPU and launches it.
-After the temporary host has been removed, it runs the application in `dist/<platform>/build/<env>/`,
-allowing you to test the same host and asset loading used by production exports.
-
-Legacy host code, `config.forge` and custom npm dependencies under `electron/` are not used.
-When migrating, move icons into shared assets and update their paths before deleting `electron/`.
-Projects with a custom main/preload or native addons need support in the builder before migration.
-
-When developing the builder itself, you can set `"@next2d/builder": "file:../builder"` in the game's devDependencies
-and run `npm ci` in the builder, then in the game. The builder's prepare script compiles its source.
-After changing builder source files, run `npm run build` in the builder.
-After publication, this dependency can point to a published version while keeping the same game commands.
-
-### Output and launching
-
-With the default outDir, packages are generated under `dist/steam/<OS>/build/<env>/`.
-The Executable values below apply to separate depots for each OS. Shared depots add the OS prefix described later.
-
-| OS | Entire folder to distribute | Steamworks Executable |
-|---|---|---|
-| Windows | `My Game-win32-x64/` | `my-game.exe` |
-| macOS | `My Game-darwin-universal/` | `My Game.app` |
-| Linux | `My Game-linux-x64/` | `my-game` |
-
-`*-steampipe/launch.json` records the actual launch path, CPU architecture and ContentRoot.
-Distribute the entire folder, including Electron libraries, locales, licenses and resources, rather than extracting only the executable.
-Steam does not require an installer (DMG/DEB/MSI).
-Preserve symlinks inside the macOS `.app` and executable permissions on Linux.
-For CI transfers, create a `tar.gz` before storing the output as an artifact.
-
-The template host loads assets using absolute paths and the fixed origin `next2d://game`.
-Local fetch, Workers and localStorage work independently of the startup working directory.
-F11/Alt+Enter enters fullscreen; Escape exits it. Closing the window also terminates the process on macOS.
-Node integration is disabled, context isolation and sandboxing are enabled, and external navigation and new windows are blocked.
-A Next2D CSP is applied. Games using external APIs must explicitly add their destinations.
-[Electron security](https://www.electronjs.org/docs/latest/tutorial/security) /
-[protocol](https://www.electronjs.org/docs/latest/api/protocol)
-
-Save data is stored in the `appId` directory under Electron's appData location.
-Changing the display name does not change that location. Saves from older file-origin development builds are not migrated automatically.
-Steam Cloud is not integrated. When adding it, design game-specific save files and per-account storage separately,
-rather than syncing the entire Chromium profile.
-[Steam Cloud](https://partner.steamgames.com/doc/features/cloud)
-
-### Sharing one depot across multiple operating systems
-
-Operating systems assigned the same ID in `steam.depots` form a group.
-For example, assigning the same Depot ID to all operating systems separates their Steam installation paths as follows,
-avoiding collisions between Electron files with identical names.
-
-| OS | Example Steamworks Executable |
-|---|---|
-| Windows | `windows/my-game.exe` |
-| macOS | `macos/My Game.app` |
-| Linux | `linux/my-game` |
-
-In Steamworks, configure the depot's OS setting for the shared operating systems or All OSes.
-Use the Executable values from the generated `launch.json` for the Launch Options and set OS-specific launch conditions.
-Every OS's files in the shared depot are distributed, so downloads are larger than with separate depots.
-Valve recommends separate depots for OS-specific files, but does not prohibit sharing a depot across operating systems.
-[Official depot OS settings](https://partner.steamgames.com/doc/store/application/depots)
-
-Each OS export can succeed independently. Once every OS in a shared group has been exported, the builder automatically generates
-`app_build.vdf`, `app_preview.vdf`, `depot_build.vdf` and `launch.json` in `dist/steam/shared/<env>/depot-<ID>/`.
-If the group is incomplete, `launch.json` lists the missing operating systems and no upload VDFs are generated.
-Standalone per-OS VDFs are not generated for a shared depot either.
-
-```sh
-npx @next2d/builder --platform steam:windows --env prd
-npx @next2d/builder --platform steam:macos --env prd
-npx @next2d/builder --platform steam:linux --env prd
-```
-
-The combined VDF uses `FileMapping` to place the OS packages under `windows/` / `macos/` / `linux/`.
-Assets are not copied again, preserving the original packages' macOS symlinks and Linux executable permissions.
-When moving the output, preserve the entire `dist/steam/` directory structure, not just the VDF files.
-[Official FileMapping specification](https://partner.steamgames.com/doc/sdk/uploading)
-
-For exports made on separate machines, such as in CI, collect each OS's `build/<env>/`, including `steam-package.json`
-and `*-steampipe/`, under the same `dist/steam/<OS>/build/<env>/` structure, then run:
-
-```sh
-npx @next2d/builder --platform steam:macos --env prd --steam-manifest
-```
-
-The updated templates and `create-next2d-app` provide an npm script for the same operation:
-
-```sh
-npm run build:steam:manifest
-# Combine packages from an environment other than prd
-npm run build:steam:manifest -- --env dev
-```
-
-This command only regenerates shared depot VDFs; it does not build the web application or export Electron packages.
-It can run on any OS. `--platform` supplies a Steam target for loading the Vite configuration; all shared depots in the configuration are combined.
-Missing packages in a shared group cause exit code 1.
-The command uses `build.outDir` and `--env` to select the most recent successful export for each OS, including its recorded `--arch`.
-If x64 and arm64 are exported successively for the same OS, only the last successfully exported architecture is included.
-It does not combine multiple CPU variants of the same OS into one shared depot.
-`--steam-manifest` cannot be combined with `--arch` / `--preview` / `--build` / `--open`.
-The App ID, Depot ID, game name, executable name and version must match the current configuration.
-Even when retaining the same version number, make sure all distributed OS packages come from the intended revision.
-
-Configurations where only some operating systems share an ID are supported. Other operating systems still get standalone VDFs.
-Re-export the affected operating systems after changing the configuration or version. Old combined VDFs are invalidated during regeneration.
-
-### Signing and notarizing macOS distribution builds
-
-Steam uses the `darwin` target, not the Mac App Store target `mas`.
-Valve requires 64-bit support and Apple notarization for new macOS applications.
-The template entitlements include the library validation / DYLD settings needed for JIT and Steam Overlay,
-but do not include `com.apple.security.app-sandbox`, which is separate from Chromium's renderer sandbox.
-[Valve platform requirements](https://partner.steamgames.com/doc/store/application/platforms)
-
-On macOS, add a Developer ID Application certificate to the keychain and save a notarization profile with
-Apple's `xcrun notarytool store-credentials` before running the build. Do not store credentials in JSON.
+Install a Developer ID Application certificate in the macOS keychain and save a notarization profile using
+`xcrun notarytool store-credentials`. Do not put credentials in JSON.
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
 export APPLE_NOTARY_PROFILE='your-notary-profile'
-NEXT2D_STEAM_RELEASE=1 npx @next2d/builder --platform steam:macos --env prd
 ```
 
-`NEXT2D_STEAM_RELEASE=1` requires signing and notarization even when the JSON values are false.
-Alternatively, set both `macos.sign` / `macos.notarize` to true in JSON.
-Missing credentials, signing failures or notarization failures cause the build to fail.
-Submit the package to SteamPipe after signing, notarization and stapling. Example checks:
+For distribution, set both `macos.sign` / `macos.notarize` to `true`.
+Alternatively, prefix the STEP5 macOS command with `NEXT2D_STEAM_RELEASE=1` to require both even when JSON specifies false.
+Missing credentials, signing failures or notarization failures fail the build.
 
-```sh
-codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
-xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
-```
-
+Steam uses the `darwin` target. Valve requires 64-bit support and Apple notarization for new macOS applications.
+The template entitlements include library validation / DYLD settings for JIT and Steam Overlay,
+without `com.apple.security.app-sandbox` (which is separate from Chromium's renderer sandbox).
+[Valve platform requirements](https://partner.steamgames.com/doc/store/application/platforms) /
 [Electron Packager signing and notarization options](https://electron.github.io/packager/main/interfaces/Options.html)
 
-### Steamworks / SteamPipe
-
-1. In Steamworks > SteamPipe > Depots, create depots matching your distribution layout and select their operating systems.
-   Both separate OS depots and shared depots are supported. Use All languages for language-independent content.
-   Include each depot in the development and retail Packages as well.
-2. Add OS-specific Launch Options under Installation > General Installation.
-   Set Executable to the generated `launch.json` value; leave Arguments/Working Directory empty.
-   Select the 64-bit condition for x64 builds and test macOS Universal on both Intel and Apple Silicon.
-3. Publish the changes in Steamworks. Match the supported operating systems and minimum OS requirements to
-   the bundled Electron version and hardware testing, rather than relying only on older Steam minimum-OS tables.
-4. Set the App ID/Depot IDs in JSON and rebuild. Standalone depot VDFs appear in `*-steampipe/`;
-   shared depot VDFs appear in `shared/<env>/depot-<ID>/` once every required OS package exists.
-   `app_preview.vdf` validates file mappings; `app_build.vdf` uploads the build.
-   `depot_build.vdf` recursively maps the folder contents into the install root. `steam_appid.txt` is excluded from distribution.
-5. Obtain ContentBuilder/SteamCMD from the Steamworks SDK and log in with an authorized build account.
-   Do not store passwords in commands or the repository.
-
-```text
-steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_preview.vdf" +quit
-steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_build.vdf" +quit
-```
-
-ContentRoot is relative to the VDF. Move standalone applications together with their `*-steampipe/` directories;
-for shared depots, preserve the entire `dist/steam/` layout.
-VDFs produced by ordinary exports and `--steam-manifest` do not include SetLive.
-After uploading, assign the build to a password-protected beta in Steamworks and test installation using the Steam client on each OS.
-Each per-OS VDF updates one depot, so verify that the final build references the intended depot manifest versions for every OS.
-[Official SteamPipe workflow and VDF specification](https://partner.steamgames.com/doc/sdk/uploading) /
-[Depots](https://partner.steamgames.com/doc/store/application/depots)
-
-### Uploading with the builder and testing on internal
-
-`--steam-upload` uploads existing exported packages together through SteamCMD and uses `SetLive` to request activation on the selected beta branch.
-It does not rebuild the web application or Electron packages.
-`--platform` is unnecessary; do not combine this command with `--build` / `--preview` / `--open` / `--steam-manifest` / `--arch`.
-This feature adds no npm dependencies to the builder. Install SteamCMD separately.
-
-#### Preparing a private testing branch in Steamworks
-
-1. Create an `internal` branch in Steamworks App Admin > SteamPipe > Builds.
-2. **Set a branch password and share it only with the intended testers.** Naming a branch `internal` does not make it private.
-   The builder does not create branches, set passwords or verify password protection. Do not store the password in JSON or the repository.
-3. Make sure testers hold a Package license that grants access to the game and its depots.
-   For external testers of an unreleased game, use Release State Override (beta) keys or another appropriate access method.
-   A branch password alone does not grant ownership of the game.
-4. In the Steam client, testers open the game's Properties > Game Versions & Betas, enter the password and select `internal`.
-
-This command does not allow the `default` branch. Switch the public release build through Steamworks.
-A beta password is a shared secret; another person who receives it can access the branch. Also manage each tester's game access rights.
-
-[Official beta branch settings](https://partner.steamgames.com/doc/store/application/branches) /
-[Testing on Steam](https://partner.steamgames.com/doc/store/testing) /
-[Release State Override keys](https://partner.steamgames.com/doc/features/keys)
-
-#### SteamCMD setup and authentication
+#### SteamCMD and the build account
 
 Obtain SteamCMD for your host OS from the [Steamworks SDK ContentBuilder](https://partner.steamgames.com/doc/sdk/uploading).
 Use `steamcmd.exe` on Windows or `steamcmd.sh` on macOS / Linux.
@@ -713,42 +436,161 @@ If authentication expires, log in again with the same SteamCMD. Builder uploads 
 In CI, restore and manage SteamCMD's `config/config.vdf` as a Secret and exclude it from build artifacts.
 In Windows PowerShell, set `$env:STEAMCMD` and `$env:STEAM_USERNAME`.
 
-#### Validation and upload
+### STEP5: Export each OS and collect the packages
 
-Collect the packages for every OS configured in `electron.config.json` under `steam.depots`, then run from the game root.
-Operating systems sharing a Depot ID are placed in separate OS subdirectories; distinct depots are also uploaded in a single AppBuild.
+Run the required OS commands from the game root. Exporting does not upload or publish anything.
 
 ```sh
-# Local validation only: no SteamCMD, credentials, Steam connection or upload
-npx @next2d/builder --steam-upload --env prd --dry-run
-
-# Upload and request activation on steam.branch (internal by default)
-npx @next2d/builder --steam-upload --env prd
-
-# Specify a branch or the directory containing collected packages
-npx @next2d/builder --steam-upload --env prd --steam-branch internal --steam-root dist/steam
+npx @next2d/builder --platform steam:windows --env prd
+npx @next2d/builder --platform steam:macos --env prd
+npx @next2d/builder --platform steam:linux --env prd
 ```
 
-During local development, replace `npx @next2d/builder` with `node ../builder/dist/index.js`.
-After a builder version containing this feature is published, the game's `npm run upload:steam:check` / `npm run upload:steam` scripts can also be used.
+Append an option such as `--arch arm64` to change the architecture.
+Template scripts `npm run build:steam:windows` / `build:steam:macos` / `build:steam:linux` perform the same operations
+and already specify `--env prd`. Pass npm arguments with `-- --arch arm64` or `-- --env dev`.
 
-`--steam-root` accepts a path relative to the game root or an absolute path; it defaults to `dist/steam`.
-The upload operation does not read the Vite configuration, so specify this argument for a custom output directory.
-It validates the App ID, Depot ID, version, game name and CPU recorded in `steam-package.json`, along with the executable.
-Missing or inconsistent packages stop the operation before SteamCMD starts. VDFs are regenerated from validated packages instead of reusing existing files.
+The default output location is `dist/steam/<OS>/build/<env>/`.
 
-Each run saves its VDFs and `upload-plan.json` in `dist/steam/uploads/<env>/<branch>-<identifier>/`.
-A dry run generates a VDF with `Preview=1` and no `SetLive`. This is local validation only;
-it does not verify SteamCMD authentication, server-side permissions, branch existence or password settings.
-Ordinary export VDFs are left unchanged. SteamPipe logs and incremental upload caches go in `uploads/<env>/cache/<branch>/`.
+| OS | Entire folder to distribute | Separate depot Executable | Shared depot Executable |
+|---|---|---|---|
+| Windows | `My Game-win32-x64/` | `my-game.exe` | `windows/my-game.exe` |
+| macOS | `My Game-darwin-universal/` | `My Game.app` | `macos/My Game.app` |
+| Linux | `My Game-linux-x64/` | `my-game` | `linux/my-game` |
 
-Uploads check the exit code and SteamCMD's success message, then record the BuildID in `upload-result.json`.
-On the Steamworks Builds page, verify that the recorded BuildID is the current build for `internal`.
-Steam may require additional confirmation depending on the account or app state.
+Read the actual launch path, architecture and ContentRoot from `*-steampipe/launch.json`.
+Distribute the entire folder, including Electron libraries, locales, licenses and resources.
+Steam needs no DMG/DEB/MSI installer, and no additional application build is required after export.
+
+For separate machines or CI, collect each OS's `build/<env>/`, including `steam-package.json` and `*-steampipe/`,
+under the same `dist/steam/<OS>/build/<env>/` layout. Transfer CI artifacts as `tar.gz` to preserve macOS symlinks
+and Linux executable permissions. Use STEP6's `--steam-root` for a custom output location.
+
+Re-export affected operating systems after changing configuration or version. Even with an unchanged version number,
+keep all OS packages on the intended revision. When exporting x64 and arm64 successively for one OS, the last successful
+architecture is used. Combining multiple architectures of one OS into a shared depot is not supported.
+
+Verify signing, notarization and stapling for macOS distribution packages (adjust the paths):
+
+```sh
+codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+```
+
+### STEP6: Configure launching, upload and test
+
+Add OS-specific Launch Options in Steamworks under Installation > General Installation.
+Use the Executable from STEP5's `launch.json`, leaving Arguments/Working Directory empty.
+Set the 64-bit condition for x64. Match supported OS versions and minimum requirements to the bundled Electron and hardware testing,
+then Publish the Steamworks changes.
+
+Run these commands from the game root. Shared and separate depots are uploaded together in a single AppBuild.
+No Web/Electron rebuild or prior `--steam-manifest` command is needed.
+
+```sh
+# Local validation only: no SteamCMD, credentials or Steam connection required
+npx @next2d/builder --steam-upload --env prd --dry-run
+
+# After validation, upload to the configured branch
+npx @next2d/builder --steam-upload --env prd
+```
+
+| Option / setting | Purpose |
+|---|---|
+| `--steam-branch internal` | Overrides `steam.branch`; requests activation through `SetLive`. `default` is not allowed. Switch public release builds through Steamworks. |
+| `--steam-root dist/steam` | Collected package location; defaults to `dist/steam`. Accepts an absolute path or a path relative to the game root. Specify custom output locations because uploading does not read the Vite configuration. |
+| `--dry-run` | Validates packages against configuration. Does not check Steam permissions, branches or passwords. |
+| Incompatible options | `--build` / `--preview` / `--open` / `--steam-manifest` / `--arch`. `--platform` is also unnecessary. |
+
+The corresponding template npm scripts are `upload:steam:check` / `upload:steam`.
+
+The builder checks `steam-package.json` and executables for every OS configured in `steam.depots`.
+Missing or inconsistent App IDs, Depot IDs, versions, game names or architectures stop the operation before SteamCMD starts.
+VDFs are regenerated from validated packages; ordinary export VDFs remain unchanged.
+
+| Location (under `--steam-root`) | Contents |
+|---|---|
+| `uploads/<env>/<branch>-<identifier>/` | VDFs and `upload-plan.json`. Dry runs use `Preview=1` without `SetLive`. Successful uploads record the BuildID in `upload-result.json`. |
+| `uploads/<env>/cache/<branch>/` | SteamPipe logs and incremental upload cache. |
+
+On the Steamworks Builds page, verify that the recorded BuildID is the target branch's current build.
+Steam may request additional confirmation depending on the account or app state.
+Testers enter the password and select `internal` in the Steam client's Properties > Game Versions & Betas.
+Verify installation and launch on each OS, including both Intel and Apple Silicon for macOS Universal.
+
+### Reference: VDF generation and manual uploading
+
+Skip these operations when using the builder in STEP6. This section is for direct SteamCMD use.
+
+| Layout | VDF output and conditions during ordinary export |
+|---|---|
+| Separate OS depots | Each OS's `*-steampipe/` directory. |
+| Shared depots | `dist/steam/shared/<env>/depot-<ID>/` once all required OS packages exist. Missing operating systems are listed in `launch.json`; neither upload VDFs nor standalone per-OS VDFs are generated for an incomplete group. |
+
+Some operating systems may share a Depot ID while others use separate depots. `FileMapping` assigns OS subdirectories without copying assets again.
+To regenerate only shared depot VDFs after collecting packages from separate machines:
+
+```sh
+npx @next2d/builder --platform steam:macos --env prd --steam-manifest
+```
+
+The npm alias is `build:steam:manifest` (append `-- --env dev` for another environment). This command runs on any OS.
+`--platform` selects the Vite configuration; all configured shared depots are combined.
+It selects the last successful exports using `build.outDir` and `--env`, validating the App ID, Depot IDs, game name, executable name and version.
+Missing packages cause exit code 1. Old combined VDFs are invalidated during regeneration.
+Do not combine this command with `--arch` / `--preview` / `--build` / `--open`.
+
+`app_preview.vdf` validates file mappings, `app_build.vdf` uploads, and `depot_build.vdf` recursively maps folder contents.
+`steam_appid.txt` is excluded from distribution. ContentRoot is relative to the VDF, so move a standalone depot's application
+and `*-steampipe/` together; preserve the whole `dist/steam/` layout for shared depots.
+
+```text
+steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_preview.vdf" +quit
+steamcmd +login BUILD_ACCOUNT +run_app_build "/absolute/path/to/app_build.vdf" +quit
+```
+
+Ordinary exports and `--steam-manifest` omit `SetLive`; assign the uploaded build to its branch through Steamworks.
+Each per-OS VDF updates one depot, so verify the final Build references the intended manifest version for every OS.
+[Official SteamPipe workflow and VDF specification](https://partner.steamgames.com/doc/sdk/uploading)
+
+### Reference: Templates, host and migration
+
+`create-next2d-app` initializes `appId`, `appName`, `executableName` and `companyName` from the project name.
+For example, `my-game` produces `app.example.my-game` for `appId` and `my-game` for the other three fields.
+Replace the bundle ID and company name with your own values before distribution.
+Missing CPU settings receive the defaults for each OS; values already provided by the template are preserved.
+Other settings, such as icon paths and Steam IDs, are also preserved.
+
+The builder manages Electron host code. It stages the host, runtime configuration and web assets in an OS temporary directory,
+then removes it after export, including failures. No `electron/`, Electron-specific `node_modules` or lockfile is created in the game.
+Electron is pinned in `templates/electron/package.json`; Packager is pinned in `src/tool-packages.ts`. Both are downloaded and cached.
+Packager is acquired only for Electron exports and handles OS packages, icons, signing and notarization.
+The host has no npm dependencies or native addons, so ABI-specific rebuilding is unnecessary.
+Preview exports for the host OS/CPU and launches the application under `dist/<platform>/build/<env>/`.
+
+Legacy `electron/` host code, `config.forge` and custom npm dependencies are not used.
+For migration, move icons into shared assets and update their JSON paths before deleting the old directory.
+Custom main/preload code or native addons require builder support before migration.
+
+The template host loads assets using absolute paths and the fixed origin `next2d://game`.
+Local fetch, Workers and localStorage work independently of the startup working directory.
+F11/Alt+Enter enters fullscreen; Escape exits it. Closing the window also terminates the process on macOS.
+Node integration is disabled, context isolation and sandboxing are enabled, and external navigation and new windows are blocked.
+A Next2D CSP is applied. Games using external APIs must explicitly add their destinations.
+[Electron security](https://www.electronjs.org/docs/latest/tutorial/security) /
+[protocol](https://www.electronjs.org/docs/latest/api/protocol)
+
+Save data is stored in the `appId` directory under Electron's appData location.
+Changing the display name does not change that location. Saves from older file-origin development builds are not migrated automatically.
+Steam Cloud is not integrated. When adding it, design game-specific save files and per-account storage separately,
+rather than syncing the entire Chromium profile.
+[Steam Cloud](https://partner.steamgames.com/doc/features/cloud)
 
 ### Pre-release validation
 
-- Installation, launch and exit through Steam on each target OS, offline launch and save data after updates.
+In addition to STEP6's installation and launch checks, verify:
+
+- Exit behavior, offline launch and saved data after updates.
 - Mouse/keyboard/controller input, resolution and fullscreen switching, audio and sleep/resume.
 - Shift+Tab Overlay. Electron uses multiple processes, so verify actual behavior on each OS/GPU.
   This export does not integrate the Steamworks SDK, achievements, DRM or Overlay APIs.

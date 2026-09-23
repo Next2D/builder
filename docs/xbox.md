@@ -4,53 +4,24 @@
 
 ## 日本語
 
-Xbox対応は現在、GDK向けネイティブホストを試作・検証している開発フェーズ。
-ホスト生成やビルド処理は実装されているが、Xbox実機での動作確認・配布対応は完了していない。
-現時点では、開発環境での検証を目的として使用する。
+Xbox対応はGDK向けネイティブホストの試作・開発段階。Xbox実機での動作確認・配布対応は完了していない。
+以下は開発環境での検証手順。[共通準備](setup.md#日本語)を先に済ませる。
 
-### 構成と現在の対応範囲
+### STEP1：検証範囲に必要な環境を用意する
 
-Next2DのJavaScriptをV8で実行し、Dawn（WebGPU → D3D12）で描画するC++ホストを生成する。
-ElectronやWebViewは使用しない。
-
-| 項目 | 現在の状態 |
+| 検証範囲 | ユーザーが用意するもの |
 |---|---|
-| ホスト生成 | builder同梱のC++ / CMakeテンプレートから、ゲーム側の `xbox/` を生成・更新する。 |
-| ゲーム設定 | ゲームルートの `MicrosoftGame.config` をホストに反映する。未配置の場合はテンプレートから初期ファイルを用意する。 |
-| アセット | Webビルド結果とホストスクリプトを `assets.pak` / `assets.rc` にまとめ、実行ファイルへの埋め込み用に配置する。 |
-| Windows上のビルド | CMakeでVisual Studio / GDK向けの構成・ビルドを実行する処理を実装している。対象環境での検証が必要。 |
-| macOS / Linux上の実行 | ホスト生成とアセットの準備まで。GDK向け実行ファイルのビルドは行わない。 |
-| Xbox実機・配布 | 開発機での動作、性能、保存処理、配布設定などの検証・調整が残っている。 |
+| ホスト生成・アセット準備のみ | 共通準備の環境。macOS / Linuxでもここまで実行できる。 |
+| C++ホストのビルド | Windows、Visual Studio 2022、Microsoft GDK、CMake 3.26以降。現行builderはVisual Studio 2022ジェネレーターを指定する。 |
+| Xbox実機での検証 | コンソール向けGDK開発環境とXbox開発機（devkit）。PC向けのGDK検証環境とは区別して用意する。 |
 
-### 検証に使う環境
+### STEP2：ゲーム設定とV8を用意する
 
-以下は現行テンプレートが想定する構成。
+ゲームルートの `MicrosoftGame.config` にゲーム固有の値を設定する。
+未配置の場合は初回のホスト生成でテンプレートから作られるため、生成後に内容を確認・変更する。
 
-| 項目 | 用途 |
-|---|---|
-| Windows + Visual Studio 2022 | C++ホストのビルド。現行builderはVisual Studio 2022ジェネレーターを指定する。 |
-| Microsoft GDK | GDK向けビルド。PC向けの検証とXboxコンソール向けの環境を区別して用意する。 |
-| CMake 3.26以降 | ホストの構成・ビルド。 |
-| V8 | JavaScript実行エンジン。ビルド済みライブラリの取得、または自前ビルドを利用する。 |
-| Dawn | WebGPU実装。CMakeのFetchContentで取得するため、初回取得にはネットワーク接続が必要。 |
-| Xbox開発機（devkit） | Xbox実機上での動作・性能検証。 |
-
-### 試作用コマンド
-
-ゲームのルートで実行する。
-
-```sh
-npx @next2d/builder --platform xbox --env prd
-```
-
-Windowsではホストとアセットを準備した後、V8の解決とCMakeビルドへ進む。
-macOS / Linuxではホスト生成とアセットの準備を終えた時点で終了する。
-コマンドの終了だけでXbox実機向けの書き出しが完了したとは判断せず、生成物とログを確認する。
-
-Windowsで `--open` または `--preview` を付けると、CMakeによる構成後にVisual Studioのソリューションを開く。
-実行・デバッグはVisual Studio側で行う。
-
-### V8の取得
+V8はJavaScript実行エンジン。通常はbuilderがビルド済みライブラリを取得し、自前ビルドを使う場合だけパスを指定する。
+描画用のDawn（WebGPU → D3D12）はCMakeのFetchContentが取得するため、初回取得にはネットワーク接続が必要。
 
 Windowsでのビルド時は、次の優先順でV8を解決する。
 
@@ -70,9 +41,29 @@ npx @next2d/builder --platform xbox --env prd --v8-root C:\path\to\v8
 公開しているWindows x64用V8の利用と、Xboxコンソール向けの互換性検証は別の作業。
 コンソール向けにはGDKツールチェーンでの調整・再ビルドを含む検証が残っている。
 
-### 検証範囲と残っている作業
+### STEP3：ホストを生成・ビルドする
 
-`xbox-host-ci` ワークフローには、ラスタライザーの単体テスト、Windows APIを使う一部機能のテスト、
+ゲームルートで実行する。
+
+```sh
+npx @next2d/builder --platform xbox --env prd
+```
+
+builder同梱のC++ / CMakeテンプレートから `xbox/` を生成・更新し、`MicrosoftGame.config` を反映する。
+Webビルド結果とホストスクリプトを `assets.pak` / `assets.rc` にまとめ、実行ファイルへの埋め込み用に配置する。
+このホストはV8とDawnを使い、ElectronやWebViewは使用しない。
+
+| 実行環境・引数 | コマンドの到達点 |
+|---|---|
+| Windows | V8を解決し、CMakeでGDK向けの構成・ビルドを実行する。対象環境での検証が必要。 |
+| Windows + `--open` / `--preview` | CMakeで構成した後、Visual Studioのソリューションを開く。実行・デバッグはVisual Studio側で行う。 |
+| macOS / Linux | ホスト生成とアセット準備までで終了する。GDK向け実行ファイルは生成しない。 |
+
+### STEP4：生成物と対象環境での動作を確認する
+
+コマンドの終了だけでXbox向けの配布物が完成したとは判断せず、生成物とログを確認する。
+
+`xbox-host-ci` ワークフローには、ラスタライザーとstbの回帰テスト、Windows APIを使う一部機能のテスト、
 V8依存ソースのコンパイル確認、Game Core APIの確認を用意している。
 これらはホスト全体のリンクやXbox実機での動作を保証するものではない。
 Dawn / GDKを含む統合ビルドと、ゲームを使った実機検証が必要。
@@ -84,53 +75,24 @@ Dawn / GDKを含む統合ビルドと、ゲームを使った実機検証が必�
 
 ## English
 
-Xbox support is currently in the development phase, focused on prototyping and testing a native GDK host.
-Host generation and build operations are implemented, but validation on Xbox hardware and distribution support are not complete.
-Use this feature for testing in a development environment at this stage.
+Xbox support is a prototype GDK native host under development. Xbox hardware validation and distribution support are not complete.
+The following steps are for development testing. Complete the [common setup](setup.md#english) first.
 
-### Architecture and current scope
+### STEP1: Prepare the environment for your validation scope
 
-The builder generates a C++ host that runs Next2D JavaScript on V8 and renders with Dawn (WebGPU → D3D12).
-It does not use Electron or WebView.
-
-| Item | Current status |
+| Validation scope | What you need to prepare |
 |---|---|
-| Host generation | Creates or updates the game's `xbox/` directory from the C++ / CMake templates bundled with the builder. |
-| Game configuration | Applies `MicrosoftGame.config` from the game root to the host. If it is missing, an initial file is created from the template. |
-| Assets | Packs the web build output and host scripts into `assets.pak` / `assets.rc` for embedding into the executable. |
-| Building on Windows | CMake configuration and build operations for Visual Studio / GDK are implemented. Validation in the target environment is still needed. |
-| Running on macOS / Linux | Generates the host and prepares assets only. Does not build a GDK executable. |
-| Xbox hardware and distribution | Device behavior, performance, save handling and distribution settings still need validation and adjustment. |
+| Host generation and asset preparation only | The common setup environment; this also works on macOS / Linux. |
+| Building the C++ host | Windows, Visual Studio 2022, Microsoft GDK and CMake 3.26 or later. The current builder selects the Visual Studio 2022 generator. |
+| Testing on Xbox hardware | A console GDK development environment and Xbox development hardware (devkit), distinct from a PC GDK testing environment. |
 
-### Development environment
+### STEP2: Prepare game configuration and V8
 
-The current template targets the following setup.
+Set game-specific values in `MicrosoftGame.config` at the game root.
+If absent, it is created from the template during initial host generation; review and edit it afterward.
 
-| Component | Purpose |
-|---|---|
-| Windows + Visual Studio 2022 | Builds the C++ host. The current builder selects the Visual Studio 2022 generator. |
-| Microsoft GDK | Builds the GDK target. Prepare the appropriate environment for PC testing or Xbox console development. |
-| CMake 3.26 or later | Configures and builds the host. |
-| V8 | JavaScript engine. Use the downloaded prebuilt library or your own build. |
-| Dawn | WebGPU implementation. CMake FetchContent downloads it, so the first download needs network access. |
-| Xbox development hardware (devkit) | Validates behavior and performance on Xbox hardware. |
-
-### Prototype commands
-
-Run from the game root:
-
-```sh
-npx @next2d/builder --platform xbox --env prd
-```
-
-On Windows, the builder prepares the host and assets, then resolves V8 and starts the CMake build.
-On macOS / Linux, it stops after generating the host and preparing assets.
-Command completion alone does not mean an Xbox hardware export is ready; inspect the output files and logs.
-
-On Windows, `--open` or `--preview` opens the Visual Studio solution after CMake configuration.
-Run and debug the application from Visual Studio.
-
-### Acquiring V8
+V8 is the JavaScript engine. The builder normally downloads a prebuilt library; specify a path only when using your own build.
+CMake FetchContent acquires Dawn (WebGPU → D3D12) for rendering, so the first download requires network access.
 
 For Windows builds, V8 is resolved in this order:
 
@@ -150,9 +112,29 @@ npx @next2d/builder --platform xbox --env prd --v8-root C:\path\to\v8
 Using the published Windows x64 V8 library and validating Xbox console compatibility are separate tasks.
 Console support still needs validation, including adjustments or rebuilds with the GDK toolchain.
 
-### Validation scope and remaining work
+### STEP3: Generate and build the host
 
-The `xbox-host-ci` workflow includes rasterizer unit tests, tests for selected Windows API functionality,
+Run from the game root:
+
+```sh
+npx @next2d/builder --platform xbox --env prd
+```
+
+The builder creates or updates `xbox/` from its bundled C++ / CMake templates and applies `MicrosoftGame.config`.
+It packs the web build output and host scripts into `assets.pak` / `assets.rc` for embedding in the executable.
+The host uses V8 and Dawn, without Electron or WebView.
+
+| Environment / options | What the command completes |
+|---|---|
+| Windows | Resolves V8, then configures and builds the GDK target with CMake. Target-environment validation is still needed. |
+| Windows + `--open` / `--preview` | Opens the Visual Studio solution after CMake configuration. Run and debug from Visual Studio. |
+| macOS / Linux | Stops after host generation and asset preparation; no GDK executable is built. |
+
+### STEP4: Check the output and target-environment behavior
+
+Command completion alone does not mean an Xbox distribution package is ready; inspect the output and logs.
+
+The `xbox-host-ci` workflow includes rasterizer and stb regression tests, tests for selected Windows API functionality,
 compilation checks for V8-dependent sources and Game Core API checks.
 These checks do not guarantee that the complete host links or runs on Xbox hardware.
 An integrated build with Dawn / GDK and testing with a game on the target hardware are still required.

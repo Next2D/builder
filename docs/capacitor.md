@@ -4,64 +4,36 @@
 
 ## 日本語
 
-Capacitorの `cli`・`core`・`ios`・`android` はbuilderの `src/tool-packages.ts` で同じバージョンに固定し、
-iOS / Androidの操作時に `npx` でまとめて取得する。builderの `dependencies` には含めない。
-ゲームは `npx @next2d/builder` で起動し、`capacitor.config.json` で
-アプリ名・App ID・プラットフォーム固有設定を管理する。
-builderやCapacitorをゲームの `package.json` に直接宣言する必要はない。
+[共通準備](setup.md#日本語)を済ませてから、対象OSの手順を進める。
+
+### STEP1：対象OSのIDE・SDKを用意する
+
+| 対象 | ユーザーが用意するもの |
+|---|---|
+| iOS | macOS、Xcode本体とiOS SDK。Xcodeを初回起動してセットアップを完了する。 |
+| Android | Android Studio、Android SDK、使用するCapacitorに対応したJDK。 |
+| 実機・配布ビルド | 対象端末と、その配布方法に必要な署名証明書・プロビジョニング設定またはAndroidの署名鍵。 |
+
+使用するCapacitorのバージョンはbuilderの `src/tool-packages.ts` で固定している。
+対応するネイティブ環境は[Capacitorの開発フロー](https://capacitorjs.com/docs/basics/workflow)から確認する。
+Capacitorの `cli`・`core`・`ios`・`android` はbuilderが同じバージョンで取得するため、手動インストールは不要。
+
+#### iOS：Xcodeの選択を確認する
 
 ```sh
-npm run open:ios -- --env prd
-npm run open:android -- --env prd
-npm run build:ios -- --env prd
-npm run build:android -- --env prd
+xcode-select -p
+xcodebuild -version
 ```
 
-builderを直接使う場合:
+`/Library/Developer/CommandLineTools` が選択されていると、IPA生成時に `xcodebuild requires Xcode` で失敗する。
+今回のシェルだけXcodeを指定する場合は、次を設定してからSTEP3へ進む:
 
 ```sh
-npx @next2d/builder --platform ios --env prd --open
-npx @next2d/builder --platform android --env prd --build
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild -version
 ```
 
-builderはnpmキャッシュに取得したCapacitor CLIをNodeで起動し、ゲームルートを作業ディレクトリにする。
-ゲームからSDKを解決できない場合に備え、子プロセスの `NODE_PATH` に取得したSDKのパスを追加する。
-通常のnpmインストール、依存がネストされた配置、隣接リポジトリの `file:../builder` に対応する。
-ゲーム側にCapacitor用の依存宣言や補助スクリプト、SDKへのシンボリックリンクを追加する必要はない。
-npm/npxを利用できるNode.js環境が必要。初回はネットワーク接続が必要で、以降はnpmキャッシュを再利用する。
-取得先は一時ホストと異なり書き出し後も残り、Gradle / CocoaPodsから参照できる。
-
-`webDir` を今回のWeb出力先へ更新してから、未作成のネイティブプロジェクトに `cap add` を実行する。
-`--open` / `--build` は `cap sync` の成功後に `cap open` / `cap build` を実行する。
-`--preview` は `cap run` を実行する。各コマンドの終了を待ち、失敗した場合はbuilderも失敗する。
-
-### ゲーム側に残すもの
-
-- `capacitor.config.json`：ゲーム固有設定。`ios.path` / `android.path` のカスタム出力先も使用できる。
-- `ios/` / `android/`：ネイティブプロジェクト。既存のアイコン・署名設定・ネイティブコードを維持する。
-- ゲーム固有のCapacitor/Cordovaプラグイン：ゲームの依存に置く。CLIは従来どおりゲームの依存とフックを参照する。
-
-ゲームのJavaScriptで `@capacitor/core` を直接importする場合は、ビルド時の依存解決に必要なため、
-`@capacitor/core` をゲームの直接依存としても宣言する。その場合はbuilderのCapacitorと
-互換性のあるバージョンを指定する。今回のSlimeTenPuzzleにはそのimportはない。
-
-Xcode、Android Studio、Android SDK、対応JDK、署名証明書などは引き続き実行環境に必要。
-SDKのnpm依存を集約しても、端末実行・APK/AAB/IPAの生成に必要なネイティブツールは変わらない。
-
-### iOSで `xcodebuild requires Xcode` が出る場合
-
-`xcode-select -p` が `/Library/Developer/CommandLineTools` を返す場合、
-Command Line Toolsが選択されている。iOSのアーカイブ・IPA生成にはXcode本体とiOS SDKが必要。
-Xcodeをインストールし、初回起動時のセットアップを完了させる。
-
-`/Applications/Xcode.app` を今回のビルドだけで使う場合は、ゲームのルートで実行する:
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  npx @next2d/builder --platform ios --env prd --build
-```
-
-コマンドライン全体の既定をXcodeに切り替える場合:
+システム全体の既定を変える場合は、代わりに次を使う:
 
 ```sh
 sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
@@ -69,82 +41,100 @@ xcodebuild -version
 ```
 
 Xcodeの配置先が異なる場合はパスを変更する。builderは呼び出し元の `DEVELOPER_DIR` を引き継ぐ。
-選択方法の詳細は[Appleのコマンドラインツール設定](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings)を参照。
+[Appleのコマンドラインツール設定](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings)
 
-### 既存プロジェクトの移行
+### STEP2：アプリ設定とプラグインを用意する
 
-1. この機能を含む公開済みbuilderを `npx` で使用する。
-2. ゲームが直接importしていない `@capacitor/cli`・`@capacitor/core`・`@capacitor/ios`・`@capacitor/android` を直接依存から外す。
-3. npmコマンド経由で `open:ios` / `open:android` を実行し、ネイティブ依存の参照先を再同期する。
+ゲームルートの `capacitor.config.json` にアプリ固有の値を設定する。
 
-隣接リポジトリで開発する場合はbuilderで `npm ci` または `npm install` を実行し、
-ゲームでも `npm install` を実行する。builderのソース変更後はbuilderで `npm run build` を実行する。
-npxキャッシュを削除した場合は、IDEが参照するSDKのパスを更新するため、
-builderの `--open` / `--build` で再同期する。
-
-[Capacitorの開発フロー](https://capacitorjs.com/docs/basics/workflow) /
-[Capacitor設定](https://capacitorjs.com/docs/config)
-
-## English
-
-The builder pins Capacitor's `cli`, `core`, `ios` and `android` packages to the same version in
-`src/tool-packages.ts` and acquires them together through `npx` when an iOS / Android operation runs.
-They are not included in the builder's `dependencies`.
-Games invoke `npx @next2d/builder` and manage the app name, App ID and platform-specific settings in
-`capacitor.config.json`. Neither the builder nor Capacitor needs to be declared directly in the game's `package.json`.
-
-```sh
-npm run open:ios -- --env prd
-npm run open:android -- --env prd
-npm run build:ios -- --env prd
-npm run build:android -- --env prd
+```json
+{
+  "appId": "app.example.game",
+  "appName": "My Game",
+  "webDir": "dist/ios/prd/"
+}
 ```
 
-To invoke the builder directly:
+| 項目 | 設定・管理方法 |
+|---|---|
+| `appId` / `appName` | 自分のアプリ識別子・表示名に変更する。 |
+| `webDir` | builderが今回のWeb出力先に更新するため、OSごとの手動切り替えは不要。 |
+| `ios.path` / `android.path` | 必要な場合だけネイティブプロジェクトのカスタム出力先を指定する。 |
+| ゲーム固有のCapacitor/Cordovaプラグイン | ゲームの依存として管理する。ゲーム側のフックも引き続き使用する。 |
+| `@capacitor/core` | ゲームのJavaScriptで直接importする場合だけ、builderのCapacitorと互換性のあるバージョンをゲームの直接依存に追加する。 |
+
+その他の項目は[Capacitor設定](https://capacitorjs.com/docs/config)を参照。
+
+### STEP3：ネイティブプロジェクトを開き、署名・アイコンを設定する
+
+対象OSのコマンドを実行する。
 
 ```sh
 npx @next2d/builder --platform ios --env prd --open
+npx @next2d/builder --platform android --env prd --open
+```
+
+未作成の `ios/` / `android/` を生成し、Web資産とネイティブ依存を同期してIDEを開く。
+Xcode / Android Studioで、アプリのアイコン・署名・配布方法に必要な設定を行う。
+これらのネイティブプロジェクトはゲーム側で保持する。再実行時も既存の設定・ネイティブコードを維持する。
+
+### STEP4：ビルドして対象環境で確認する
+
+```sh
+npx @next2d/builder --platform ios --env prd --build
 npx @next2d/builder --platform android --env prd --build
 ```
 
-The builder launches the cached Capacitor CLI with Node, using the game root as the working directory.
-It adds the acquired SDK paths to the child process's `NODE_PATH` so the game can resolve the SDKs when needed.
-This supports regular npm installations, nested dependencies and a sibling repository linked through `file:../builder`.
-The game does not need extra Capacitor dependency declarations, helper scripts or SDK symlinks.
-Node.js with npm/npx is required. The first download needs network access; subsequent runs reuse npm's cache.
-Unlike a temporary host, the acquired SDKs remain after export so Gradle / CocoaPods can keep referencing them.
+実行前にWeb資産・ネイティブ依存を再同期する。対象端末やシミュレーター／エミュレーターで起動・入力・保存を確認する。
+Capacitorの `cap run` を使う場合は `--build` を `--preview` に置き換える。
+途中のコマンドが失敗した場合はbuilderも失敗する。
 
-The builder updates `webDir` to the current web output directory before running `cap add` for a native project that does not exist yet.
-`--open` / `--build` run `cap open` / `cap build` after `cap sync` succeeds.
-`--preview` runs `cap run`. The builder waits for each command and fails if a command fails.
+テンプレートのnpmスクリプト `open:ios` / `open:android` / `build:ios` / `build:android` も使用できる。
+環境指定は `npm run build:ios -- --env prd` のように渡す。
 
-### What stays in the game
+### 補足：既存プロジェクトの移行とSDKキャッシュ
 
-- `capacitor.config.json`: Game-specific settings, including custom native output paths through `ios.path` / `android.path`.
-- `ios/` / `android/`: Native projects. Existing icons, signing settings and native code are preserved.
-- Game-specific Capacitor/Cordova plugins: Keep these in the game's dependencies. The CLI continues to discover the game's dependencies and hooks.
+1. ゲームから不要になった `@capacitor/cli`・`@capacitor/ios`・`@capacitor/android` の直接依存を外す。
+   `@capacitor/core` とゲーム固有プラグインはSTEP2の条件に従う。
+2. 設定と `ios/` / `android/` は保持し、STEP3でネイティブ依存の参照先を再同期する。
 
-If the game's JavaScript imports `@capacitor/core` directly, declare `@capacitor/core` as a direct game dependency
-so the web build can resolve it. Choose a version compatible with the builder's Capacitor version.
-SlimeTenPuzzle does not currently have this import.
+builderはゲームルートでCapacitor CLIを実行し、取得したSDKのパスを子プロセスの `NODE_PATH` に追加する。
+通常・ネストされたnpm依存配置や `file:../builder` に対応し、ゲーム側の補助スクリプトやSDKシンボリックリンクは不要。
+SDKキャッシュは書き出し後もGradle / CocoaPodsが参照するため保持する。
+npxキャッシュを削除した場合は、STEP3またはSTEP4で参照先を再同期する。
 
-Xcode, Android Studio, the Android SDK, a compatible JDK and signing certificates are still required in the build environment.
-Centralizing the SDK npm dependencies does not change the native tools needed for device execution or APK/AAB/IPA generation.
+## English
 
-### If iOS reports `xcodebuild requires Xcode`
+Complete the [common setup](setup.md#english), then follow the steps for your target OS.
 
-If `xcode-select -p` returns `/Library/Developer/CommandLineTools`, the standalone Command Line Tools are selected.
-Creating an iOS archive or IPA requires the full Xcode application and the iOS SDK.
-Install Xcode and complete its first-launch setup.
+### STEP1: Prepare the platform IDE and SDK
 
-To use `/Applications/Xcode.app` for a single build, run this from the game root:
+| Target | What you need to prepare |
+|---|---|
+| iOS | macOS, the full Xcode application and the iOS SDK. Complete Xcode's first-launch setup. |
+| Android | Android Studio, the Android SDK and a JDK compatible with the Capacitor version in use. |
+| Device and distribution builds | Target devices and signing certificates/provisioning settings or an Android signing key, as required by the distribution method. |
+
+The builder pins the Capacitor version in `src/tool-packages.ts`.
+Check the corresponding native environment through the [Capacitor development workflow](https://capacitorjs.com/docs/basics/workflow).
+The builder acquires matching versions of Capacitor's `cli`, `core`, `ios` and `android`; no manual installation is needed.
+
+#### iOS: Check the selected Xcode
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  npx @next2d/builder --platform ios --env prd --build
+xcode-select -p
+xcodebuild -version
 ```
 
-To select Xcode as the system-wide command-line default:
+If `/Library/Developer/CommandLineTools` is selected, IPA generation fails with `xcodebuild requires Xcode`.
+To select Xcode for the current shell, set this before STEP3:
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild -version
+```
+
+Alternatively, to change the system-wide default:
 
 ```sh
 sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
@@ -152,17 +142,64 @@ xcodebuild -version
 ```
 
 Adjust the path if Xcode is installed elsewhere. The builder inherits the caller's `DEVELOPER_DIR`.
-See [Apple's command-line tools settings](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings) for details.
+[Apple's command-line tools settings](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings)
 
-### Migrating an existing project
+### STEP2: Prepare app configuration and plugins
 
-1. Use a published builder version that includes this feature through `npx`.
-2. Remove direct dependencies on `@capacitor/cli`, `@capacitor/core`, `@capacitor/ios` and `@capacitor/android` that the game does not import directly.
-3. Run the `open:ios` / `open:android` npm scripts to resynchronize native dependency paths.
+Set game-specific values in `capacitor.config.json` at the game root.
 
-When developing with a sibling builder repository, run `npm ci` or `npm install` in the builder,
-then run `npm install` in the game. After changing builder source files, run `npm run build` in the builder.
-If the npx cache is deleted, use the builder's `--open` / `--build` to resynchronize the SDK paths referenced by the IDE.
+```json
+{
+  "appId": "app.example.game",
+  "appName": "My Game",
+  "webDir": "dist/ios/prd/"
+}
+```
 
-[Capacitor development workflow](https://capacitorjs.com/docs/basics/workflow) /
-[Capacitor configuration](https://capacitorjs.com/docs/config)
+| Setting | Configuration / ownership |
+|---|---|
+| `appId` / `appName` | Replace with your app identifier and display name. |
+| `webDir` | The builder updates this to the current web output directory; no manual switching between operating systems is needed. |
+| `ios.path` / `android.path` | Set only when using custom native project locations. |
+| Game-specific Capacitor/Cordova plugins | Keep them in the game's dependencies. Game hooks continue to work. |
+| `@capacitor/core` | Add a compatible version as a direct game dependency only when the game's JavaScript imports it directly. |
+
+See [Capacitor configuration](https://capacitorjs.com/docs/config) for other settings.
+
+### STEP3: Open the native project and configure signing and icons
+
+Run the command for your target OS:
+
+```sh
+npx @next2d/builder --platform ios --env prd --open
+npx @next2d/builder --platform android --env prd --open
+```
+
+The builder creates missing `ios/` / `android/` projects, synchronizes web assets and native dependencies, then opens the IDE.
+Configure app icons, signing and distribution-specific settings in Xcode / Android Studio.
+Keep these native projects in the game. Subsequent runs preserve existing settings and native code.
+
+### STEP4: Build and verify on the target environment
+
+```sh
+npx @next2d/builder --platform ios --env prd --build
+npx @next2d/builder --platform android --env prd --build
+```
+
+Web assets and native dependencies are synchronized before building. Verify launch, input and saved data on target devices or simulators/emulators.
+Replace `--build` with `--preview` to use Capacitor's `cap run`.
+If any command fails, the builder fails as well.
+
+Template npm scripts `open:ios` / `open:android` / `build:ios` / `build:android` are also available.
+Pass the environment as in `npm run build:ios -- --env prd`.
+
+### Reference: Existing project migration and SDK cache
+
+1. Remove direct dependencies on `@capacitor/cli`, `@capacitor/ios` and `@capacitor/android` that are no longer needed by the game.
+   Follow STEP2 for `@capacitor/core` and game-specific plugins.
+2. Keep the configuration and `ios/` / `android/`, then use STEP3 to resynchronize native dependency paths.
+
+The builder runs the Capacitor CLI from the game root and adds acquired SDK paths to the child process's `NODE_PATH`.
+Regular and nested npm dependency layouts and `file:../builder` are supported; no game-side helper scripts or SDK symlinks are needed.
+Keep the SDK cache after export because Gradle / CocoaPods reference it.
+If you delete the npx cache, use STEP3 or STEP4 to resynchronize those paths.

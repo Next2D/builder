@@ -2,7 +2,8 @@
 # macOS / Linux で Windows 実機なしに実行できる検証をまとめて回す。
 #   1. RasterCore 単体テスト (実行)
 #   2. RasterCore 単体テスト (ASan/UBSan)
-#   3. V8 依存ソースの構文チェック (実 V8 ヘッダに対して。Windows API 非依存の12ファイル)
+#   3. stb 境界値・デコード回帰テスト (通常 + ASan/UBSan)
+#   4. V8 依存ソースの構文チェック (実 V8 ヘッダに対して)
 #
 # 使い方:
 #   tests/check_local.sh [V8_INCLUDE_DIR]
@@ -13,16 +14,23 @@ cd "$(dirname "$0")/.."
 V8_TAG="13.7.152.19"
 V8INC="${1:-}"
 
-echo "== 1/3 RasterCore unit tests =="
+echo "== 1/4 RasterCore unit tests =="
 c++ -std=c++17 -Wall -Wextra -O1 -o /tmp/next2d_raster_test tests/raster_test.cpp
 /tmp/next2d_raster_test
 
-echo "== 2/3 RasterCore unit tests (ASan/UBSan) =="
+echo "== 2/4 RasterCore unit tests (ASan/UBSan) =="
 c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -o /tmp/next2d_raster_test_asan tests/raster_test.cpp
 /tmp/next2d_raster_test_asan
 
-echo "== 3/3 V8-dependent sources syntax check (V8 ${V8_TAG}) =="
+echo "== 3/4 stb safety regression tests =="
+c++ -std=c++17 -O1 -o /tmp/next2d_stb_safety_test tests/stb_safety_test.cpp
+/tmp/next2d_stb_safety_test
+c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -o /tmp/next2d_stb_safety_test_asan tests/stb_safety_test.cpp
+/tmp/next2d_stb_safety_test_asan
+
+echo "== 4/4 V8-dependent sources syntax check (V8 ${V8_TAG}) =="
 if [ -z "${V8INC}" ]; then
     if [ ! -d ".v8_headers/include" ]; then
         git clone --depth 1 --branch "${V8_TAG}" --filter=blob:none --sparse \

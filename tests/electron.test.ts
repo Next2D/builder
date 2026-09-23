@@ -160,7 +160,8 @@ test("SteamPipe maps package contents to install root and excludes development A
             fs.writeFileSync(path.join(content, executable), "binary", { mode: 0o755 });
         }
         const scripts = `${content}-steampipe`;
-        writeSteamMetadata(content, `steam:${platform}`, arch, { appId: "2409460", depotId: "1234" });
+        // Match the builder's configured executableName; Windows cannot preserve POSIX execute bits.
+        writeSteamMetadata(content, `steam:${platform}`, arch, { appId: "2409460", depotId: "1234" }, "test-game");
         const launch = JSON.parse(fs.readFileSync(path.join(scripts, "launch.json"), "utf8"));
         assert.equal(launch.executable, executable);
         assert.equal(path.resolve(scripts, launch.contentRoot), content);
@@ -171,9 +172,23 @@ test("SteamPipe maps package contents to install root and excludes development A
         assert.match(app, /"Preview" "0"/);
         assert.doesNotMatch(app, /SetLive/);
         assert.match(fs.readFileSync(path.join(scripts, "app_preview.vdf"), "utf8"), /"Preview" "1"/);
-        writeSteamMetadata(content, `steam:${platform}`, arch, { appId: "2409460", depotId: null });
+        writeSteamMetadata(content, `steam:${platform}`, arch, { appId: "2409460", depotId: null }, "test-game");
         assert.equal(fs.existsSync(path.join(scripts, "app_build.vdf")), false);
     }
+});
+
+test("Linux launch metadata uses the configured name even without POSIX execute permissions", (t) => {
+    const root = fixture(t);
+    const content = path.join(root, "linux");
+    fs.mkdirSync(content);
+    // Reproduce permissions seen on Windows without requiring a Windows test runner.
+    fs.writeFileSync(path.join(content, "custom-game"), "binary", { mode: 0o644 });
+    fs.writeFileSync(path.join(content, "resources.pak"), "resources");
+    writeSteamMetadata(content, "steam:linux", "x64", { appId: "2409460", depotId: "1234" }, "custom-game");
+    const launch = JSON.parse(fs.readFileSync(`${content}-steampipe/launch.json`, "utf8"));
+    assert.equal(launch.executable, "custom-game");
+    assert.equal(path.resolve(`${content}-steampipe`, launch.contentRoot), content);
+    assert.throws(() => writeSteamMetadata(content, "steam:linux", "x64", null, "missing-game"), /Packaged Steam executable is missing/);
 });
 
 test("local protocol rejects foreign origins, encoded traversal and malformed paths", () => {

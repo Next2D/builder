@@ -36,21 +36,7 @@ With Next2D Framework, you can efficiently develop and deploy applications optim
 | web             | Export minfy'd JS files             |
 | iOS             | open Xcode, and Export ipa          |
 | Android         | open Android Studio, and Export apk |
-| Xbox            | GDK native title (V8 + Dawn/WebGPU) |
-
-Xbox exports a GDK native title that runs the Next2D JavaScript on the V8 engine and
-renders with Dawn (WebGPU → D3D12), packaged as a C++ executable (no Electron/WebView).
-Building the GDK package requires Windows + Visual Studio 2022 + Microsoft GDK + a devkit.
-On other platforms the builder scaffolds the host project and stages assets only.
-See the generated `xbox/README.md` for full build steps.
-
-```bat
-npx @next2d/builder --platform xbox --env prd
-```
-
-The prebuilt V8 engine is downloaded automatically on the first Xbox build
-(published from the `build-v8` workflow). To use your own build, pass
-`--v8-root C:\path\to\v8`.
+| Xbox            | Prototype GDK host; under development |
 
 ## Platform guides
 
@@ -60,6 +46,7 @@ Platform-specific configuration, dependencies and workflows are documented in th
 |---|---|
 | [Electron / Steam](docs/steam.md) | Desktop exports, icons, architectures, signing, Steam depots, uploads and beta testing |
 | [iOS / Android (Capacitor)](docs/capacitor.md) | Native configuration, SDKs, plugins, build commands, migration and Xcode setup |
+| [Xbox (prototype)](docs/xbox.md) | Development status, host generation, build environment and validation scope |
 
 ### Scheduled introduction
 
@@ -81,13 +68,3 @@ npx @next2d/builder --preview --platform web --env prd
 
 ## License
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT) - see the [LICENSE](LICENSE) file for details.
-
-## Build dependencies
-
-The builder uses the target project's installed Vite for configuration loading,
-web builds and Xbox host-script minification. Run `npm install` in your game first;
-Vite is not installed again as a builder runtime dependency. Vite 7 and 8 are supported.
-
-The builder has no npm runtime dependencies. Node.js with npm/npx is required.
-Terminal colors use Node.js `util.styleText`; Node typings and the builder's own Vite
-installation are development dependencies.

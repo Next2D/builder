@@ -1,5 +1,5 @@
 // CLI 引数の解析とヘルプ表示。process.argv を読み取り ctx を初期化する。
-import pc from "picocolors";
+import pc from "./colors.js";
 import { ctx } from "./context.js";
 import { RECOMMENDED_NODE_VERSION } from "./constants.js";
 
@@ -26,6 +26,11 @@ export const echoHelp = (): void =>
     console.log("For Xbox build example (prebuilt V8 is downloaded automatically):");
     console.log("npx @next2d/builder --platform xbox --env prd");
     console.log("To use your own V8 build: --v8-root C:\\path\\to\\v8");
+    console.log("Steam: --platform steam:windows|steam:macos|steam:linux --env prd");
+    console.log("Electron: --arch x64|arm64|universal (default: macOS universal, others x64)");
+    console.log("Combine existing Steam packages only: --platform steam:macos --env prd --steam-manifest");
+    console.log("Upload existing packages: --steam-upload --env prd [--steam-branch internal] [--steam-root dist/steam] [--steam-comment \"Build comment\"] [--dry-run]");
+    console.log("Steam upload uses STEAM_USERNAME and optional STEAMCMD (executable path); no --platform is needed.");
     console.log();
     process.exit(1);
 };
@@ -40,6 +45,13 @@ export interface ParsedArgs {
     open: boolean;
     build: boolean;
     v8Root: string;
+    arch: string;
+    steamManifest: boolean;
+    steamUpload: boolean;
+    steamBranch: string;
+    steamRoot: string;
+    steamComment: string;
+    dryRun: boolean;
     hasHelp: boolean;
 }
 
@@ -72,12 +84,49 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
         "open": false,
         "build": false,
         "v8Root": "",
+        "arch": "",
+        "steamManifest": false,
+        "steamUpload": false,
+        "steamBranch": "",
+        "steamRoot": "",
+        "steamComment": "",
+        "dryRun": false,
         "hasHelp": false
     };
 
     for (let idx: number = 0; idx < argv.length; ++idx) {
 
         switch (argv[idx]) {
+
+            case "--steam-upload":
+                result.steamUpload = true;
+                break;
+
+            case "--dry-run":
+                result.dryRun = true;
+                break;
+
+            case "--steam-branch":
+            case "--steam-root":
+            case "--steam-comment": {
+                const flag = argv[idx];
+                const value = argv[++idx] || "";
+                if (!value || value.startsWith("--")) {
+                    result.hasHelp = true;
+                }
+                if (flag === "--steam-branch") {
+                    result.steamBranch = value;
+                } else if (flag === "--steam-root") {
+                    result.steamRoot = value;
+                } else {
+                    result.steamComment = value;
+                }
+                break;
+            }
+
+            case "--steam-manifest":
+                result.steamManifest = true;
+                break;
 
             case "--preview":
                 result.preview = true;
@@ -109,7 +158,17 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
                 result.v8Root = argv[++idx] || "";
                 break;
 
+            case "--arch":
+                result.arch = argv[++idx] || "";
+                if (!result.arch || result.arch.startsWith("--")) {
+                    result.hasHelp = true;
+                }
+                break;
+
             default:
+                if (argv.includes("--steam-upload") && argv[idx].startsWith("-")) {
+                    result.hasHelp = true;
+                }
                 break;
 
         }
@@ -119,7 +178,16 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
         }
     }
 
-    if (!result.platform || !result.environment) {
+    if (!result.platform && !result.steamUpload || !result.environment || result.environment.startsWith("--")) {
+        result.hasHelp = true;
+    }
+    if (result.steamManifest && (!result.platform.startsWith("steam:") || result.preview || result.open || result.build || result.arch)) {
+        result.hasHelp = true;
+    }
+    if (result.steamUpload && (result.platform || result.steamManifest || result.preview || result.open || result.build || result.arch || result.v8Root)) {
+        result.hasHelp = true;
+    }
+    if (!result.steamUpload && (result.steamBranch || result.steamRoot || result.steamComment || result.dryRun)) {
         result.hasHelp = true;
     }
 
@@ -169,8 +237,15 @@ Please update your version of Node.`);
     ctx.open        = parsed.open;
     ctx.build       = parsed.build;
     ctx.v8Root      = parsed.v8Root;
+    ctx.arch        = parsed.arch;
+    ctx.steamManifest = parsed.steamManifest;
+    ctx.steamUpload = parsed.steamUpload;
+    ctx.steamBranch = parsed.steamBranch;
+    ctx.steamRoot = parsed.steamRoot;
+    ctx.steamComment = parsed.steamComment;
+    ctx.dryRun = parsed.dryRun;
 
-    if (parsed.hasHelp || !SUPPORTED_PLATFORMS.has(ctx.platform)) {
+    if (parsed.hasHelp || !ctx.steamUpload && !SUPPORTED_PLATFORMS.has(ctx.platform)) {
         echoHelp();
     }
 

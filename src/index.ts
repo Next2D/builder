@@ -10,6 +10,11 @@ import { loadConfig, buildWeb } from "./web.js";
 import { buildElectron } from "./electron.js";
 import { runNative, openNative, buildNative } from "./native.js";
 import { buildXbox } from "./xbox.js";
+import fs from "node:fs";
+import path from "node:path";
+import { readElectronConfig } from "./electron-config.js";
+import { writeSharedSteamDepots } from "./steam.js";
+import { uploadSteam } from "./steam-upload.js";
 
 // Node バージョン検証・引数解析・ctx 初期化 (不正時はここで終了)。
 initCli();
@@ -82,7 +87,23 @@ const multiBuild = async (): Promise<void> =>
 const execute = async (): Promise<void> =>
 {
     try {
+        if (ctx.steamUpload) {
+            await uploadSteam({
+                "root": process.cwd(), "steamRoot": ctx.steamRoot || "dist/steam", "environment": ctx.environment,
+                "branch": ctx.steamBranch || undefined, "comment": ctx.steamComment || undefined, "dryRun": ctx.dryRun
+            });
+            return;
+        }
         await loadConfig();
+        if (ctx.steamManifest) {
+            const config = readElectronConfig(process.cwd());
+            const version: string = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const pending = writeSharedSteamDepots(path.resolve(ctx.outDir, "steam"), ctx.environment, config, version);
+            if (pending.length) {
+                throw new Error(`Shared Steam depots are incomplete. Export or collect all required OS packages first.\n${pending.join("\n")}`);
+            }
+            return;
+        }
         await buildWeb();
         await multiBuild();
     } catch (error) {

@@ -24,6 +24,9 @@ on:
       - ".github/workflows/xbox-host-ci.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   # コンパイル検証に使う V8 ヘッダのバージョン (README「V8 の用意」と揃える)
   V8_TAG: 13.7.152.19
@@ -39,7 +42,7 @@ jobs:
           git clone --depth 1 --branch "$V8_TAG" --filter=blob:none --sparse \
             https://github.com/v8/v8.git v8_headers
           cd v8_headers && git sparse-checkout set include
-      - name: Run raster tests + ASan + V8 syntax check
+      - name: Run raster/stb tests + ASan + V8 syntax check
         working-directory: templates/xbox
         run: tests/check_local.sh "$GITHUB_WORKSPACE/v8_headers/include"
 
@@ -74,6 +77,14 @@ jobs:
           cl /nologo /std:c++17 /EHsc /W3 /O1 tests\raster_test.cpp /Fe:raster_test.exe
           if errorlevel 1 exit /b 1
           raster_test.exe
+
+      - name: Build & run stb safety regression tests
+        shell: cmd
+        working-directory: templates/xbox
+        run: |
+          cl /nologo /std:c++17 /EHsc /W3 /O1 tests\stb_safety_test.cpp /Fe:stb_safety_test.exe
+          if errorlevel 1 exit /b 1
+          stb_safety_test.exe
 
       - name: Build & run Windows platform tests (WIC/DirectWrite/MF/XAudio2/stb/dr)
         shell: cmd

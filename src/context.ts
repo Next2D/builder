@@ -19,8 +19,17 @@ export interface BuildContext {
     build: boolean;
     /** --v8-root (Xbox) */
     v8Root: string;
+    /** Electron CPU architecture (--arch); empty selects a platform default. */
+    arch: string;
+    /** Generate shared Steam depot manifests from existing packages only. */
+    steamManifest: boolean;
+    steamUpload: boolean;
+    steamBranch: string;
+    steamRoot: string;
+    steamComment: string;
+    dryRun: boolean;
     /** vite の loadConfigFromFile 結果 */
-    configObject: any | null;
+    configObject: Awaited<ReturnType<typeof import("vite").loadConfigFromFile>>;
     /** ビルド出力ディレクトリ (dist/<platformDir>/<env>) */
     buildDir: string;
     /** vite build.outDir (既定 "dist") */
@@ -39,6 +48,13 @@ export const ctx: BuildContext = {
     "open": false,
     "build": false,
     "v8Root": "",
+    "arch": "",
+    "steamManifest": false,
+    "steamUpload": false,
+    "steamBranch": "",
+    "steamRoot": "",
+    "steamComment": "",
+    "dryRun": false,
     "configObject": null,
     "buildDir": "",
     "outDir": "dist",

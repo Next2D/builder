@@ -82,7 +82,7 @@ test("walkFiles: 存在しないディレクトリは空配列", () => {
     assert.deepEqual(walkFiles(path.join(os.tmpdir(), "n2d-does-not-exist-xyz")), []);
 });
 
-test("minifyJs: 圧縮しコメント除去、グローバル名は保持", () => {
+test("minifyJs: 圧縮しコメント除去、グローバル名は保持", async () => {
     const src = `
 // このコメントは除去される
 globalThis.__next2d_boot = function () {
@@ -90,14 +90,14 @@ globalThis.__next2d_boot = function () {
     return longLocalVariableName;
 };
 `;
-    const out = minifyJs("js/bootstrap.js", src);
+    const out = await minifyJs("js/bootstrap.js", src);
     assert.ok(out.length < src.length, "縮む");
     assert.ok(!out.includes("除去される"), "コメント除去");
     assert.ok(out.includes("__next2d_boot"), "グローバル名は保持 (ゲームが参照)");
     assert.ok(!/\blongLocalVariableName\b/.test(out), "ローカル名はマングル");
 });
 
-test("minifyJs: 不正な JS は元コードのまま返す (埋め込み継続)", () => {
+test("minifyJs: 不正な JS は元コードのまま返す (埋め込み継続)", async () => {
     const broken = "globalThis.x = (((;";
-    assert.equal(minifyJs("js/bootstrap.js", broken), broken);
+    assert.equal(await minifyJs("js/bootstrap.js", broken), broken);
 });

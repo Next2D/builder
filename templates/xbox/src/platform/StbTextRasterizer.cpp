@@ -192,16 +192,18 @@ bool ComputeLayout(const std::string& css_font, const std::wstring& text, Layout
     stbtt_GetFontVMetrics(&lo.font->info, &lo.ascent, &lo.descent, &line_gap);
     lo.cps = ToCodepoints(text);
 
+    // Keep layout arithmetic in double; stb's bitmap API still takes float.
+    const double scale = lo.scale;
     double x = 0;
     for (size_t i = 0; i < lo.cps.size(); ++i) {
         int advance = 0, lsb = 0;
         stbtt_GetCodepointHMetrics(&lo.font->info, static_cast<int>(lo.cps[i]), &advance, &lsb);
-        x += advance * lo.scale;
+        x += advance * scale;
         if (i + 1 < lo.cps.size()) {
             x += stbtt_GetCodepointKernAdvance(
                      &lo.font->info,
                      static_cast<int>(lo.cps[i]),
-                     static_cast<int>(lo.cps[i + 1])) * lo.scale;
+                     static_cast<int>(lo.cps[i + 1])) * scale;
         }
     }
     lo.width = x;
@@ -239,9 +241,10 @@ bool MeasureText(const std::string& css_font, const std::wstring& text,
     if (!ComputeLayout(css_font, text, lo)) {
         return false;
     }
+    const double scale = lo.scale;
     out.width   = lo.width;
-    out.ascent  = lo.ascent * lo.scale;
-    out.descent = -lo.descent * lo.scale;   // stbtt の descent は負値
+    out.ascent  = lo.ascent * scale;
+    out.descent = -static_cast<double>(lo.descent) * scale;   // stbtt の descent は負値
     return true;
 }
 
@@ -256,8 +259,9 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
         return false;
     }
 
-    const double ascent_px  = lo.ascent * lo.scale;
-    const double descent_px = -lo.descent * lo.scale;
+    const double scale = lo.scale;
+    const double ascent_px  = lo.ascent * scale;
+    const double descent_px = -static_cast<double>(lo.descent) * scale;
     const int width  = std::max(1, static_cast<int>(std::ceil(lo.width)) + 2);
     const int height = std::max(1, static_cast<int>(std::ceil(ascent_px + descent_px)) + 2);
     const int baseline = static_cast<int>(std::ceil(ascent_px)) + 1;
@@ -272,7 +276,7 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
 
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         const float shift_x =
-            static_cast<float>(pen_x + lsb * lo.scale - std::floor(pen_x + lsb * lo.scale));
+            static_cast<float>(pen_x + lsb * scale - std::floor(pen_x + lsb * scale));
         stbtt_GetCodepointBitmapBoxSubpixel(
             &lo.font->info, cp, lo.scale, lo.scale, shift_x, 0, &x0, &y0, &x1, &y1);
 
@@ -284,7 +288,7 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
                 &lo.font->info, glyph.data(), gw, gh, gw,
                 lo.scale, lo.scale, shift_x, 0, cp);
 
-            const int dst_x = static_cast<int>(std::floor(pen_x + lsb * lo.scale));
+            const int dst_x = static_cast<int>(std::floor(pen_x + lsb * scale));
             const int dst_y = baseline + y0;
             for (int yy = 0; yy < gh; ++yy) {
                 const int py = dst_y + yy;
@@ -298,10 +302,10 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
             }
         }
 
-        pen_x += advance * lo.scale;
+        pen_x += advance * scale;
         if (i + 1 < lo.cps.size()) {
             pen_x += stbtt_GetCodepointKernAdvance(
-                         &lo.font->info, cp, static_cast<int>(lo.cps[i + 1])) * lo.scale;
+                         &lo.font->info, cp, static_cast<int>(lo.cps[i + 1])) * scale;
         }
     }
 

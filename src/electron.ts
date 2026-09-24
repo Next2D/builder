@@ -1,178 +1,101 @@
-// Electron ベースのデスクトップ配布 (Steam / Epic Games Store など)。
-import pc from "picocolors";
-import fs from "fs";
-import cp from "child_process";
-import { api } from "@electron-forge/core";
+// Electron desktop packages are unpacked application folders, ready for SteamPipe.
+import pc from "./colors.js";
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { createElectronPackagerOptions, readElectronConfig } from "./electron-config.js";
+import type { ElectronOS } from "./electron-config.js";
 import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
+import { getElectronVersion, withElectronHost } from "./electron-host.js";
+import { findSteamLaunch, recordSteamPackage, writeSharedSteamDepots } from "./steam.js";
+import { resolveToolPackages } from "./tool-packages.js";
 
-/**
- * @description electronがインストールされてなければインストールを実行
- *              If electron is not installed, run install.
- *
- * @return {Promise}
- * @method
- * @private
- */
-const installElectron = (): Promise<void> =>
-{
-    return new Promise<void>((resolve, reject): void =>
-    {
-        if (fs.existsSync(`${process.cwd()}/electron/node_modules`)) {
-            return resolve();
+export const resolveElectronTarget = (platform: string, arch = "", preview = false): {
+    platform: "win32" | "darwin" | "linux";
+    arch: "x64" | "arm64" | "universal";
+} => {
+    const os = platform.replace(/^steam:/, "");
+    const target = { "windows": "win32", "macos": "darwin", "linux": "linux" }[os];
+    if (target !== "win32" && target !== "darwin" && target !== "linux") {
+        throw new Error(`Unsupported Electron platform: ${platform}`);
+    }
+    const cpu = arch || (preview ? process.arch : target === "darwin" ? "universal" : "x64");
+    if (cpu !== "x64" && cpu !== "arm64" && cpu !== "universal") {
+        throw new Error(`Unsupported Electron architecture: ${cpu}`);
+    }
+    if (cpu === "universal" && target !== "darwin") {
+        throw new Error("--arch universal is only supported for macOS.");
+    }
+    if (preview && (target !== process.platform || cpu !== process.arch)) {
+        throw new Error("Electron preview must use the host OS and architecture.");
+    }
+    return { "platform": target, "arch": cpu };
+};
+
+const run = (command: string, args: string[], cwd: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+        const child = $spawn(command, args, { cwd, "stdio": "inherit" });
+        child.once("error", reject);
+        child.once("close", (code, signal) => {
+            if (code !== 0) {
+                reject(new Error(`${command} failed (${signal || code}).`));
+                return;
+            }
+            resolve();
+        });
+    });
+
+export const buildElectron = async (): Promise<void> => {
+    const root = process.cwd();
+    const config = readElectronConfig(root);
+    const os = ctx.platform.replace(/^steam:/, "") as ElectronOS;
+    const target = resolveElectronTarget(ctx.platform, ctx.arch || (ctx.preview ? "" : config.architectures[os]), ctx.preview);
+    if (target.arch === "universal" && process.platform !== "darwin") {
+        throw new Error("Build universal macOS applications on macOS.");
+    }
+    const steam = ctx.platform.startsWith("steam:");
+    const version: string = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+    const steamRoot = path.resolve(ctx.outDir, "steam");
+    const outDir = path.resolve(ctx.outDir, ctx.platformDir, "build", ctx.environment);
+    if (steam) {
+        // A failed rebuild must not leave a shared manifest pointing at partially replaced files.
+        fs.rmSync(path.join(outDir, "steam-package.json"), { "force": true });
+        writeSharedSteamDepots(steamRoot, ctx.environment, config, version);
+    }
+    const outputPaths = await withElectronHost(root, ctx.buildDir, config, async (dir) => {
+        const options = createElectronPackagerOptions(root, config, os, path.join(dir, "resources"));
+        if (steam && os === "macos" && !options.osxNotarize) {
+            console.log(pc.yellow("Local macOS build: unsigned/unnotarized builds must not be submitted for Steam release. See docs/steam.md."));
         }
-
-        const stream = $spawn("npm", [
-            "--prefix",
-            `${process.cwd()}/electron`,
-            "install",
-            `${process.cwd()}/electron`
-        ], { "stdio": "inherit" });
-
-        stream.on("close", (code: number): void =>
-        {
-            if (code !== 0) {
-                reject("`Electron` installation failed.");
-            }
-
-            console.log(pc.green("`Electron` successfully installed."));
-            resolve();
-        });
+        console.log(pc.green(`Packaging Electron (${target.platform}/${target.arch})`));
+        const packages = await resolveToolPackages("electron");
+        const require = createRequire(packages["@electron/packager"]);
+        const { packager } = await import(pathToFileURL(require.resolve("@electron/packager")).href);
+        // The generated host has no npm dependencies or native addons. Packager downloads
+        // the pinned Electron runtime directly and uses its normal download cache.
+        return await packager({
+            ...options, dir, ...target,
+            "out": outDir,
+            "electronVersion": getElectronVersion(),
+            "overwrite": true,
+            "prune": false
+        }) as string[];
     });
-};
-
-/**
- * @description electronに含むリソースを初期化
- *              Initialize resources included in electron
- *
- * @return {Promise}
- * @method
- * @private
- */
-const removeResources = (): Promise<void> =>
-{
-    return new Promise<void>((resolve, reject): void =>
-    {
-        const stream = cp.spawn("rm", [
-            "-rf",
-            `${process.cwd()}/electron/resources/`
-        ], { "stdio": "inherit" });
-
-        stream.on("close", (code: number): void =>
-        {
-            if (code !== 0) {
-                reject("Failed to remove built resources.");
-            }
-
-            console.log(pc.green("Successfully remove built resources."));
-            resolve();
-        });
-    });
-};
-
-/**
- * @description ビルドしたリソースをコピー
- *              Copy built resources
- *
- * @return {Promise}
- * @method
- * @private
- */
-const copyResources = (): Promise<void> =>
-{
-    return new Promise<void>((resolve, reject): void =>
-    {
-        const stream = cp.spawn("cp", [
-            "-r",
-            `${ctx.buildDir}/`,
-            `${process.cwd()}/electron/resources`
-        ], { "stdio": "inherit" });
-
-        stream.on("close", (code: number): void =>
-        {
-            if (code !== 0) {
-                reject("Failed to copy built resources.");
-            }
-
-            console.log(pc.green("Successfully copy built resources."));
-            resolve();
-        });
-    });
-};
-
-/**
- * @description Electron ベースのデスクトップアプリ書き出し関数
- *              (Windows / macOS / Linux、Steam・Epic Games Store 等の配布に共通)。
- *              Export function for Electron-based desktop apps.
- *
- * @return {Promise}
- * @method
- * @public
- */
-export const buildElectron = async (): Promise<void> =>
-{
-    // reset
-    await removeResources();
-
-    // copy HTML, JavaScript
-    await copyResources();
-
+    if (steam) {
+        for (const content of outputPaths) {
+            recordSteamPackage(content, ctx.platform, target.arch, config, version);
+        }
+        writeSharedSteamDepots(steamRoot, ctx.environment, config, version);
+    }
+    console.log(pc.green(`Finished Electron export: ${outDir}`));
     if (ctx.preview) {
-
-        $spawn("npx", [
-            "electron",
-            `${process.cwd()}/electron/index.js`
-        ], { "stdio": "inherit" });
-
-    } else {
-
-        await installElectron();
-
-        console.log(pc.green("Start the `Electron` build process."));
-        console.log();
-
-        const packageOptions = {
-            "dir": `${process.cwd()}/electron`,
-            "outDir": `${ctx.outDir}/${ctx.platformDir}/build`,
-            "platform": "",
-            "arch": "all"
-        };
-
-        switch (ctx.platform) {
-
-            case "windows":
-            case "steam:windows":
-                packageOptions.platform = "win32";
-                break;
-
-            case "macos":
-            case "steam:macos":
-                packageOptions.platform = "mas";
-                break;
-
-            case "linux":
-            case "steam:linux":
-                packageOptions.platform = "linux";
-                break;
-
-            default:
-                console.log(pc.red("There is an error in the export platform settings."));
-                console.log();
-                process.exit(1);
-
-        }
-
-        api
-            .package(packageOptions)
-            .then((): void =>
-            {
-                console.log(pc.green(`Finished building \`Electron\` for ${ctx.platform}.`));
-                console.log();
-            })
-            .catch((error: any): void =>
-            {
-                console.log(pc.red("Export of Electron failed."));
-                console.log(pc.red(error));
-            });
+        const content = outputPaths[0];
+        const launch = findSteamLaunch(content, `steam:${os}`, config.executableName);
+        const executable = target.platform === "darwin"
+            ? path.join(content, launch, "Contents/MacOS", config.executableName)
+            : path.join(content, launch);
+        await run(executable, [], root);
     }
 };

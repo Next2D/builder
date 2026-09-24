@@ -92,8 +92,11 @@ JavaScript / TypeScriptの両テンプレートに含まれるので、初期値
 
 #### macOSの署名・公証
 
-macOSのキーチェーンにDeveloper ID Application証明書を登録し、
+macOSのキーチェーンにDeveloper ID Application証明書と対応する秘密鍵を登録し、
 `xcrun notarytool store-credentials` で公証用プロファイルを保存する。認証情報はJSONへ書かない。
+
+`security find-identity -v -p codesigning` に有効な `Developer ID Application: ...` が表示されることを確認する。
+`APPLE_SIGNING_IDENTITY` にはその実際の名前を指定する。環境変数を設定するだけでは証明書は作成されない。
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
@@ -103,6 +106,8 @@ export APPLE_NOTARY_PROFILE='your-notary-profile'
 配布用は `macos.sign` / `macos.notarize` を両方 `true` にする。
 またはSTEP5のmacOSコマンドに `NEXT2D_STEAM_RELEASE=1` を付けると、JSONのfalse指定に関わらず両方を必須にできる。
 認証情報不足・署名失敗・公証失敗はビルド失敗となる。
+署名エラーは公証へ進まずに停止する。`Signature=adhoc` / `TeamIdentifier=not set` が出る場合は、
+Developer ID署名が付いていないため、先に表示された署名エラーとキーチェーンの証明書・秘密鍵を確認する。
 
 Steam用のターゲットは `darwin`。Valveは新規macOSアプリに64bitとAppleの公証を要求する。
 テンプレートのentitlementsはJITとSteam Overlay用のlibrary validation / DYLD設定を含み、
@@ -393,8 +398,11 @@ These are separate identifiers. The game version comes from the root `package.js
 
 #### macOS signing and notarization
 
-Install a Developer ID Application certificate in the macOS keychain and save a notarization profile using
+Install a Developer ID Application certificate and its matching private key in the macOS keychain, and save a notarization profile using
 `xcrun notarytool store-credentials`. Do not put credentials in JSON.
+
+Check that `security find-identity -v -p codesigning` lists a valid `Developer ID Application: ...` identity.
+Use its actual name for `APPLE_SIGNING_IDENTITY`. Setting the environment variable does not create a certificate.
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
@@ -404,6 +412,8 @@ export APPLE_NOTARY_PROFILE='your-notary-profile'
 For distribution, set both `macos.sign` / `macos.notarize` to `true`.
 Alternatively, prefix the STEP5 macOS command with `NEXT2D_STEAM_RELEASE=1` to require both even when JSON specifies false.
 Missing credentials, signing failures or notarization failures fail the build.
+Signing failures stop before notarization. If the output shows `Signature=adhoc` / `TeamIdentifier=not set`,
+the app lacks a Developer ID signature; check the preceding signing error and the certificate/private key in the keychain.
 
 Steam uses the `darwin` target. Valve requires 64-bit support and Apple notarization for new macOS applications.
 The template entitlements include library validation / DYLD settings for JIT and Steam Overlay,

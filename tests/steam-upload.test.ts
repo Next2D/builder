@@ -151,8 +151,21 @@ process.exit(Number(process.env.TEST_CODE || 0));
     assert.equal(args[8], "+quit");
     assert.ok(fs.existsSync(args[7]));
     assert.equal(JSON.parse(fs.readFileSync(path.join(path.dirname(args[7]), "upload-result.json"), "utf8")).buildId, "123456");
+    // Actual SteamCMD output includes a timestamp and uses a different completion message.
+    const currentOutput = "[2026-09-24 08:02:22]: Successfully finished AppID 2409460 build (BuildID 25493101).\r\nUnloading Steam API...OK";
+    const current = cli(f, [], { ...env, TEST_OUTPUT: currentOutput });
+    assert.equal(current.status, 0, current.stdout + current.stderr);
+    const currentArgs = JSON.parse(fs.readFileSync(calls, "utf8"));
+    const currentRecord = JSON.parse(fs.readFileSync(path.join(path.dirname(currentArgs[7]), "upload-result.json"), "utf8"));
+    assert.equal(currentRecord.buildId, "25493101");
+    assert.equal(currentRecord.requestedBranch, "internal");
     for (const failure of [{ TEST_CODE: "7" }, { TEST_OUTPUT: "ERROR! Failed to build App." },
-        { TEST_OUTPUT: "Logged in but no build happened" }, { TEST_OUTPUT: env.TEST_OUTPUT + "\nFailed to set build live" }]) {
+        { TEST_OUTPUT: "Logged in but no build happened" }, { TEST_OUTPUT: env.TEST_OUTPUT + "\nFailed to set build live" },
+        { TEST_OUTPUT: currentOutput, TEST_CODE: "7" },
+        { TEST_OUTPUT: currentOutput.replace("AppID 2409460", "AppID 480") },
+        { TEST_OUTPUT: currentOutput.replace("BuildID 25493101", "BuildID unknown") },
+        { TEST_OUTPUT: currentOutput + "\nERROR! Failed to set build live" },
+        { TEST_OUTPUT: "ERROR! Failed to build depot.\n" + currentOutput }]) {
         const failed = cli(f, [], { ...env, ...failure });
         assert.notEqual(failed.status, 0, failed.stdout + failed.stderr);
         const failedArgs = JSON.parse(fs.readFileSync(calls, "utf8"));

@@ -122,6 +122,8 @@ export const createElectronPackagerOptions = (
         ...os === "macos" && sign ? {
             "osxSign": {
                 "identity": process.env.APPLE_SIGNING_IDENTITY,
+                // Packager otherwise swallows signing failures and attempts notarization.
+                "continueOnError": false,
                 "optionsForFile": () => ({
                     "hardenedRuntime": true,
                     "entitlements": path.join(getTemplateDir("electron"), "entitlements.plist")

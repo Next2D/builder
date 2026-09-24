@@ -121,7 +121,9 @@ export const uploadSteam = async (options: ISteamUploadOptions): Promise<void> =
                 reject(new Error(`SteamCMD failed (${signal || code}). Inspect its output and SteamPipe logs; check login, app permissions and beta branch settings.`));
                 return;
             }
-            const success = output.match(new RegExp(`Success! App '${plan.appId}' fully built \\(BuildID ([0-9]+)\\)`, "i"));
+            const success = output.match(new RegExp(
+                `(?:Success! App '${plan.appId}' fully built|Successfully finished AppID ${plan.appId} build) \\(BuildID ([0-9]+)\\)`, "i"
+            ));
             if (reportedError || !success) {
                 reject(new Error("SteamCMD did not report a successful app build, or reported an error. Check SteamPipe logs and the branch's active BuildID in Steamworks before retrying."));
                 return;

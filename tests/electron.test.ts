@@ -217,5 +217,28 @@ test("release mode requires signing and notarization credentials", (t) => {
     process.env.APPLE_NOTARY_PROFILE = "test profile";
     const options = createElectronPackagerOptions(root, config, "macos", path.join(root, "resources"));
     assert.ok(options.osxSign);
+    assert.equal(options.osxSign.continueOnError, false);
     assert.deepEqual(options.osxNotarize, { keychainProfile: "test profile" });
+});
+
+test("configured macOS signing must fail the build with or without notarization", (t) => {
+    const root = fixture(t);
+    const previous = { ...process.env };
+    t.after(() => { process.env = previous; });
+    delete process.env.NEXT2D_STEAM_RELEASE;
+    process.env.APPLE_SIGNING_IDENTITY = "test identity";
+    process.env.APPLE_NOTARY_PROFILE = "test profile";
+    for (const notarize of [false, true]) {
+        fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ macos: { sign: true, notarize } }));
+        const config = readElectronConfig(root);
+        const options = createElectronPackagerOptions(root, config, "macos", path.join(root, "resources"));
+        assert.equal(options.osxSign?.continueOnError, false);
+        assert.equal(Boolean(options.osxNotarize), notarize);
+        // Signing settings must not affect other target operating systems.
+        for (const os of ["windows", "linux"] as const) {
+            const other = createElectronPackagerOptions(root, config, os, path.join(root, "resources"));
+            assert.equal(other.osxSign, undefined);
+            assert.equal(other.osxNotarize, undefined);
+        }
+    }
 });

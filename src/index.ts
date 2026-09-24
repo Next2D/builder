@@ -90,7 +90,7 @@ const execute = async (): Promise<void> =>
         if (ctx.steamUpload) {
             await uploadSteam({
                 "root": process.cwd(), "steamRoot": ctx.steamRoot || "dist/steam", "environment": ctx.environment,
-                "branch": ctx.steamBranch || undefined, "dryRun": ctx.dryRun
+                "branch": ctx.steamBranch || undefined, "comment": ctx.steamComment || undefined, "dryRun": ctx.dryRun
             });
             return;
         }

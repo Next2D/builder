@@ -9,6 +9,7 @@ export interface ISteamUploadOptions {
     steamRoot: string;
     environment: string;
     branch?: string;
+    comment?: string;
     dryRun?: boolean;
 }
 
@@ -36,6 +37,12 @@ export const prepareSteamUpload = (options: ISteamUploadOptions) => {
     if (typeof version !== "string" || !version) {
         throw new Error("Set package.json version before uploading.");
     }
+    if (options.comment !== undefined && (typeof options.comment !== "string" || !options.comment.trim()
+        || /["\\\u0000-\u001f\u007f]/.test(options.comment))) {
+        throw new Error("Steam upload --steam-comment must be nonempty single-line text without double quotes, backslashes or control characters.");
+    }
+    const comment = options.comment ?? `${config.appName} ${version} (${options.environment}, ${branch})`;
+    const quotedComment = quote(comment);
     const groups = new Map<string, { os: string; content: string; arch: string; localExecutable: string }[]>();
     for (const os of ["windows", "macos", "linux"] as const) {
         const id = config.steam.depots[os];
@@ -74,11 +81,11 @@ export const prepareSteamUpload = (options: ISteamUploadOptions) => {
     // A stable cache directory allows SteamPipe to reuse chunks across uploads to a branch.
     const cache = path.join(uploads, "cache", branch);
     fs.writeFileSync(manifest,
-        `"AppBuild"\n{\n    "AppID" "${config.steam.appId}"\n    "Desc" ${quote(`${config.appName} ${version} (${options.environment}, ${branch})`)}\n`
+        `"AppBuild"\n{\n    "AppID" "${config.steam.appId}"\n    "Desc" ${quotedComment}\n`
         + `    "ContentRoot" ${quote(steamRoot)}\n    "BuildOutput" ${quote(cache)}\n    "Preview" "${options.dryRun ? "1" : "0"}"\n`
         + (options.dryRun ? "" : `    "SetLive" ${quote(branch)}\n`)
         + `    "Depots"\n    {\n${depotFiles.join("\n")}\n    }\n}\n`);
-    const plan = { "appId": config.steam.appId, branch, version, "environment": options.environment, "dryRun": !!options.dryRun, manifest, launches };
+    const plan = { "appId": config.steam.appId, branch, version, comment, "environment": options.environment, "dryRun": !!options.dryRun, manifest, launches };
     fs.writeFileSync(path.join(scripts, "upload-plan.json"), `${JSON.stringify(plan, null, 2)}\n`);
     return plan;
 };
@@ -87,6 +94,7 @@ export const prepareSteamUpload = (options: ISteamUploadOptions) => {
 export const uploadSteam = async (options: ISteamUploadOptions): Promise<void> => {
     const plan = prepareSteamUpload(options);
     console.log(`Steam App ${plan.appId} -> beta branch ${plan.branch}`);
+    console.log(`Comment: ${plan.comment}`);
     console.log(`Manifest: ${plan.manifest}`);
     for (const launch of plan.launches) {
         console.log(`  Depot ${launch.depotId}: ${launch.platform}/${launch.arch} -> ${launch.executable}`);

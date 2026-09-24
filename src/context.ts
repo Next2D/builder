@@ -26,6 +26,7 @@ export interface BuildContext {
     steamUpload: boolean;
     steamBranch: string;
     steamRoot: string;
+    steamComment: string;
     dryRun: boolean;
     /** vite の loadConfigFromFile 結果 */
     configObject: Awaited<ReturnType<typeof import("vite").loadConfigFromFile>>;
@@ -52,6 +53,7 @@ export const ctx: BuildContext = {
     "steamUpload": false,
     "steamBranch": "",
     "steamRoot": "",
+    "steamComment": "",
     "dryRun": false,
     "configObject": null,
     "buildDir": "",

@@ -45,18 +45,23 @@ test("Steam upload CLI is platform independent and rejects mixed actions, missin
     assert.equal(parseArgv(args).hasHelp, false);
     assert.equal(parseArgv([...args, "--dry-run"]).dryRun, true);
     assert.equal(parseArgv([...args, "--steam-branch", "internal"]).steamBranch, "internal");
+    assert.equal(parseArgv([...args, "--steam-comment", "内部テスト用"]).steamComment, "内部テスト用");
     for (const extra of [["--platform", "steam:macos"], ["--steam-manifest"], ["--preview"], ["--build"], ["--open"],
-        ["--arch", "x64"], ["--steam-branch"], ["--steam-root"], ["--dryrun"]]) {
+        ["--arch", "x64"], ["--steam-branch"], ["--steam-root"], ["--steam-comment"],
+        ["--steam-comment", ""], ["--steam-comment", "--dry-run"], ["--dryrun"]]) {
         assert.equal(parseArgv([...args, ...extra]).hasHelp, true, extra.join(" "));
     }
     assert.equal(parseArgv(["--steam-upload"]).hasHelp, true);
     assert.equal(parseArgv(["--platform", "web", "--env", "prd", "--dry-run"]).hasHelp, true);
+    assert.equal(parseArgv(["--platform", "web", "--env", "prd", "--steam-comment", "test"]).hasHelp, true);
 });
 
 test("upload combines a shared depot once, sets internal, and preserves ordinary build manifests", (t) => {
     const f = fixture(t);
     const plan = prepareSteamUpload(f);
     const manifest = fs.readFileSync(plan.manifest, "utf8");
+    assert.match(manifest, /"Desc" "Test Game 1\.0\.0 \(prd, internal\)"/);
+    assert.equal(plan.comment, "Test Game 1.0.0 (prd, internal)");
     assert.match(manifest, /"SetLive" "internal"/);
     assert.match(manifest, /"Preview" "0"/);
     assert.equal((manifest.match(/"2409461" "depot_2409461.vdf"/g) || []).length, 1);
@@ -124,6 +129,30 @@ test("dry-run CLI needs no SteamCMD, credentials, Vite or tool downloads", (t) =
     assert.equal(fs.existsSync(path.join(f.root, "node_modules")), false);
 });
 
+test("dry-run CLI preserves a custom build comment in its manifest, plan and output", (t) => {
+    const f = fixture(t);
+    const comment = "内部テスト：プレイヤー's 入力を修正 (revision abc123)";
+    const result = cli(f, ["--dry-run", "--steam-comment", comment]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(result.stdout.includes(`Comment: ${comment}`));
+    const manifest = result.stdout.match(/^Manifest: (.+)$/m)[1].trim();
+    assert.ok(fs.readFileSync(manifest, "utf8").includes(`"Desc" "${comment}"`));
+    const plan = JSON.parse(fs.readFileSync(path.join(path.dirname(manifest), "upload-plan.json"), "utf8"));
+    assert.equal(plan.comment, comment);
+});
+
+test("invalid comments fail before writing manifests or starting SteamCMD", (t) => {
+    const f = fixture(t);
+    for (const comment of ["", "   ", "bad\"comment", "bad\\comment", "bad\ncomment", "bad\rcomment", "bad\tcomment", "bad\0comment", null]) {
+        assert.throws(() => prepareSteamUpload({ ...f, comment }), /--steam-comment/);
+    }
+    const result = cli(f, ["--steam-comment", "   "], { STEAM_USERNAME: "test_builder" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--steam-comment/);
+    assert.doesNotMatch(result.stderr, /Cannot start SteamCMD/);
+    assert.equal(fs.existsSync(path.join(f.steamRoot, "uploads")), false);
+});
+
 test("upload requires a cached-login account and propagates missing executable errors", (t) => {
     const f = fixture(t);
     assert.match(cli(f).stderr, /Set STEAM_USERNAME/);
@@ -153,9 +182,11 @@ process.exit(Number(process.env.TEST_CODE || 0));
     assert.equal(JSON.parse(fs.readFileSync(path.join(path.dirname(args[7]), "upload-result.json"), "utf8")).buildId, "123456");
     // Actual SteamCMD output includes a timestamp and uses a different completion message.
     const currentOutput = "[2026-09-24 08:02:22]: Successfully finished AppID 2409460 build (BuildID 25493101).\r\nUnloading Steam API...OK";
-    const current = cli(f, [], { ...env, TEST_OUTPUT: currentOutput });
+    const comment = "内部テスト用ビルド";
+    const current = cli(f, ["--steam-comment", comment], { ...env, TEST_OUTPUT: currentOutput });
     assert.equal(current.status, 0, current.stdout + current.stderr);
     const currentArgs = JSON.parse(fs.readFileSync(calls, "utf8"));
+    assert.ok(fs.readFileSync(currentArgs[7], "utf8").includes(`"Desc" "${comment}"`));
     const currentRecord = JSON.parse(fs.readFileSync(path.join(path.dirname(currentArgs[7]), "upload-result.json"), "utf8"));
     assert.equal(currentRecord.buildId, "25493101");
     assert.equal(currentRecord.requestedBranch, "internal");

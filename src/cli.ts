@@ -29,7 +29,7 @@ export const echoHelp = (): void =>
     console.log("Steam: --platform steam:windows|steam:macos|steam:linux --env prd");
     console.log("Electron: --arch x64|arm64|universal (default: macOS universal, others x64)");
     console.log("Combine existing Steam packages only: --platform steam:macos --env prd --steam-manifest");
-    console.log("Upload existing packages: --steam-upload --env prd [--steam-branch internal] [--steam-root dist/steam] [--dry-run]");
+    console.log("Upload existing packages: --steam-upload --env prd [--steam-branch internal] [--steam-root dist/steam] [--steam-comment \"Build comment\"] [--dry-run]");
     console.log("Steam upload uses STEAM_USERNAME and optional STEAMCMD (executable path); no --platform is needed.");
     console.log();
     process.exit(1);
@@ -50,6 +50,7 @@ export interface ParsedArgs {
     steamUpload: boolean;
     steamBranch: string;
     steamRoot: string;
+    steamComment: string;
     dryRun: boolean;
     hasHelp: boolean;
 }
@@ -88,6 +89,7 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
         "steamUpload": false,
         "steamBranch": "",
         "steamRoot": "",
+        "steamComment": "",
         "dryRun": false,
         "hasHelp": false
     };
@@ -105,7 +107,8 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
                 break;
 
             case "--steam-branch":
-            case "--steam-root": {
+            case "--steam-root":
+            case "--steam-comment": {
                 const flag = argv[idx];
                 const value = argv[++idx] || "";
                 if (!value || value.startsWith("--")) {
@@ -113,8 +116,10 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
                 }
                 if (flag === "--steam-branch") {
                     result.steamBranch = value;
-                } else {
+                } else if (flag === "--steam-root") {
                     result.steamRoot = value;
+                } else {
+                    result.steamComment = value;
                 }
                 break;
             }
@@ -182,7 +187,7 @@ export const parseArgv = (argv: string[]): ParsedArgs =>
     if (result.steamUpload && (result.platform || result.steamManifest || result.preview || result.open || result.build || result.arch || result.v8Root)) {
         result.hasHelp = true;
     }
-    if (!result.steamUpload && (result.steamBranch || result.steamRoot || result.dryRun)) {
+    if (!result.steamUpload && (result.steamBranch || result.steamRoot || result.steamComment || result.dryRun)) {
         result.hasHelp = true;
     }
 
@@ -237,6 +242,7 @@ Please update your version of Node.`);
     ctx.steamUpload = parsed.steamUpload;
     ctx.steamBranch = parsed.steamBranch;
     ctx.steamRoot = parsed.steamRoot;
+    ctx.steamComment = parsed.steamComment;
     ctx.dryRun = parsed.dryRun;
 
     if (parsed.hasHelp || !ctx.steamUpload && !SUPPORTED_PLATFORMS.has(ctx.platform)) {

@@ -95,8 +95,15 @@ JavaScript / TypeScriptの両テンプレートに含まれるので、初期値
 macOSのキーチェーンにDeveloper ID Application証明書と対応する秘密鍵を登録し、
 `xcrun notarytool store-credentials` で公証用プロファイルを保存する。認証情報はJSONへ書かない。
 
-`security find-identity -v -p codesigning` に有効な `Developer ID Application: ...` が表示されることを確認する。
-`APPLE_SIGNING_IDENTITY` にはその実際の名前を指定する。環境変数を設定するだけでは証明書は作成されない。
+`APPLE_SIGNING_IDENTITY` に指定する署名IDは、次のコマンドで確認できる。
+
+```sh
+security find-identity -v -p codesigning
+```
+
+表示された有効な署名IDから `Developer ID Application: ...` を選び、ダブルクォート内の名前全体を
+`APPLE_SIGNING_IDENTITY` に指定する。以下の `YOUR NAME (TEAMID)` は実際の表示に置き換える。
+環境変数を設定するだけでは証明書は作成されない。
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
@@ -132,9 +139,15 @@ export STEAM_USERNAME="your_build_account"
 "$STEAMCMD" +login "$STEAM_USERNAME" +quit
 ```
 
-初回ログインではSteamCMDにパスワードとSteam Guardコードを対話入力する。
-その後builderは同じSteamCMDの保存済みログインを使い、パスワードをコマンド引数へ渡さない。
-認証が失効した場合は同じSteamCMDで再ログインする。builderからの実行は対話入力を待たず失敗させる。
+初回ログインではSteamCMDにパスワードと、要求された場合はSteam Guardコードを対話入力する。
+ログイン成功後も、`+quit` による正常終了まで待ち、通常のターミナルのプロンプトに戻ったことを確認する。
+`Steam>` で手動ログインした場合も、`quit` を入力して終了してからアップロードへ進む。
+その後builderは同じSteamCMD・同じアカウントの保存済みログインを使い、パスワードをコマンド引数へ渡さない。
+Steamアプリへのログインだけでは、このSteamCMDの認証準備を完了したことにはならない。
+
+アップロード時に `Cached credentials not found` / `No cached credentials and @NoPromptForPassword is set` が出た場合や、
+認証が失効した場合は、上の `"$STEAMCMD" +login "$STEAM_USERNAME" +quit` を再実行し、正常終了後にアップロードを再実行する。
+builderからの実行は対話入力を待たず失敗させるため、builderの再実行だけではログイン情報を登録できない。
 CIではSteamCMDの `config/config.vdf` をSecretとして復元・管理し、ビルド成果物に含めない。
 Windows PowerShellでは `$env:STEAMCMD` と `$env:STEAM_USERNAME` を設定する。
 
@@ -175,9 +188,23 @@ CI artifactは `tar.gz` にして転送する。カスタム出力先はSTEP6の
 配布用macOSアプリは署名・公証・staple完了を確認する（パスは成果物に合わせる）:
 
 ```sh
-codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+codesign --verify --deep --strict --verbose=2 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+echo $?
 xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+echo $?
 ```
+
+| 検証 | 正常時の出力 | 直後の `echo $?` |
+| --- | --- | --- |
+| `codesign --verify --deep --strict --verbose=2` | アプリのパスに続いて `valid on disk` と `satisfies its Designated Requirement` が表示される。内部コードの検証結果が追加で表示される場合もある。 | `0` |
+| `xcrun stapler validate` | 最後に `The validate action worked!` が表示される。 | `0` |
+
+`codesign` は `--verbose=2` を付けない場合、成功しても通常は何も表示しない。終了コードが `0` なら検証成功と判断できる。
+`echo $?` は確認したいコマンドの直後に実行する。`0` 以外なら検証失敗なので、出力されたエラーを解消して再確認する。
+これらは署名と添付済み公証チケットを検証するコマンドであり、署名・公証を実施する操作ではない。
+両方が成功した後も、STEP6でSteamからのインストール・起動を確認する。
+
+参考：[Appleの署名検証手順](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html)。
 
 ### STEP6：起動設定を反映し、アップロード・テストする
 
@@ -192,13 +219,21 @@ Web/Electronの再ビルドや事前の `--steam-manifest` 実行は不要。
 # ローカル検証のみ。SteamCMD・認証・Steamへの接続は不要
 npx @next2d/builder --steam-upload --env prd --dry-run
 
-# 検証後、設定したブランチへアップロード
+# STEP4のSteamCMDログイン・正常終了後、同じターミナルで設定したブランチへアップロード
 npx @next2d/builder --steam-upload --env prd
+```
+
+任意のアップロードコメントを付ける場合は `--steam-comment` を指定する。
+Steamworksの「あなたのビルド」の説明（SteamPipeの `Desc`）に反映される。
+
+```sh
+npx @next2d/builder --steam-upload --env prd --steam-comment "内部テスト：ゲームパッド操作を修正"
 ```
 
 | 引数・設定 | 用途 |
 |---|---|
 | `--steam-branch internal` | `steam.branch` の反映先を上書き。`SetLive` で反映を要求する。`default` は指定不可で、一般公開用ビルドの切り替えはSteamworksで行う。 |
+| `--steam-comment "コメント"` | アップロードコメントを指定する。未指定時は従来どおり `<appName> <version> (<env>, <branch>)`。空白のみ・改行・制御文字・ダブルクォート・バックスラッシュは使用不可。`--dry-run` の出力と `upload-plan.json` でも確認できる。 |
 | `--steam-root dist/steam` | 成果物の収集先。既定は `dist/steam`。ゲームルートからの相対パスまたは絶対パス。アップロード時はVite設定を読まないため、カスタム出力先では明示する。 |
 | `--dry-run` | パッケージと設定の整合性を検証する。Steam側の権限・ブランチ・パスワードの確認は行わない。 |
 | 併用しない引数 | `--build` / `--preview` / `--open` / `--steam-manifest` / `--arch`。`--platform` も不要。 |
@@ -401,8 +436,15 @@ These are separate identifiers. The game version comes from the root `package.js
 Install a Developer ID Application certificate and its matching private key in the macOS keychain, and save a notarization profile using
 `xcrun notarytool store-credentials`. Do not put credentials in JSON.
 
-Check that `security find-identity -v -p codesigning` lists a valid `Developer ID Application: ...` identity.
-Use its actual name for `APPLE_SIGNING_IDENTITY`. Setting the environment variable does not create a certificate.
+Use the following command to find the signing identity to set as `APPLE_SIGNING_IDENTITY`:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+Choose a valid `Developer ID Application: ...` identity from the output and use the entire name inside the double quotes
+for `APPLE_SIGNING_IDENTITY`. Replace `YOUR NAME (TEAMID)` below with the actual value shown.
+Setting the environment variable does not create a certificate.
 
 ```sh
 export APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)'
@@ -438,9 +480,15 @@ export STEAM_USERNAME="your_build_account"
 "$STEAMCMD" +login "$STEAM_USERNAME" +quit
 ```
 
-During the first login, enter the password and Steam Guard code interactively in SteamCMD.
-The builder then reuses that SteamCMD installation's saved login without passing a password as a command-line argument.
-If authentication expires, log in again with the same SteamCMD. Builder uploads fail instead of waiting for interactive input.
+During the first login, enter the password and, if requested, the Steam Guard code interactively in SteamCMD.
+After login succeeds, wait for `+quit` to exit normally and confirm that the regular terminal prompt has returned.
+If you log in manually at the `Steam>` prompt, also enter `quit` before proceeding to upload.
+The builder then reuses the saved login for the same SteamCMD installation and account without passing a password as a command-line argument.
+Logging into the Steam desktop app alone does not confirm that this SteamCMD authentication setup is complete.
+
+If uploading reports `Cached credentials not found` / `No cached credentials and @NoPromptForPassword is set`, or authentication expires,
+rerun `"$STEAMCMD" +login "$STEAM_USERNAME" +quit` above, wait for it to exit normally, then retry the upload.
+Builder uploads fail instead of waiting for interactive input, so retrying the builder alone cannot register login credentials.
 In CI, restore and manage SteamCMD's `config/config.vdf` as a Secret and exclude it from build artifacts.
 In Windows PowerShell, set `$env:STEAMCMD` and `$env:STEAM_USERNAME`.
 
@@ -481,9 +529,23 @@ architecture is used. Combining multiple architectures of one OS into a shared d
 Verify signing, notarization and stapling for macOS distribution packages (adjust the paths):
 
 ```sh
-codesign --verify --deep --strict 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+codesign --verify --deep --strict --verbose=2 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+echo $?
 xcrun stapler validate 'dist/steam/macos/build/prd/My Game-darwin-universal/My Game.app'
+echo $?
 ```
+
+| Check | Successful output | Immediately following `echo $?` |
+| --- | --- | --- |
+| `codesign --verify --deep --strict --verbose=2` | The app path followed by `valid on disk` and `satisfies its Designated Requirement`. Additional results for nested code may also appear. | `0` |
+| `xcrun stapler validate` | Ends with `The validate action worked!`. | `0` |
+
+Without `--verbose=2`, `codesign` normally prints nothing on success. An exit code of `0` indicates that verification passed.
+Run `echo $?` immediately after each command you want to check. A nonzero exit code means verification failed; resolve the reported error and check again.
+These commands verify the signature and the attached notarization ticket; they do not sign or notarize the app.
+After both checks pass, still verify installation and launching through Steam in STEP6.
+
+Reference: [Apple's signature verification instructions](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html).
 
 ### STEP6: Configure launching, upload and test
 
@@ -499,13 +561,21 @@ No Web/Electron rebuild or prior `--steam-manifest` command is needed.
 # Local validation only: no SteamCMD, credentials or Steam connection required
 npx @next2d/builder --steam-upload --env prd --dry-run
 
-# After validation, upload to the configured branch
+# After STEP4's SteamCMD login exits normally, upload to the configured branch in the same terminal
 npx @next2d/builder --steam-upload --env prd
+```
+
+Use `--steam-comment` to set an optional upload comment.
+It appears as the description under "Your Builds" in Steamworks (SteamPipe's `Desc`).
+
+```sh
+npx @next2d/builder --steam-upload --env prd --steam-comment "Internal test: fix gamepad controls"
 ```
 
 | Option / setting | Purpose |
 |---|---|
 | `--steam-branch internal` | Overrides `steam.branch`; requests activation through `SetLive`. `default` is not allowed. Switch public release builds through Steamworks. |
+| `--steam-comment "Comment"` | Sets the upload comment. If omitted, keeps the existing `<appName> <version> (<env>, <branch>)` format. Whitespace-only text, newlines, control characters, double quotes and backslashes are not allowed. Also shown in `--dry-run` output and `upload-plan.json`. |
 | `--steam-root dist/steam` | Collected package location; defaults to `dist/steam`. Accepts an absolute path or a path relative to the game root. Specify custom output locations because uploading does not read the Vite configuration. |
 | `--dry-run` | Validates packages against configuration. Does not check Steam permissions, branches or passwords. |
 | Incompatible options | `--build` / `--preview` / `--open` / `--steam-manifest` / `--arch`. `--platform` is also unnecessary. |

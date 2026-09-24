@@ -1,16 +1,15 @@
-# Electron / Steam 書き出し / Export
+# Steam 書き出し / アップロード / Export / Upload
 
 [日本語](#日本語) | [English](#english)
 
 ## 日本語
 
-ローカル書き出しだけなら、Steamworks・SteamCMD・配布用の署名認証は不要。
+ローカルへの書き出しだけなら、Steamworks・SteamCMD・配布用の署名認証は不要。
 
 ### STEP1：対象OSの実行環境とアイコンを用意する
 
 - macOSのUniversalアプリと配布用の署名・公証はmacOS上で行う。
-- 配布する各OSで起動・入力・保存を確認できる実行環境を用意する。
-- ゲームの `src/assets/icons/` にWindows用ICO、macOS用ICNS、Linux用PNGを用意する。
+- Next2D Frameworkのテンプレートの `src/assets/icons/` にWindows用ICO、macOS用ICNS、Linux用PNGを用意する。
   テンプレートの仮アイコンは配布前に差し替える。設定の省略時の扱いはSTEP3の表を参照。
 
 #### 対応OS・CPU
@@ -21,28 +20,43 @@
 | macOS | `universal` | `x64`, `arm64`, `universal` |
 | Linux | `x64` | `x64`, `arm64` |
 
-32bit版Windows（`ia32`）には対応しない。`win32` はElectron内部のWindowsのOS名で、
-32bitを意味しない。例えば `My Game-win32-x64/` は64bit版Windows向けの成果物。
-`--platform` には `windows` または `steam:windows` を指定する。
-
-macOSの `universal` はx64とarm64を含む1つの `.app`。
-
 ### STEP2：SteamworksのApp・Depot・テスト用ブランチを用意する（Steam配布時）
 
 1. 対象アプリのSteamworks管理画面で、発行済みのApp IDを確認する。
 2. SteamPipe > DepotsでDepotを作成し、対象OSを設定する。言語共通ならAll languagesを選び、
-   開発用・販売用Packageにも対象Depotを含める。**Depot IDはApp IDから推測せず、実際の値を使う。**
+   Save Changesで保存後、公開（Publish）タブで変更を反映する。
+   開発用・テスト用・販売用Packageにも必要なDepotを含める。**Depot IDはApp IDから推測せず、実際の値を使う。**
 3. SteamPipe > Buildsで `internal` ブランチを作成し、**パスワードを設定して関係者だけに共有する。**
    名前だけでは非公開にならず、builderはブランチ作成・パスワード設定や確認を行わない。
 4. テスターにゲームと対象Depotの利用権を用意する。未発売ゲームの外部テスターには
    Release State Override（beta）キー等を使う。ブランチのパスワードだけでは利用権は付与されない。
    パスワードを第三者に共有しないよう運用し、JSONやリポジトリにも保存しない。
 
-OS別Depotと共有Depotのどちらも使用できる。共有するOSには同じDepot IDを設定し、
-Steamworks側の対象OSをAll OSesなど共有構成に合わせる。
-共有Depotは全OSのファイルを配布するため容量が増える。ValveはOS固有ファイルには別Depotを推奨する。
+#### 複数Depotの構成とbuilderの対応範囲
+
+**Steamでは1つのApp IDに複数Depotを設定できる。** OS固有ファイルはOS別Depotに分ける構成をValveが推奨している。
+
+| 構成 | Steam | 現在のbuilder |
+|---|---|---|
+| Windows / macOS / Linuxを別Depotにする | 対応。各Depotの対象OSを指定する。 | 対応。`steam.depots` の各OSに異なる発行済みIDを設定する。 |
+| 複数OSを1つのDepotにまとめる | 対応。対象OSをAll OSesなど構成に合わせる。 | 対応。対象OSに同じIDを設定する。各OSのファイルをサブディレクトリに分ける。全対象OSのファイルを配布するため容量が増える。 |
+| 一部OSだけ同じDepotにする | 対応。 | 対応。共有するOSだけ同じIDにする。 |
+| 同じOS向けに本体・共通アセット・言語などを複数Depotに分ける | 対応。複数Depotの内容をインストール時に組み合わせる。 | 未対応。各OSの値は単一のDepot IDで、配列や追加アセット用キーには対応しない。 |
+
+builderの設定可能数は各OSに1 ID、全体で最大3つの異なるID。この上限はbuilderの設定形式によるもので、Steamの上限ではない。
+OSごとの成果物を揃える手順と起動パスはSTEP5、複数Depotを1回でアップロードする手順はSTEP6を参照する。
+
+Steam側のダウンロード対象はPackageの利用権とDepotのOS・言語などの条件で決まる。
+同時にインストールするDepotで同じパスが重なると、Depot一覧の後にあるものが優先されるため、ファイルの配置を確認する。
+これらの選択条件はSteamworks側で設定し、builderのJSONからは反映しない。
+
+`internal` / `beta` はAppのビルドを選ぶブランチで、ブランチごとに別Depotを作る必要はない。
+また、この文書の「共有Depot」は同一App内で複数OSをまとめる意味。
+Steamworksの「Add Shared Depot」は別AppのDepotを参照する機能であり、builderの同一ID指定とは別の操作。
 
 [Depotの設定](https://partner.steamgames.com/doc/store/application/depots) /
+[Packageと利用権](https://partner.steamgames.com/doc/store/application/packages) /
+[複数Depotのアップロード](https://partner.steamgames.com/doc/sdk/uploading) /
 [betaブランチ](https://partner.steamgames.com/doc/store/application/branches) /
 [Steamでのテスト](https://partner.steamgames.com/doc/store/testing) /
 [Release State Overrideキー](https://partner.steamgames.com/doc/features/keys)
@@ -350,8 +364,7 @@ Local exports do not require Steamworks, SteamCMD or distribution signing creden
 ### STEP1: Prepare target environments and icons
 
 - Build macOS Universal applications and perform macOS signing/notarization on macOS.
-- Prepare an environment for each distributed OS to verify launch, input and saved data.
-- Place Windows ICO, macOS ICNS and Linux PNG icons in the game's `src/assets/icons/`.
+- Place Windows ICO, macOS ICNS and Linux PNG icons in `src/assets/icons/` in the Next2D Framework template.
   Replace template placeholders before distribution. STEP3 documents omitted icon settings.
 
 #### Supported operating systems and architectures
@@ -362,28 +375,43 @@ Local exports do not require Steamworks, SteamCMD or distribution signing creden
 | macOS | `universal` | `x64`, `arm64`, `universal` |
 | Linux | `x64` | `x64`, `arm64` |
 
-32-bit Windows (`ia32`) is not supported. `win32` is Electron's internal OS name for Windows, not a CPU bitness indicator.
-For example, `My Game-win32-x64/` is a 64-bit Windows package.
-Use `windows` or `steam:windows` for `--platform`.
-
-macOS `universal` produces one `.app` containing both x64 and arm64.
-
 ### STEP2: Prepare the Steamworks app, depots and testing branch (Steam distribution)
 
 1. Find the issued App ID in the app's Steamworks administration page.
 2. Create depots in SteamPipe > Depots and select their operating systems. Use All languages for shared language content,
-   and include the depots in development and retail Packages. **Use actual Depot IDs; do not infer them from the App ID.**
+   save with Save Changes, then apply the changes on the Publish tab.
+   Include the required depots in development, testing and retail Packages. **Use actual Depot IDs; do not infer them from the App ID.**
 3. Create an `internal` branch in SteamPipe > Builds and **set a password shared only with the intended testers.**
    The name alone does not make it private. The builder does not create branches, configure passwords or verify protection.
 4. Give testers access to the game and its depots. For external testers of an unreleased game, use Release State Override
    (beta) keys or another appropriate method. A branch password alone does not grant game access.
    Keep the password out of JSON and the repository, and ask testers not to share it with others.
 
-Separate OS depots and shared depots are supported. Assign the same Depot ID to operating systems that share a depot,
-and set its Steamworks OS selection accordingly, such as All OSes.
-Shared depots distribute every OS's files and increase download size. Valve recommends separate depots for OS-specific files.
+#### Multiple depots and builder support
+
+**Steam supports multiple depots under one App ID.** Valve recommends separate depots for OS-specific files.
+
+| Configuration | Steam | Current builder |
+|---|---|---|
+| Separate depots for Windows / macOS / Linux | Supported. Set the target OS for each depot. | Supported. Assign different issued IDs to the OS entries in `steam.depots`. |
+| One depot containing multiple operating systems | Supported. Set its OS selection accordingly, such as All OSes. | Supported. Assign the same ID to those operating systems. Files are placed in OS subdirectories. Distributing every included OS's files increases download size. |
+| Only some operating systems share a depot | Supported. | Supported. Assign the same ID only to those operating systems. |
+| Multiple depots for one OS, such as the application, common assets and languages | Supported. Their contents are combined during installation. | Not supported. Each OS accepts a single Depot ID; arrays and extra asset keys are not supported. |
+
+The builder accepts one ID per OS, for a maximum of three distinct IDs overall. This is a limit of the builder's configuration format, not a Steam limit.
+See STEP5 for collecting OS packages and launch paths, and STEP6 for uploading multiple depots in one operation.
+
+Steam selects downloads based on Package ownership and depot conditions such as OS and language.
+If simultaneously installed depots contain the same path, the depot later in the list takes priority, so check file placement.
+Configure these selection conditions in Steamworks; the builder's JSON does not apply them.
+
+`internal` / `beta` are branches that select an app build; separate depots are not required for each branch.
+In this document, a "shared depot" groups multiple operating systems within the same app.
+Steamworks' "Add Shared Depot" references a depot from another app; it is a separate operation from assigning the same ID in the builder.
 
 [Depot configuration](https://partner.steamgames.com/doc/store/application/depots) /
+[Packages and access](https://partner.steamgames.com/doc/store/application/packages) /
+[Uploading multiple depots](https://partner.steamgames.com/doc/sdk/uploading) /
 [Beta branches](https://partner.steamgames.com/doc/store/application/branches) /
 [Testing on Steam](https://partner.steamgames.com/doc/store/testing) /
 [Release State Override keys](https://partner.steamgames.com/doc/features/keys)

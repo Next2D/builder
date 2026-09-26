@@ -30,8 +30,7 @@
   "files": [
     "dist",
     "templates",
-    "docs",
-    "examples"
+    "docs"
   ],
   "repository": {
     "type": "git",

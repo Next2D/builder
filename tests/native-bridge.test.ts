@@ -4,37 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { spawnSync } from "node:child_process";
 import { readElectronConfig, createElectronPackagerOptions } from "../dist/electron-config.js";
 import { withElectronHost } from "../dist/electron-host.js";
 const require = createRequire(import.meta.url);
 const { NativeBridge, isTrustedSender } = require("../templates/electron/native-bridge.cjs");
 
-test("SDK-independent macOS example compiles and implements the native protocol", { skip: process.platform !== "darwin" }, async (t) => {
-    if (spawnSync("xcrun", ["--find", "swiftc"]).status !== 0) {
-        t.skip("Xcode Command Line Tools are required for the Swift example"); return;
-    }
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "next2d-native-example-"));
-    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-    const executable = path.join(directory, "native-helper");
-    const compiled = spawnSync("xcrun", ["swiftc", "examples/native-bridge/macos/main.swift", "-o", executable],
-        { encoding: "utf8", timeout: 60000 });
-    assert.equal(compiled.status, 0, compiled.stderr);
-    const events: Array<{ event: string }> = [];
-    const bridge = new NativeBridge(executable, ["system.info", "unknown.method"], (event: { event: string }) => events.push(event));
-    t.after(() => bridge.close());
-    const info = await bridge.request("system.info", {});
-    assert.equal(info.platform, "macos");
-    assert.ok(info.logicalProcessors > 0);
-    assert.ok(info.uptimeSeconds >= 0);
-    assert.equal(events[0].event, "system.ready");
-    await assert.rejects(bridge.request("unknown.method", null), /Unsupported method/);
-    await assert.rejects(bridge.request("system.info", { unexpected: true }), /empty parameters/);
-    assert.equal((await bridge.request("system.info", null)).platform, "macos");
-    const exited = new Promise<number | null>((resolve) => bridge.child.once("exit", resolve));
-    bridge.close();
-    assert.equal(await exited, 0);
-});
 
 test("native bundle stays outside web assets and ASAR; requires matching architecture", async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "next2d-native-test-"));

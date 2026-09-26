@@ -18,14 +18,7 @@ Next2Dアプリ → window.next2dNative → Electron IPC → ネイティブ実�
 
 ## 1. ネイティブ実行ファイルを用意する
 
-SDK不要の例として、OS情報を取得する [Swift実装](../examples/native-bridge/macos/main.swift) を同梱しています。Apple Silicon MacでXcode Command Line Toolsが利用できる場合、ゲームプロジェクトのルートで実行します。
-
-```sh
-mkdir -p native/macos-arm64
-xcrun swiftc node_modules/@next2d/builder/examples/native-bridge/macos/main.swift -O -o native/macos-arm64/native-helper
-```
-
-ローカルのbuilderを使う場合はソースパスをその `examples/native-bridge/macos/main.swift` に置き換えます。このサンプルはmacOS用です。他のOSでは同じJSONプロトコルを実装した実行ファイルを用意します。使用言語はSwiftに限定されず、C++／Rustなどでも構いません。
+後述のSidecarプロトコルを実装した実行ファイルを、アプリ側でOS・CPUごとに用意します。使用言語はC++／Rust／Swiftなどから選べます。以下の `native-helper` と `system.info` は設定・通信の説明用の名前であり、実装サンプルは同梱していません。
 
 ## 2. electron.config.json に設定する
 

@@ -1,12 +1,18 @@
-const { app, BrowserWindow, Menu, net, protocol, screen, session } = require("electron");
+const { app, BrowserWindow, Menu, net, protocol, screen, session, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { resolveAssetPath, CSP } = require("./local-assets.cjs");
 const config = require("./runtime-config.json");
+const { NativeBridge, isTrustedSender } = require("./native-bridge.cjs");
+let nativeBridge;
+const closeNativeBridge = () => nativeBridge?.close();
+process.on("exit", closeNativeBridge);
+app.on("before-quit", closeNativeBridge);
 // Keep saves in a stable user directory even if the visible game name changes.
 app.setName(config.appName);
-app.setPath("userData", path.join(app.getPath("appData"), config.appId));
+const userDataOverride = app.commandLine.getSwitchValue("user-data-dir");
+app.setPath("userData", userDataOverride ? path.resolve(userDataOverride) : path.join(app.getPath("appData"), config.appId));
 const assetRoot = app.isPackaged
     ? path.join(process.resourcesPath, "resources")
     : path.join(__dirname, "resources");
@@ -31,7 +37,11 @@ const createWindow = async () => {
         backgroundColor: "#000000",
         autoHideMenuBar: true,
         show: false,
-        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true }
+        webPreferences: {
+            nodeIntegration: false, contextIsolation: true, sandbox: true,
+            ...(config.nativeBridge ? { preload: path.join(__dirname, "preload.cjs"),
+                backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
+        }
     });
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -53,6 +63,7 @@ const createWindow = async () => {
     });
     mainWindow.webContents.on("render-process-gone", (_event, details) => {
         console.error("Renderer exited:", details.reason);
+        closeNativeBridge();
         app.exit(1);
     });
     mainWindow.once("ready-to-show", () => mainWindow.show());
@@ -85,6 +96,19 @@ app.whenReady().then(async () => {
             return new Response("Not found", { status: 404 });
         }
     });
+    if (config.nativeBridge) {
+        ipcMain.handle("next2d:native:request", (event, method, params) => {
+            if (!isTrustedSender(event, mainWindow)) throw new Error("Native bridge access denied");
+            if (!config.nativeBridge.methods.includes(method)) throw new Error("Native method not allowed");
+            if (!nativeBridge) {
+                const nativeRoot = path.join(app.isPackaged ? process.resourcesPath : __dirname, "native");
+                nativeBridge = new NativeBridge(path.join(nativeRoot, config.nativeBridge.executable), config.nativeBridge.methods, (message) => {
+                    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("next2d:native:event", message);
+                }, { cwd: nativeRoot });
+            }
+            return nativeBridge.request(method, params);
+        });
+    }
     await createWindow();
 }).catch((error) => {
     console.error(error);

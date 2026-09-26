@@ -6,6 +6,8 @@
 
 ローカル書き出しはSTEP1・3・5を実施する。Steam配布時は全STEPが必要。
 
+OS機能やネイティブSDKを別プロセスで接続する場合は [ネイティブ機能の拡張](native-bridge.md) を参照。EOSはその利用例として紹介しています。
+
 ### STEP1：環境・アイコンを用意する
 
 macOSのUniversal書き出し・署名・公証はmacOSで実行する。
@@ -74,6 +76,7 @@ Steamは複数Depotに対応。builderは各OSに1 IDまでで、一部OSだけ�
 | `steam.appId` / `steam.depots` | 配布時は `null` を実際のApp ID・Depot IDへ変更する。Depot IDをApp IDから推測しない。未設定のOSはアップロード対象外。 |
 | `steam.branch` | 反映先。既定は `internal`。 |
 | `macos.sign` / `macos.notarize` | ローカル検証は `false`、配布時は両方 `true`。 |
+| `macos.localNetworkUsageDescription` | LAN通信の利用目的。指定時のみ、メインアプリとElectron HelperのInfo.plistへ`NSLocalNetworkUsageDescription`を設定する。macOSの許可操作はユーザーが行う。 |
 
 ### STEP4：認証を用意する
 

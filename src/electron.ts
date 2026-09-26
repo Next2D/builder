@@ -8,7 +8,7 @@ import { createElectronPackagerOptions, readElectronConfig } from "./electron-co
 import type { ElectronOS } from "./electron-config.js";
 import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
-import { getElectronVersion, withElectronHost } from "./electron-host.js";
+import { getElectronVersion, withElectronHost, withElectronPackagerTemp } from "./electron-host.js";
 import { findSteamLaunch, recordSteamPackage, writeSharedSteamDepots } from "./steam.js";
 import { resolveToolPackages } from "./tool-packages.js";
 
@@ -75,14 +75,15 @@ export const buildElectron = async (): Promise<void> => {
         const { packager } = await import(pathToFileURL(require.resolve("@electron/packager")).href);
         // The generated host has no npm dependencies or native addons. Packager downloads
         // the pinned Electron runtime directly and uses its normal download cache.
-        return await packager({
+        return await withElectronPackagerTemp(async (tmpdir) => await packager({
             ...options, dir, ...target,
+            tmpdir,
             "out": outDir,
             "electronVersion": getElectronVersion(),
             "overwrite": true,
             "prune": false
-        }) as string[];
-    });
+        }) as string[]);
+    }, `${os}-${target.arch}`);
     if (steam) {
         for (const content of outputPaths) {
             recordSteamPackage(content, ctx.platform, target.arch, config, version);

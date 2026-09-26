@@ -32,6 +32,7 @@ Xbox対応は試作・開発段階です。
 | ガイド | 内容 |
 |---|---|
 | [Electron / Steam](docs/steam.md#日本語) | デスクトップ書き出し、アイコン、CPU、署名、Steam Depot、アップロード、ベータテスト |
+| [ネイティブ機能の拡張](docs/native-bridge.md) | OS API・任意SDKとの連携、設定、プロトコル、実装例（OS情報取得・EOS） |
 | [iOS / Android（Capacitor）](docs/capacitor.md#日本語) | ネイティブ設定、SDK、プラグイン、ビルドコマンド、移行、Xcodeの設定 |
 | [Xbox（試作）](docs/xbox.md#日本語) | 開発状況、ホスト生成、ビルド環境、検証範囲 |
 
@@ -82,6 +83,7 @@ These guides cover platform-specific configuration, dependencies, builds and dis
 | Guide | Contents |
 |---|---|
 | [Electron / Steam](docs/steam.md#english) | Desktop exports, icons, architectures, signing, Steam depots, uploads and beta testing |
+| [Native extensions (Japanese)](docs/native-bridge.md) | OS APIs and SDK integration, configuration, protocol, and examples (system information / EOS) |
 | [iOS / Android (Capacitor)](docs/capacitor.md#english) | Native configuration, SDKs, plugins, build commands, migration and Xcode setup |
 | [Xbox (prototype)](docs/xbox.md#english) | Development status, host generation, build environment and validation scope |
 

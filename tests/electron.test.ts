@@ -18,6 +18,25 @@ const fixture = (t) => {
     return root;
 };
 
+test("explicit Electron config override preserves the default release configuration", (t) => {
+    const root = fixture(t);
+    const previous = process.env.NEXT2D_ELECTRON_CONFIG_FILE;
+    t.after(() => {
+        if (previous === undefined) delete process.env.NEXT2D_ELECTRON_CONFIG_FILE;
+        else process.env.NEXT2D_ELECTRON_CONFIG_FILE = previous;
+    });
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ appName: "Release", macos: { sign: true, notarize: true } }));
+    fs.writeFileSync(path.join(root, "electron.dev.json"), JSON.stringify({ appName: "Development" }));
+    process.env.NEXT2D_ELECTRON_CONFIG_FILE = "electron.dev.json";
+    assert.equal(readElectronConfig(root).appName, "Development");
+    assert.equal(readElectronConfig(root).macos.sign, false);
+    process.env.NEXT2D_ELECTRON_CONFIG_FILE = "missing.json";
+    assert.throws(() => readElectronConfig(root), /does not exist/);
+    delete process.env.NEXT2D_ELECTRON_CONFIG_FILE;
+    assert.equal(readElectronConfig(root).appName, "Release");
+    assert.equal(readElectronConfig(root).macos.sign, true);
+});
+
 test("Steam targets use darwin, universal macOS and x64 Windows/Linux", () => {
     assert.deepEqual(resolveElectronTarget("steam:macos"), { platform: "darwin", arch: "universal" });
     assert.deepEqual(resolveElectronTarget("steam:windows"), { platform: "win32", arch: "x64" });
@@ -27,6 +46,28 @@ test("Steam targets use darwin, universal macOS and x64 Windows/Linux", () => {
     assert.throws(() => resolveElectronTarget("mas"));
     const foreign = process.platform === "win32" ? "linux" : "windows";
     assert.throws(() => resolveElectronTarget(foreign, "", true));
+});
+
+test("macOS local network purpose is opt-in and applied to the app and helpers", (t) => {
+    const root = fixture(t);
+    const description = "同じネットワークのプレイヤーとの対戦に使用します。";
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({
+        macos: { localNetworkUsageDescription: description }
+    }));
+    const config = readElectronConfig(root);
+    const options = createElectronPackagerOptions(root, config, "macos", root);
+    assert.deepEqual(options.extendInfo, { NSLocalNetworkUsageDescription: description });
+    assert.deepEqual(options.extendHelperInfo, options.extendInfo);
+    assert.equal(createElectronPackagerOptions(root, config, "windows", root).extendInfo, undefined);
+    assert.equal(createElectronPackagerOptions(root, config, "linux", root).extendHelperInfo, undefined);
+    fs.writeFileSync(path.join(root, "electron.config.json"), "{}");
+    assert.equal(createElectronPackagerOptions(root, readElectronConfig(root), "macos", root).extendInfo, undefined);
+    for (const invalid of [null, 123, "", "  ", "\0", "x".repeat(1001)]) {
+        fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({
+            macos: { localNetworkUsageDescription: invalid }
+        }));
+        assert.throws(() => readElectronConfig(root), /localNetworkUsageDescription/);
+    }
 });
 
 test("temporary host uses current metadata and assets without creating a game electron directory", async (t) => {
@@ -218,6 +259,12 @@ test("release mode requires signing and notarization credentials", (t) => {
     const options = createElectronPackagerOptions(root, config, "macos", path.join(root, "resources"));
     assert.ok(options.osxSign);
     assert.equal(options.osxSign.continueOnError, false);
+    const ignored = (file: string) => options.osxSign!.ignore.some((pattern) => new RegExp(pattern).test(file));
+    assert.equal(ignored("/game.app/Contents/Resources/resources/assets/npc.png"), true);
+    assert.equal(ignored("/game.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Resources/en.lproj/locale.pak"), true);
+    for (const file of ["/game.app", "/game.app/Contents/Resources/native/native-helper", "/game.app/Contents/Resources/native/libVendorSDK.dylib", "/game.app/Contents/MacOS/game"]) {
+        assert.equal(ignored(file), false);
+    }
     assert.deepEqual(options.osxNotarize, { keychainProfile: "test profile" });
 });
 

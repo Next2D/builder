@@ -59,7 +59,9 @@ const createWindow = async () => {
         show: false,
         ...(overlay ? {
             ...overlayBounds(), transparent: true, frame: false, resizable: false, hasShadow: false,
-            fullscreenable: false, skipTaskbar: false, backgroundColor: "#00000000"
+            fullscreenable: false, skipTaskbar: false, backgroundColor: "#00000000",
+            // The overlay must never take keyboard focus or activation from the apps under it (Word etc.).
+            focusable: false
         } : {}),
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
@@ -104,7 +106,7 @@ const createWindow = async () => {
         closeNativeBridge();
         app.exit(1);
     });
-    mainWindow.once("ready-to-show", () => mainWindow.show());
+    mainWindow.once("ready-to-show", () => (overlay ? mainWindow.showInactive() : mainWindow.show()));
     await mainWindow.loadURL(startURL);
 };
 

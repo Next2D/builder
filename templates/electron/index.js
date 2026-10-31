@@ -24,25 +24,63 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 const startURL = "next2d://game/index.html";
+const overlay = config.window.overlay?.enabled ? config.window.overlay : null;
 let mainWindow;
+// Bottom anchor: flush with the primary display's work area (above the taskbar/Dock), centred.
+const overlayBounds = () => {
+    const { workArea } = screen.getPrimaryDisplay();
+    const width = Math.min(config.window.width, workArea.width);
+    const height = Math.min(config.window.height, workArea.height);
+    return {
+        x: workArea.x + Math.floor((workArea.width - width) / 2),
+        y: workArea.y + workArea.height - height,
+        width, height
+    };
+};
+const placeOverlay = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setBounds(overlayBounds());
+};
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    // The preload reads these flags; each API is exposed only when its feature is configured.
+    const preloadFlags = [
+        ...(config.nativeBridge ? ["--next2d-native-bridge"] : []),
+        ...(overlay ? ["--next2d-overlay"] : [])
+    ];
     mainWindow = new BrowserWindow({
         width: Math.min(config.window.width, width),
         height: Math.min(config.window.height, height),
         title: config.appName,
-        fullscreen: config.window.fullscreen,
+        fullscreen: overlay ? false : config.window.fullscreen,
         ...(config.icon ? { icon: path.join(assetRoot, config.icon) } : {}),
         useContentSize: true,
         backgroundColor: "#000000",
         autoHideMenuBar: true,
         show: false,
+        ...(overlay ? {
+            ...overlayBounds(), transparent: true, frame: false, resizable: false, hasShadow: false,
+            fullscreenable: false, skipTaskbar: false, backgroundColor: "#00000000"
+        } : {}),
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
-            ...(config.nativeBridge ? { preload: path.join(__dirname, "preload.cjs"),
-                backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
+            ...(preloadFlags.length ? { preload: path.join(__dirname, "preload.cjs"), additionalArguments: preloadFlags } : {}),
+            ...(config.nativeBridge ? { backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
         }
     });
+    if (overlay) {
+        mainWindow.setAlwaysOnTop(true, "floating");
+        if (process.platform === "darwin") {
+            mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        }
+        if (overlay.clickThrough) {
+            mainWindow.setIgnoreMouseEvents(true, { forward: true });
+        }
+        const events = ["display-metrics-changed", "display-added", "display-removed"];
+        for (const name of events) screen.on(name, placeOverlay);
+        mainWindow.once("closed", () => {
+            for (const name of events) screen.removeListener(name, placeOverlay);
+        });
+    }
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     mainWindow.webContents.on("will-navigate", (event, url) => {
         if (!resolveAssetPath(assetRoot, url)) {
@@ -50,7 +88,7 @@ const createWindow = async () => {
         }
     });
     mainWindow.webContents.on("before-input-event", (event, input) => {
-        if (input.type !== "keyDown") {
+        if (input.type !== "keyDown" || overlay) {
             return;
         }
         if (input.key === "F11" || (input.alt && input.key === "Enter")) {
@@ -75,9 +113,9 @@ app.whenReady().then(async () => {
         { role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }
     ]) : null);
     session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => {
-        callback(permission === "fullscreen");
+        callback(!overlay && permission === "fullscreen");
     });
-    session.defaultSession.setPermissionCheckHandler((_contents, permission) => permission === "fullscreen");
+    session.defaultSession.setPermissionCheckHandler((_contents, permission) => !overlay && permission === "fullscreen");
     protocol.handle("next2d", async (request) => {
         let asset = resolveAssetPath(assetRoot, request.url);
         if (!asset || request.method !== "GET") {
@@ -107,6 +145,26 @@ app.whenReady().then(async () => {
                 }, { cwd: nativeRoot });
             }
             return nativeBridge.request(method, params);
+        });
+    }
+    if (overlay) {
+        const trusted = (event) => {
+            if (!isTrustedSender(event, mainWindow)) throw new Error("Window API access denied");
+        };
+        ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {
+            trusted(event);
+            if (typeof ignore !== "boolean") throw new TypeError("ignore must be a boolean");
+            mainWindow.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
+        });
+        ipcMain.handle("next2d:window:get-bounds", (event) => {
+            trusted(event);
+            const bounds = mainWindow.getBounds();
+            return { ...bounds, scaleFactor: screen.getDisplayMatching(bounds).scaleFactor };
+        });
+        ipcMain.handle("next2d:window:quit", (event) => {
+            trusted(event);
+            // Reply before the window is torn down.
+            setImmediate(() => app.quit());
         });
     }
     await createWindow();

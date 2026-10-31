@@ -78,6 +78,33 @@ Steamは複数Depotに対応。builderは各OSに1 IDまでで、一部OSだけ�
 | `macos.sign` / `macos.notarize` | ローカル検証は `false`、配布時は両方 `true`。 |
 | `macos.localNetworkUsageDescription` | LAN通信の利用目的。指定時のみ、メインアプリとElectron HelperのInfo.plistへ`NSLocalNetworkUsageDescription`を設定する。macOSの許可操作はユーザーが行う。 |
 
+#### オーバーレイウィンドウ
+
+デスクトップ上に常駐するマスコット等向けに、透明・枠なし・最前面のウィンドウを作れます。`window.overlay` 未指定または `enabled: false` なら従来どおりです。
+
+```json
+"window": {
+  "width": 1920, "height": 420, "fullscreen": false,
+  "overlay": { "enabled": true, "anchor": "bottom", "clickThrough": true }
+}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `enabled` | `true` で透明・枠なし・リサイズ不可・影なし・最前面（macOSは全ワークスペース・全画面アプリ上にも表示）。タスクバーには表示。`fullscreen` は `false` 扱い、F11／Alt+Enterは無効。既定 `false` |
+| `anchor` | `"bottom"` のみ（既定）。主ディスプレイの作業領域（タスクバー・Dockを除く）の下端・水平中央に配置。幅・高さは作業領域を超えない。ディスプレイ構成の変更時に再配置 |
+| `clickThrough` | `true` で起動時からクリック透過（マウス移動は届く）。既定 `false` |
+
+有効時のみ、rendererへ `window.next2dWindow` を公開します（アプリのメインフレームのみ）。
+
+```ts
+await window.next2dWindow?.setIgnoreMouseEvents(false); // キャラクター上では操作を受け付ける
+const { x, y, width, height, scaleFactor } = await window.next2dWindow.getBounds();
+await window.next2dWindow.quit();
+```
+
+Linuxの透明表示はコンポジタが必要です。
+
 ### STEP4：認証を用意する
 
 #### macOSの署名・公証
@@ -266,6 +293,33 @@ Edit the configuration at the game root. The version comes from the root `packag
 | `steam.appId` / `steam.depots` | For distribution, replace `null` with actual App/Depot IDs. Do not infer Depot IDs from the App ID. Operating systems without a Depot ID are excluded from uploading. |
 | `steam.branch` | Target branch; defaults to `internal`. |
 | `macos.sign` / `macos.notarize` | Both `false` for local testing; both `true` for distribution. |
+
+#### Overlay window
+
+Creates a transparent, frameless, always-on-top window for desktop companions and similar apps. Without `window.overlay`, or with `enabled: false`, the window behaves as before.
+
+```json
+"window": {
+  "width": 1920, "height": 420, "fullscreen": false,
+  "overlay": { "enabled": true, "anchor": "bottom", "clickThrough": true }
+}
+```
+
+| Field | Behaviour |
+|---|---|
+| `enabled` | `true` makes the window transparent, frameless, non-resizable, shadowless and always on top (on macOS also on every workspace and above fullscreen apps). It stays in the taskbar. `fullscreen` is treated as `false`; F11 / Alt+Enter are disabled. Default `false`. |
+| `anchor` | Only `"bottom"` (default): bottom edge of the primary display's work area (excluding taskbar/Dock), centred horizontally, never larger than the work area. Repositioned when displays change. |
+| `clickThrough` | `true` starts with mouse clicks passing through (mouse moves are still forwarded). Default `false`. |
+
+Only when enabled, the renderer gets `window.next2dWindow` (app main frame only):
+
+```ts
+await window.next2dWindow?.setIgnoreMouseEvents(false); // accept input while over the character
+const { x, y, width, height, scaleFactor } = await window.next2dWindow.getBounds();
+await window.next2dWindow.quit();
+```
+
+Transparency on Linux requires a compositor.
 
 ### STEP4: Prepare credentials
 

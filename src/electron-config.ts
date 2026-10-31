@@ -6,6 +6,7 @@ import { validateNativeBridge } from "./electron-native.js";
 import type { INativeBridgeConfig } from "./electron-native.js";
 
 export type ElectronOS = "windows" | "macos" | "linux";
+export interface IElectronOverlayConfig { enabled: boolean; anchor: "bottom"; clickThrough: boolean }
 export interface IElectronConfig {
     nativeBridge?: INativeBridgeConfig;
     appId: string;
@@ -15,7 +16,7 @@ export interface IElectronConfig {
     companyName: string;
     icons: Partial<Record<ElectronOS, string>>;
     architectures: Partial<Record<ElectronOS, string>>;
-    window: { width: number; height: number; fullscreen: boolean };
+    window: { width: number; height: number; fullscreen: boolean; overlay?: IElectronOverlayConfig };
     steam?: { appId: string | null; depots: Partial<Record<ElectronOS, string | null>>; branch?: string };
     macos: { sign: boolean; notarize: boolean; localNetworkUsageDescription?: string };
 }
@@ -72,6 +73,24 @@ export const readElectronConfig = (root: string): IElectronConfig => {
     for (const value of [config.window.fullscreen, config.macos.sign, config.macos.notarize]) {
         if (typeof value !== "boolean") {
             throw new Error("Electron fullscreen/sign/notarize options must be booleans.");
+        }
+    }
+    const overlay: Partial<IElectronOverlayConfig> | undefined = config.window.overlay;
+    if (overlay !== undefined) {
+        if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) {
+            throw new Error("electron.config.json window.overlay must be an object.");
+        }
+        config.window.overlay = { "enabled": false, "anchor": "bottom", "clickThrough": false, ...overlay };
+        const { enabled, anchor, clickThrough } = config.window.overlay;
+        if (typeof enabled !== "boolean" || typeof clickThrough !== "boolean") {
+            throw new Error("electron.config.json window.overlay.enabled/clickThrough must be booleans.");
+        }
+        if (anchor !== "bottom") {
+            throw new Error("electron.config.json window.overlay.anchor must be \"bottom\".");
+        }
+        // A transparent desktop overlay is never a fullscreen game window.
+        if (enabled) {
+            config.window.fullscreen = false;
         }
     }
     if (config.macos.notarize && !config.macos.sign) {

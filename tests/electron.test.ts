@@ -62,6 +62,15 @@ test("macOS local network purpose is opt-in and applied to the app and helpers",
     assert.equal(createElectronPackagerOptions(root, config, "linux", root).extendHelperInfo, undefined);
     fs.writeFileSync(path.join(root, "electron.config.json"), "{}");
     assert.equal(createElectronPackagerOptions(root, readElectronConfig(root), "macos", root).extendInfo, undefined);
+    // An overlay is packaged as an agent app (no Dock icon until the running instance shows it).
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ window: { overlay: { enabled: true } } }));
+    const overlay = createElectronPackagerOptions(root, readElectronConfig(root), "macos", root);
+    assert.deepEqual(overlay.extendInfo, { LSUIElement: true });
+    assert.equal(overlay.extendHelperInfo, undefined);
+    assert.equal(createElectronPackagerOptions(root, readElectronConfig(root), "windows", root).extendInfo, undefined);
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ window: { overlay: { enabled: true } }, macos: { localNetworkUsageDescription: description } }));
+    assert.deepEqual(createElectronPackagerOptions(root, readElectronConfig(root), "macos", root).extendInfo, { NSLocalNetworkUsageDescription: description, LSUIElement: true });
+    fs.writeFileSync(path.join(root, "electron.config.json"), "{}");
     for (const invalid of [null, 123, "", "  ", "\0", "x".repeat(1001)]) {
         fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({
             macos: { localNetworkUsageDescription: invalid }

@@ -62,7 +62,7 @@ const fakeElectron = (options = {}) => {
         app: {
             isPackaged: false, commandLine: { getSwitchValue: () => "", hasSwitch: () => false }, setName() {}, setPath() {},
             requestSingleInstanceLock: () => { calls.push(["requestSingleInstanceLock"]); return options.lock !== false; },
-            dock: { hide: () => calls.push(["dock.hide"]) },
+            dock: { hide: () => calls.push(["dock.hide"]), show: () => calls.push(["dock.show"]) },
             getPath: () => os.tmpdir(), on: (name, cb) => appListeners.set(name, cb), quit: () => calls.push(["quit"]), exit: (code) => calls.push(["exit", code]),
             whenReady: () => new Promise((resolve) => { ready = resolve; })
         },
@@ -235,6 +235,9 @@ test("a desktop overlay runs once: a second launch quits before any window or Do
     const first = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
     assert.equal(first.windows.length, 1);
     assert.equal(first.calls.some(([name]) => name === "exit"), false);
+    // The running instance shows its Dock icon itself (the app is packaged as an agent app).
+    assert.equal(first.calls.some(([name]) => name === "dock.show"), process.platform === "darwin");
+    assert.equal(denied.calls.some(([name]) => name === "dock.show"), false);
     first.calls.length = 0;
     first.appListeners.get("second-instance")();
     assert.deepEqual(first.calls.filter(([name]) => name === "setAlwaysOnTop"), [["setAlwaysOnTop", true, "floating"]]);

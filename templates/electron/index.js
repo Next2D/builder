@@ -144,6 +144,9 @@ const createWindow = async () => {
 
 app.whenReady().then(async () => {
     if (!hasLock) return;
+    // The overlay app is packaged as an agent app (LSUIElement) so a second launch never shows a Dock icon;
+    // the instance that keeps running shows it.
+    if (process.platform === "darwin" && overlay) app.dock?.show();
     Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
         { role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }
     ]) : null);

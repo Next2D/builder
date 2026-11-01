@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, net, protocol, screen, session, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, net, powerMonitor, protocol, screen, session, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
@@ -26,6 +26,8 @@ protocol.registerSchemesAsPrivileged([{
 const startURL = "next2d://game/index.html";
 const overlay = config.window.overlay?.enabled ? config.window.overlay : null;
 let mainWindow;
+// The last click-through state asked for, so it can be applied again after sleep/lock.
+let overlayIgnore = Boolean(config.window.overlay?.enabled && config.window.overlay.clickThrough);
 // Bottom anchor: flush with the primary display's work area (above the taskbar/Dock), centred.
 const overlayBounds = () => {
     const { workArea } = screen.getPrimaryDisplay();
@@ -156,6 +158,7 @@ app.whenReady().then(async () => {
         ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {
             trusted(event);
             if (typeof ignore !== "boolean") throw new TypeError("ignore must be a boolean");
+            overlayIgnore = ignore;
             mainWindow.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
         });
         ipcMain.handle("next2d:window:get-bounds", (event) => {
@@ -163,6 +166,17 @@ app.whenReady().then(async () => {
             const bounds = mainWindow.getBounds();
             return { ...bounds, scaleFactor: screen.getDisplayMatching(bounds).scaleFactor };
         });
+        // After sleep or screen lock the OS can drop the mouse-forwarding hook and reset the window's
+        // z-order/bounds. Apply the overlay state again and tell the page so it can recover too.
+        const recoverOverlay = () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            mainWindow.setAlwaysOnTop(true, "floating");
+            placeOverlay();
+            mainWindow.setIgnoreMouseEvents(false);
+            mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
+            mainWindow.webContents.send("next2d:window:resume");
+        };
+        for (const name of ["resume", "unlock-screen"]) powerMonitor.on(name, () => setTimeout(recoverOverlay, 1000));
         ipcMain.handle("next2d:window:quit", (event) => {
             trusted(event);
             // Reply before the window is torn down.

@@ -21,6 +21,13 @@ if (flags.has("--next2d-overlay")) {
             await ipcRenderer.invoke("next2d:window:set-ignore-mouse-events", ignore);
         },
         getBounds: () => ipcRenderer.invoke("next2d:window:get-bounds"),
-        quit: async () => { await ipcRenderer.invoke("next2d:window:quit"); }
+        quit: async () => { await ipcRenderer.invoke("next2d:window:quit"); },
+        // Fires after the PC wakes from sleep or the screen is unlocked (the overlay state was applied again).
+        onResume: (listener) => {
+            if (typeof listener !== "function") throw new TypeError("Expected resume listener");
+            const handler = () => listener();
+            ipcRenderer.on("next2d:window:resume", handler);
+            return () => ipcRenderer.removeListener("next2d:window:resume", handler);
+        }
     });
 }

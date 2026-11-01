@@ -32,6 +32,7 @@ const fakeElectron = () => {
     const listeners = new Map();
     const handlers = new Map();
     const calls = [];
+    const powerListeners = new Map();
     const windows = [];
     let ready;
     const display = { workArea: { x: 0, y: 25, width: 1440, height: 875 }, workAreaSize: { width: 1440, height: 875 }, scaleFactor: 2 };
@@ -39,7 +40,7 @@ const fakeElectron = () => {
         constructor(options) {
             this.options = options;
             this.bounds = { x: options.x ?? 0, y: options.y ?? 0, width: options.width, height: options.height };
-            this.webContents = { setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send() {}, mainFrame: {} };
+            this.webContents = { setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
             windows.push(this);
         }
         setAlwaysOnTop(...args) { calls.push(["setAlwaysOnTop", ...args]); }
@@ -61,6 +62,7 @@ const fakeElectron = () => {
         },
         BrowserWindow,
         Menu: { setApplicationMenu() {}, buildFromTemplate: () => ({}) },
+        powerMonitor: { on: (name, cb) => powerListeners.set(name, cb) },
         net: {}, protocol: { registerSchemesAsPrivileged() {}, handle() {} },
         screen: {
             getPrimaryDisplay: () => display, getDisplayMatching: () => display,
@@ -69,7 +71,7 @@ const fakeElectron = () => {
         session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler: (cb) => calls.push(["permissionCheck", cb]) } },
         ipcMain: { handle: (name, cb) => handlers.set(name, cb) }
     };
-    return { electron, listeners, handlers, calls, windows, display, start: async () => { ready(); await new Promise((r) => setImmediate(r)); } };
+    return { electron, listeners, powerListeners, handlers, calls, windows, display, start: async () => { ready(); await new Promise((r) => setImmediate(r)); } };
 };
 
 const startHost = async (t, config) => {
@@ -101,7 +103,7 @@ test("overlay defaults and validation", (t) => {
 
 test("existing window behaviour is unchanged without an enabled overlay", async (t) => {
     for (const config of [{}, { window: { overlay: { enabled: false, clickThrough: true } } }]) {
-        const { windows, calls, handlers, listeners } = await startHost(t, config);
+        const { windows, calls, handlers, listeners, powerListeners } = await startHost(t, config);
         const { options } = windows[0];
         assert.equal(options.transparent, undefined);
         assert.equal(options.frame, undefined);
@@ -111,6 +113,7 @@ test("existing window behaviour is unchanged without an enabled overlay", async 
         assert.equal(calls.some(([name]) => /^set(AlwaysOnTop|IgnoreMouseEvents)$/.test(name)), false);
         assert.equal(handlers.size, 0);
         assert.equal(listeners.size, 0);
+        assert.equal(powerListeners.size, 0);
         const check = calls.find(([name]) => name === "permissionCheck")[1];
         assert.equal(check(null, "fullscreen"), true);
     }
@@ -189,8 +192,28 @@ test("preload exposes each renderer API only for its configured feature", (t) =>
                 assert.equal(await exposed.next2dWindow.setIgnoreMouseEvents(true), undefined);
                 assert.deepEqual(await exposed.next2dWindow.getBounds(), { x: 1 });
                 assert.equal(await exposed.next2dWindow.quit(), undefined);
+                assert.equal(typeof exposed.next2dWindow.onResume(() => {}), "function");
+                assert.throws(() => exposed.next2dWindow.onResume("x"), TypeError);
                 assert.deepEqual(invoked, [["next2d:window:set-ignore-mouse-events", true], ["next2d:window:get-bounds"], ["next2d:window:quit"]]);
             });
         }
     }
+});
+
+test("overlay is applied again and the page is told after sleep or unlock", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { powerListeners, handlers, calls, windows } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    assert.deepEqual([...powerListeners.keys()].sort(), ["resume", "unlock-screen"]);
+    // The page last asked for "capture clicks" (the pointer is over the pet), then the PC slept.
+    const trusted = { sender: windows[0].webContents, senderFrame: Object.assign(windows[0].webContents.mainFrame, { url: "next2d://game/index.html" }) };
+    handlers.get("next2d:window:set-ignore-mouse-events")(trusted, false);
+    calls.length = 0;
+    powerListeners.get("resume")();
+    t.mock.timers.tick(1000);
+    assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|setIgnoreMouseEvents|send)$/.test(name)), [
+        ["setAlwaysOnTop", true, "floating"],
+        ["setIgnoreMouseEvents", false],
+        ["setIgnoreMouseEvents", false, undefined],
+        ["send", "next2d:window:resume"]
+    ]);
 });

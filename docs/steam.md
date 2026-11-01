@@ -101,7 +101,11 @@ Steamは複数Depotに対応。builderは各OSに1 IDまでで、一部OSだけ�
 await window.next2dWindow?.setIgnoreMouseEvents(false); // キャラクター上では操作を受け付ける
 const { x, y, width, height, scaleFactor } = await window.next2dWindow.getBounds();
 await window.next2dWindow.quit();
+// スリープ復帰・画面ロック解除のあとに呼ばれる（重ね表示の状態は再適用済み。ページ側の状態を合わせ直す）
+const off = window.next2dWindow.onResume(() => { /* 状態の再送など */ });
 ```
+
+重ね表示が有効なときは、アプリは**1つだけ**起動します（2つ目の起動はすぐに終了します。macOSではDockにアイコンも出しません）。開発中に複数起動したいときは `--next2d-allow-multiple` を付けて起動します。
 
 Linuxの透明表示はコンポジタが必要です。
 
@@ -317,7 +321,11 @@ Only when enabled, the renderer gets `window.next2dWindow` (app main frame only)
 await window.next2dWindow?.setIgnoreMouseEvents(false); // accept input while over the character
 const { x, y, width, height, scaleFactor } = await window.next2dWindow.getBounds();
 await window.next2dWindow.quit();
+// Called after the PC wakes from sleep or the screen is unlocked (the overlay state was applied again; resync the page)
+const off = window.next2dWindow.onResume(() => { /* resend state, etc. */ });
 ```
+
+With the overlay enabled the app runs **once**: a second launch quits at once (and, on macOS, never shows a Dock icon). Start with `--next2d-allow-multiple` to run several copies while developing.
 
 Transparency on Linux requires a compositor.
 

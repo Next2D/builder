@@ -41,7 +41,7 @@ const fakeElectron = (options = {}) => {
         constructor(options) {
             this.options = options;
             this.bounds = { x: options.x ?? 0, y: options.y ?? 0, width: options.width, height: options.height };
-            this.webContents = { reloadIgnoringCache: () => calls.push(["reloadIgnoringCache"]), setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
+            this.webContents = { executeJavaScript: async (script) => { calls.push(["executeJavaScript", script.slice(0, 20)]); return "{\"moves\":1}"; }, reloadIgnoringCache: () => calls.push(["reloadIgnoringCache"]), setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
             windows.push(this);
         }
         setAlwaysOnTop(...args) { calls.push(["setAlwaysOnTop", ...args]); }
@@ -53,6 +53,7 @@ const fakeElectron = (options = {}) => {
         isFullScreen() { return false; }
         isDestroyed() { return false; }
         isVisible() { return true; }
+        isAlwaysOnTop() { return true; }
         moveTop() { calls.push(["moveTop"]); }
         showInactive() { calls.push(["showInactive"]); }
         once(name, cb) { this.onceListeners = { ...this.onceListeners, [name]: cb }; }
@@ -298,4 +299,39 @@ test("after sleep the renderer is loaded again (the GPU may have been reset); un
     assert.deepEqual(calls.filter(([name]) => name === "setIgnoreMouseEvents").at(-1), ["setIgnoreMouseEvents", true, { forward: true }]);
     const log = fs.readFileSync(diagnostics, "utf8");
     for (const word of ["unlock-screen", "suspend", "resume", "reload renderer (resume)"]) assert.match(log, new RegExp(word.replace(/[()]/g, "\\$&")));
+});
+
+test("the page's mouse event counts are written to the diagnostics log when they change", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
+    fs.rmSync(diagnostics, { force: true });
+    t.after(() => fs.rmSync(diagnostics, { force: true }));
+    const { calls } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const loaded = calls.find(([name, event]) => name === "webContents.on" && event === "did-finish-load")[2];
+    loaded();
+    assert.ok(calls.some(([name, script]) => name === "executeJavaScript" && /__n2dDiag|\(\(\) =>/.test(script)));
+    t.mock.timers.tick(5000);
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(5000);
+    await new Promise((resolve) => setImmediate(resolve));
+    const log = fs.readFileSync(diagnostics, "utf8");
+    assert.match(log, /renderer loaded/);
+    assert.equal((log.match(/renderer \{"moves":1\} ignore=true onTop=true/g) ?? []).length, 1);
+});
+
+test("game errors and denied window requests are written to the diagnostics log", async (t) => {
+    const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
+    fs.rmSync(diagnostics, { force: true });
+    t.after(() => fs.rmSync(diagnostics, { force: true }));
+    const { calls, handlers } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const consoleMessage = calls.find(([name, event]) => name === "webContents.on" && event === "console-message")[2];
+    consoleMessage({ level: "error", message: "Error: boom" });
+    consoleMessage({ level: "info", message: "ignored" });
+    consoleMessage({}, 3, "legacy error");
+    assert.throws(() => handlers.get("next2d:window:set-ignore-mouse-events")({ sender: {}, senderFrame: { url: "https://example.com/" } }, true), /access denied/);
+    const log = fs.readFileSync(diagnostics, "utf8");
+    assert.match(log, /console error: Error: boom/);
+    assert.doesNotMatch(log, /ignored/);
+    assert.match(log, /console 3: legacy error/);
+    assert.match(log, /window API access denied \(frame url: https:\/\/example.com\/\)/);
 });

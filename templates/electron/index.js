@@ -51,6 +51,21 @@ const overlayBounds = () => {
 const placeOverlay = () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setBounds(overlayBounds());
 };
+// The overlay never takes focus, so Windows does not raise it when another topmost window (the taskbar, another
+// always-on-top app) is activated, nor after the display is turned off and on. Put it back on top.
+const keepOnTop = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setAlwaysOnTop(true, "floating");
+    mainWindow.moveTop();
+};
+// Windows forwards mouse moves to a click-through window with a system mouse hook, and Electron installs it only
+// when forwarding switches on. After sleep (closing the lid) the hook can be gone while Electron still thinks it is
+// installed, so the page never sees the pointer. Switching forwarding off and on again installs a fresh hook.
+const refreshForwarding = () => {
+    if (!overlayIgnore || !mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setIgnoreMouseEvents(false);
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+};
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     // The preload reads these flags; each API is exposed only when its feature is configured.
@@ -89,10 +104,16 @@ const createWindow = async () => {
             mainWindow.setIgnoreMouseEvents(true, { forward: true });
         }
         const events = ["display-metrics-changed", "display-added", "display-removed"];
-        for (const name of events) screen.on(name, placeOverlay);
+        const onDisplayChange = () => { placeOverlay(); keepOnTop(); };
+        for (const name of events) screen.on(name, onDisplayChange);
         mainWindow.once("closed", () => {
-            for (const name of events) screen.removeListener(name, placeOverlay);
+            for (const name of events) screen.removeListener(name, onDisplayChange);
         });
+        if (process.platform === "win32") {
+            const timer = setInterval(() => { keepOnTop(); refreshForwarding(); }, 3000);
+            timer.unref?.();
+            mainWindow.once("closed", () => clearInterval(timer));
+        }
     }
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -180,7 +201,7 @@ app.whenReady().then(async () => {
         // z-order/bounds. Apply the overlay state again and tell the page so it can recover too.
         const recoverOverlay = () => {
             if (!mainWindow || mainWindow.isDestroyed()) return;
-            mainWindow.setAlwaysOnTop(true, "floating");
+            keepOnTop();
             placeOverlay();
             mainWindow.setIgnoreMouseEvents(false);
             mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);

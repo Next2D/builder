@@ -28,11 +28,12 @@ const loadWithElectron = (t, file, electron) => {
     require(file);
 };
 
-const fakeElectron = () => {
+const fakeElectron = (options = {}) => {
     const listeners = new Map();
     const handlers = new Map();
     const calls = [];
     const powerListeners = new Map();
+    const appListeners = new Map();
     const windows = [];
     let ready;
     const display = { workArea: { x: 0, y: 25, width: 1440, height: 875 }, workAreaSize: { width: 1440, height: 875 }, scaleFactor: 2 };
@@ -51,13 +52,17 @@ const fakeElectron = () => {
         setFullScreen(value) { calls.push(["setFullScreen", value]); }
         isFullScreen() { return false; }
         isDestroyed() { return false; }
+        isVisible() { return true; }
+        showInactive() { calls.push(["showInactive"]); }
         once() {}
         async loadURL() {}
     }
     const electron = {
         app: {
-            isPackaged: false, commandLine: { getSwitchValue: () => "" }, setName() {}, setPath() {},
-            getPath: () => os.tmpdir(), on() {}, quit: () => calls.push(["quit"]), exit: (code) => calls.push(["exit", code]),
+            isPackaged: false, commandLine: { getSwitchValue: () => "", hasSwitch: () => false }, setName() {}, setPath() {},
+            requestSingleInstanceLock: () => { calls.push(["requestSingleInstanceLock"]); return options.lock !== false; },
+            dock: { hide: () => calls.push(["dock.hide"]) },
+            getPath: () => os.tmpdir(), on: (name, cb) => appListeners.set(name, cb), quit: () => calls.push(["quit"]), exit: (code) => calls.push(["exit", code]),
             whenReady: () => new Promise((resolve) => { ready = resolve; })
         },
         BrowserWindow,
@@ -71,16 +76,16 @@ const fakeElectron = () => {
         session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler: (cb) => calls.push(["permissionCheck", cb]) } },
         ipcMain: { handle: (name, cb) => handlers.set(name, cb) }
     };
-    return { electron, listeners, powerListeners, handlers, calls, windows, display, start: async () => { ready(); await new Promise((r) => setImmediate(r)); } };
+    return { electron, listeners, powerListeners, appListeners, handlers, calls, windows, display, start: async () => { ready(); await new Promise((r) => setImmediate(r)); } };
 };
 
-const startHost = async (t, config) => {
+const startHost = async (t, config, options = {}) => {
     const root = fixture(t, config);
     fs.writeFileSync(path.join(root, "index.html"), "hello");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "next2d overlay host "));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
     await withElectronHost(root, root, readElectronConfig(root), async (host) => fs.cpSync(host, dir, { recursive: true }));
-    const fake = fakeElectron();
+    const fake = fakeElectron(options);
     loadWithElectron(t, path.join(dir, "index.js"), fake.electron);
     await fake.start();
     return { ...fake, runtime: JSON.parse(fs.readFileSync(path.join(dir, "runtime-config.json"), "utf8")) };
@@ -216,4 +221,26 @@ test("overlay is applied again and the page is told after sleep or unlock", asyn
         ["setIgnoreMouseEvents", false, undefined],
         ["send", "next2d:window:resume"]
     ]);
+});
+
+test("a desktop overlay runs once: a second launch quits before any window or Dock icon", async (t) => {
+    const denied = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } }, { lock: false });
+    assert.equal(denied.windows.length, 0);
+    assert.deepEqual(denied.calls.filter(([name]) => /^(requestSingleInstanceLock|exit|dock\.hide)$/.test(name)),
+        process.platform === "darwin"
+            ? [["requestSingleInstanceLock"], ["dock.hide"], ["exit", 0]]
+            : [["requestSingleInstanceLock"], ["exit", 0]]);
+
+    const first = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    assert.equal(first.windows.length, 1);
+    assert.equal(first.calls.some(([name]) => name === "exit"), false);
+    first.calls.length = 0;
+    first.appListeners.get("second-instance")();
+    assert.deepEqual(first.calls.filter(([name]) => name === "setAlwaysOnTop"), [["setAlwaysOnTop", true, "floating"]]);
+});
+
+test("a game without the overlay is not limited to one instance", async (t) => {
+    const { calls, appListeners } = await startHost(t, {});
+    assert.equal(calls.some(([name]) => name === "requestSingleInstanceLock"), false);
+    assert.equal(appListeners.has("second-instance"), false);
 });

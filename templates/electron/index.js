@@ -13,6 +13,15 @@ app.on("before-quit", closeNativeBridge);
 app.setName(config.appName);
 const userDataOverride = app.commandLine.getSwitchValue("user-data-dir");
 app.setPath("userData", userDataOverride ? path.resolve(userDataOverride) : path.join(app.getPath("appData"), config.appId));
+
+// A desktop overlay (a pet that stays on screen) must run once. A second launch quits at once (macOS: before
+// it can show a Dock icon). The lock is tied to the userData path set above, so it needs to come after it.
+const singleInstance = !app.commandLine.hasSwitch("next2d-allow-multiple") && Boolean(config.window.overlay?.enabled);
+const hasLock = !singleInstance || app.requestSingleInstanceLock();
+if (!hasLock) {
+    if (process.platform === "darwin") app.dock?.hide();
+    app.exit(0);
+}
 const assetRoot = app.isPackaged
     ? path.join(process.resourcesPath, "resources")
     : path.join(__dirname, "resources");
@@ -113,6 +122,7 @@ const createWindow = async () => {
 };
 
 app.whenReady().then(async () => {
+    if (!hasLock) return;
     Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
         { role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }
     ]) : null);
@@ -188,6 +198,16 @@ app.whenReady().then(async () => {
     console.error(error);
     app.exit(1);
 });
+
+if (singleInstance && hasLock) {
+    // Launching again does nothing visible; just make sure the overlay is still shown on top.
+    app.on("second-instance", () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setAlwaysOnTop(true, "floating");
+            if (!mainWindow.isVisible()) mainWindow.showInactive();
+        }
+    });
+}
 
 // Closing the game must stop Steam's "Running" status, including on macOS.
 app.on("window-all-closed", () => app.quit());

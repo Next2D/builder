@@ -62,7 +62,7 @@ test("macOS local network purpose is opt-in and applied to the app and helpers",
     assert.equal(createElectronPackagerOptions(root, config, "linux", root).extendHelperInfo, undefined);
     fs.writeFileSync(path.join(root, "electron.config.json"), "{}");
     assert.equal(createElectronPackagerOptions(root, readElectronConfig(root), "macos", root).extendInfo, undefined);
-    // An overlay is packaged as an agent app (no Dock icon until the running instance shows it).
+    // An overlay is packaged as an agent app (never a Dock icon).
     fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ window: { overlay: { enabled: true } } }));
     const overlay = createElectronPackagerOptions(root, readElectronConfig(root), "macos", root);
     assert.deepEqual(overlay.extendInfo, { LSUIElement: true });

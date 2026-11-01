@@ -66,6 +66,50 @@ const refreshForwarding = () => {
     mainWindow.setIgnoreMouseEvents(false);
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
 };
+// A small log of power/display/GPU events (userData/diagnostics.log) to find out what happened after sleep.
+const diagnosticsFile = () => path.join(app.getPath("userData"), "diagnostics.log");
+const diag = (message) => {
+    if (!overlay) return;
+    try {
+        const file = diagnosticsFile();
+        if (fs.existsSync(file) && fs.statSync(file).size > 200000) fs.writeFileSync(file, "");
+        fs.appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
+    } catch { /* diagnostics must never break the game */ }
+};
+// After sleep (closing a laptop lid) the GPU is often reset. The renderer then keeps showing its last frame but can
+// no longer draw (the web page is not told), so the pet looks alive and menus never appear. Load the page again to
+// get a fresh GPU device. The game saves automatically, so progress is kept.
+// Counts of mouse events the page really receives (moves are forwarded while click-through; down/up only arrive
+// while the window accepts clicks). Logged when they change, to tell "clicks never reach the page" from other causes.
+const DIAG_SCRIPT = `(() => {
+    if (window.__n2dDiag) return;
+    const d = window.__n2dDiag = { moves: 0, downs: 0, ups: 0, keys: 0, last: null };
+    const mark = (name) => (event) => { d[name]++; d.last = [event.clientX, event.clientY]; };
+    addEventListener("mousemove", mark("moves"), true);
+    addEventListener("pointerdown", mark("downs"), true);
+    addEventListener("pointerup", mark("ups"), true);
+    addEventListener("keydown", () => { d.keys++; }, true);
+})()`;
+let lastSnapshot = "";
+const snapshotRenderer = async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+        const raw = await mainWindow.webContents.executeJavaScript("JSON.stringify(window.__n2dDiag || null)");
+        if (raw !== lastSnapshot) {
+            lastSnapshot = raw;
+            diag(`renderer ${raw} ignore=${overlayIgnore} onTop=${mainWindow.isAlwaysOnTop()} bounds=${JSON.stringify(mainWindow.getBounds())}`);
+        }
+    } catch (error) {
+        diag(`renderer snapshot failed: ${error?.message ?? error}`);
+    }
+};
+const reloadRenderer = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    diag("reload renderer (resume)");
+    overlayIgnore = Boolean(overlay?.clickThrough);
+    mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
+    mainWindow.webContents.reloadIgnoringCache();
+};
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     // The preload reads these flags; each API is exposed only when its feature is configured.
@@ -103,8 +147,25 @@ const createWindow = async () => {
         if (overlay.clickThrough) {
             mainWindow.setIgnoreMouseEvents(true, { forward: true });
         }
+        // Errors the game prints (a failed window request, for example) are otherwise invisible in a packaged app.
+        let consoleLogged = 0;
+        mainWindow.webContents.on("console-message", (...args) => {
+            const first = args[0];
+            const detail = first && typeof first === "object" && "message" in first ? first : { level: args[1], message: args[2] };
+            if (!["error", "warning", 2, 3].includes(detail.level) || ++consoleLogged > 200) return;
+            diag(`console ${detail.level}: ${String(detail.message).slice(0, 300)}`);
+        });
+        mainWindow.webContents.on("did-finish-load", () => {
+            diag("renderer loaded");
+            mainWindow.webContents.executeJavaScript(DIAG_SCRIPT).catch(() => {});
+        });
+        const snapshotTimer = setInterval(snapshotRenderer, 5000);
+        snapshotTimer.unref?.();
+        mainWindow.once("closed", () => clearInterval(snapshotTimer));
+        mainWindow.webContents.on("unresponsive", () => diag("renderer unresponsive"));
+        mainWindow.webContents.on("responsive", () => diag("renderer responsive"));
         const events = ["display-metrics-changed", "display-added", "display-removed"];
-        const onDisplayChange = () => { placeOverlay(); keepOnTop(); };
+        const onDisplayChange = () => { diag("display changed"); placeOverlay(); keepOnTop(); };
         for (const name of events) screen.on(name, onDisplayChange);
         mainWindow.once("closed", () => {
             for (const name of events) screen.removeListener(name, onDisplayChange);
@@ -187,7 +248,10 @@ app.whenReady().then(async () => {
     }
     if (overlay) {
         const trusted = (event) => {
-            if (!isTrustedSender(event, mainWindow)) throw new Error("Window API access denied");
+            if (!isTrustedSender(event, mainWindow)) {
+                diag(`window API access denied (frame url: ${event?.senderFrame?.url})`);
+                throw new Error("Window API access denied");
+            }
         };
         ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {
             trusted(event);
@@ -210,7 +274,18 @@ app.whenReady().then(async () => {
             mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
             mainWindow.webContents.send("next2d:window:resume");
         };
-        for (const name of ["resume", "unlock-screen"]) powerMonitor.on(name, () => setTimeout(recoverOverlay, 1000));
+        for (const name of ["suspend", "lock-screen"]) powerMonitor.on(name, () => diag(name));
+        for (const name of ["resume", "unlock-screen"]) {
+            powerMonitor.on(name, () => {
+                diag(name);
+                setTimeout(() => {
+                    recoverOverlay();
+                    // Only a resume from sleep can reset the GPU (unlocking the screen cannot).
+                    if (name === "resume") reloadRenderer();
+                }, 1000);
+            });
+        }
+        app.on("child-process-gone", (_event, details) => diag(`child-process-gone ${details.type} ${details.reason}`));
         ipcMain.handle("next2d:window:quit", (event) => {
             trusted(event);
             // Reply before the window is torn down.

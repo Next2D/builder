@@ -53,8 +53,9 @@ const fakeElectron = (options = {}) => {
         isFullScreen() { return false; }
         isDestroyed() { return false; }
         isVisible() { return true; }
+        moveTop() { calls.push(["moveTop"]); }
         showInactive() { calls.push(["showInactive"]); }
-        once() {}
+        once(name, cb) { this.onceListeners = { ...this.onceListeners, [name]: cb }; }
         async loadURL() {}
     }
     const electron = {
@@ -243,4 +244,27 @@ test("a game without the overlay is not limited to one instance", async (t) => {
     const { calls, appListeners } = await startHost(t, {});
     assert.equal(calls.some(([name]) => name === "requestSingleInstanceLock"), false);
     assert.equal(appListeners.has("second-instance"), false);
+});
+
+test("on Windows the overlay is put back on top every few seconds and when the displays change", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    t.after(() => Object.defineProperty(process, "platform", platform));
+    const { calls, listeners } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    calls.length = 0;
+    t.mock.timers.tick(3000);
+    assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|moveTop)$/.test(name)), [["setAlwaysOnTop", true, "floating"], ["moveTop"]]);
+    calls.length = 0;
+    listeners.get("display-added")();
+    assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|moveTop)$/.test(name)), [["setAlwaysOnTop", true, "floating"], ["moveTop"]]);
+});
+
+test("on other platforms there is no periodic raise", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    if (process.platform === "win32") return;
+    const { calls } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    calls.length = 0;
+    t.mock.timers.tick(10000);
+    assert.equal(calls.some(([name]) => name === "moveTop"), false);
 });

@@ -41,7 +41,7 @@ const fakeElectron = (options = {}) => {
         constructor(options) {
             this.options = options;
             this.bounds = { x: options.x ?? 0, y: options.y ?? 0, width: options.width, height: options.height };
-            this.webContents = { executeJavaScript: async (script) => { calls.push(["executeJavaScript", script.slice(0, 20)]); return "{\"moves\":1}"; }, reloadIgnoringCache: () => calls.push(["reloadIgnoringCache"]), setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
+            this.webContents = { executeJavaScript: async (script) => { calls.push(["executeJavaScript", script.slice(0, 20)]); return "{\"moves\":1}"; }, reloadIgnoringCache: () => calls.push(["reloadIgnoringCache"]), setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), removeAllListeners: (name) => calls.push(["webContents.removeAllListeners", name]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
             windows.push(this);
         }
         setAlwaysOnTop(...args) { calls.push(["setAlwaysOnTop", ...args]); }
@@ -51,7 +51,8 @@ const fakeElectron = (options = {}) => {
         getBounds() { return this.bounds; }
         setFullScreen(value) { calls.push(["setFullScreen", value]); }
         isFullScreen() { return false; }
-        isDestroyed() { return false; }
+        isDestroyed() { return Boolean(this.destroyed); }
+        destroy() { this.destroyed = true; calls.push(["destroy"]); this.onceListeners?.closed?.(); }
         isVisible() { return true; }
         isAlwaysOnTop() { return true; }
         moveTop() { calls.push(["moveTop"]); }
@@ -236,8 +237,8 @@ test("a desktop overlay runs once: a second launch quits before any window or Do
     const first = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
     assert.equal(first.windows.length, 1);
     assert.equal(first.calls.some(([name]) => name === "exit"), false);
-    // The running instance shows its Dock icon itself (the app is packaged as an agent app).
-    assert.equal(first.calls.some(([name]) => name === "dock.show"), process.platform === "darwin");
+    // The overlay is an agent app: no instance shows a Dock icon.
+    assert.equal(first.calls.some(([name]) => name === "dock.show"), false);
     assert.equal(denied.calls.some(([name]) => name === "dock.show"), false);
     first.calls.length = 0;
     first.appListeners.get("second-instance")();
@@ -280,25 +281,48 @@ test("on other platforms there is no periodic raise", async (t) => {
     assert.equal(calls.some(([name]) => name === "moveTop"), false);
 });
 
-test("after sleep the renderer is loaded again (the GPU may have been reset); unlocking the screen does not", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+test("on Windows a fresh window replaces the old one after sleep; unlocking the screen only re-applies the overlay", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    t.after(() => Object.defineProperty(process, "platform", platform));
     const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
     fs.rmSync(diagnostics, { force: true });
     t.after(() => fs.rmSync(diagnostics, { force: true }));
-    const { powerListeners, calls } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const { powerListeners, calls, windows } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
     assert.deepEqual([...powerListeners.keys()].sort(), ["lock-screen", "resume", "suspend", "unlock-screen"]);
     calls.length = 0;
     powerListeners.get("unlock-screen")();
     t.mock.timers.tick(1000);
-    assert.equal(calls.some(([name]) => name === "reloadIgnoringCache"), false);
+    assert.equal(windows.length, 1);
+    assert.ok(calls.some(([name]) => name === "send"));
     powerListeners.get("suspend")();
     powerListeners.get("resume")();
-    t.mock.timers.tick(1000);
-    assert.equal(calls.filter(([name]) => name === "reloadIgnoringCache").length, 1);
-    // Click-through starts again from the configured state after the page was reloaded.
-    assert.deepEqual(calls.filter(([name]) => name === "setIgnoreMouseEvents").at(-1), ["setIgnoreMouseEvents", true, { forward: true }]);
+    t.mock.timers.tick(3000);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    // A new window exists and the old one was closed without being treated as a crash.
+    assert.equal(windows.length, 2);
+    assert.equal(windows[0].destroyed, true);
+    assert.equal(Boolean(windows[1].destroyed), false);
+    assert.ok(calls.some(([name, event]) => name === "webContents.removeAllListeners" && event === "render-process-gone"));
+    assert.equal(calls.some(([name]) => name === "reloadIgnoringCache"), false);
+    // The new window starts click-through, like a fresh launch.
+    assert.deepEqual(windows[1].options.focusable, false);
     const log = fs.readFileSync(diagnostics, "utf8");
-    for (const word of ["unlock-screen", "suspend", "resume", "reload renderer (resume)"]) assert.match(log, new RegExp(word.replace(/[()]/g, "\\$&")));
+    for (const word of ["unlock-screen", "suspend", "resume", "recreate window \\(resume\\)"]) assert.match(log, new RegExp(word));
+});
+
+test("on other platforms a resume only re-applies the overlay (no new window, no reload)", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    if (process.platform === "win32") return;
+    const { powerListeners, calls, windows } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    calls.length = 0;
+    powerListeners.get("resume")();
+    t.mock.timers.tick(3000);
+    assert.equal(windows.length, 1);
+    assert.equal(calls.some(([name]) => name === "reloadIgnoringCache" || name === "destroy"), false);
+    assert.ok(calls.some(([name, event]) => name === "send" && event === "next2d:window:resume"));
 });
 
 test("the page's mouse event counts are written to the diagnostics log when they change", async (t) => {

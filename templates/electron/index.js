@@ -76,9 +76,6 @@ const diag = (message) => {
         fs.appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
     } catch { /* diagnostics must never break the game */ }
 };
-// After sleep (closing a laptop lid) the GPU is often reset. The renderer then keeps showing its last frame but can
-// no longer draw (the web page is not told), so the pet looks alive and menus never appear. Load the page again to
-// get a fresh GPU device. The game saves automatically, so progress is kept.
 // Counts of mouse events the page really receives (moves are forwarded while click-through; down/up only arrive
 // while the window accepts clicks). Logged when they change, to tell "clicks never reach the page" from other causes.
 const DIAG_SCRIPT = `(() => {
@@ -103,12 +100,29 @@ const snapshotRenderer = async () => {
         diag(`renderer snapshot failed: ${error?.message ?? error}`);
     }
 };
-const reloadRenderer = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    diag("reload renderer (resume)");
+// After sleep (closing a laptop lid) Windows can leave the overlay window itself broken: mouse moves are no longer
+// forwarded to it, or clicks fall through even where the pet is drawn. Reloading the page does not help (the
+// window is the same), so build a new window and close the old one. The game saves automatically, so progress is
+// kept. The new window is created first so the app never has zero windows (which would quit it).
+let recreating = false;
+const recreateWindow = async () => {
+    if (recreating || !mainWindow || mainWindow.isDestroyed()) return;
+    recreating = true;
+    diag("recreate window (resume)");
+    const old = mainWindow;
     overlayIgnore = Boolean(overlay?.clickThrough);
-    mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
-    mainWindow.webContents.reloadIgnoringCache();
+    try {
+        await createWindow();
+    } catch (error) {
+        diag(`recreate window failed: ${error?.message ?? error}`);
+    } finally {
+        recreating = false;
+        if (old !== mainWindow && !old.isDestroyed()) {
+            // Closing on purpose: do not treat the old page going away as a crash.
+            old.webContents.removeAllListeners("render-process-gone");
+            old.destroy();
+        }
+    }
 };
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
@@ -205,9 +219,8 @@ const createWindow = async () => {
 
 app.whenReady().then(async () => {
     if (!hasLock) return;
-    // The overlay app is packaged as an agent app (LSUIElement) so a second launch never shows a Dock icon;
-    // the instance that keeps running shows it.
-    if (process.platform === "darwin" && overlay) app.dock?.show();
+    // The overlay app is packaged as an agent app (LSUIElement): it never shows a Dock icon (a desktop pet stays out
+    // of the Dock and the app switcher; the game offers its own "quit").
     Menu.setApplicationMenu(process.platform === "darwin" ? Menu.buildFromTemplate([
         { role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }
     ]) : null);
@@ -278,11 +291,12 @@ app.whenReady().then(async () => {
         for (const name of ["resume", "unlock-screen"]) {
             powerMonitor.on(name, () => {
                 diag(name);
-                setTimeout(() => {
-                    recoverOverlay();
-                    // Only a resume from sleep can reset the GPU (unlocking the screen cannot).
-                    if (name === "resume") reloadRenderer();
-                }, 1000);
+                if (name === "resume" && process.platform === "win32") {
+                    // Give the GPU/display time to come back, then start over with a fresh window.
+                    setTimeout(() => { void recreateWindow(); }, 3000);
+                } else {
+                    setTimeout(recoverOverlay, 1000);
+                }
             });
         }
         app.on("child-process-gone", (_event, details) => diag(`child-process-gone ${details.type} ${details.reason}`));

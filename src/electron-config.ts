@@ -154,8 +154,7 @@ export const createElectronPackagerOptions = (
         ...os === "macos" && (config.macos.localNetworkUsageDescription || config.window.overlay?.enabled) ? {
             "extendInfo": {
                 ...config.macos.localNetworkUsageDescription ? { "NSLocalNetworkUsageDescription": config.macos.localNetworkUsageDescription } : {},
-                // An overlay starts as an agent app (no Dock icon) so that a second launch, which quits at once,
-                // never shows one. The first instance shows its Dock icon itself (templates/electron/index.js).
+                // An overlay is an agent app: no Dock icon, also for a second launch that quits at once.
                 ...config.window.overlay?.enabled ? { "LSUIElement": true } : {}
             },
             ...config.macos.localNetworkUsageDescription ? {

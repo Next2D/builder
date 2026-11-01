@@ -41,7 +41,7 @@ const fakeElectron = (options = {}) => {
         constructor(options) {
             this.options = options;
             this.bounds = { x: options.x ?? 0, y: options.y ?? 0, width: options.width, height: options.height };
-            this.webContents = { setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
+            this.webContents = { executeJavaScript: async (script) => { calls.push(["executeJavaScript", script.slice(0, 20)]); return "{\"moves\":1}"; }, reloadIgnoringCache: () => calls.push(["reloadIgnoringCache"]), setWindowOpenHandler() {}, on: (name, cb) => calls.push(["webContents.on", name, cb]), send: (...args) => calls.push(["send", ...args]), mainFrame: {} };
             windows.push(this);
         }
         setAlwaysOnTop(...args) { calls.push(["setAlwaysOnTop", ...args]); }
@@ -53,6 +53,7 @@ const fakeElectron = (options = {}) => {
         isFullScreen() { return false; }
         isDestroyed() { return false; }
         isVisible() { return true; }
+        isAlwaysOnTop() { return true; }
         moveTop() { calls.push(["moveTop"]); }
         showInactive() { calls.push(["showInactive"]); }
         once(name, cb) { this.onceListeners = { ...this.onceListeners, [name]: cb }; }
@@ -209,12 +210,12 @@ test("preload exposes each renderer API only for its configured feature", (t) =>
 test("overlay is applied again and the page is told after sleep or unlock", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const { powerListeners, handlers, calls, windows } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
-    assert.deepEqual([...powerListeners.keys()].sort(), ["resume", "unlock-screen"]);
+    assert.deepEqual([...powerListeners.keys()].sort(), ["lock-screen", "resume", "suspend", "unlock-screen"]);
     // The page last asked for "capture clicks" (the pointer is over the pet), then the PC slept.
     const trusted = { sender: windows[0].webContents, senderFrame: Object.assign(windows[0].webContents.mainFrame, { url: "next2d://game/index.html" }) };
     handlers.get("next2d:window:set-ignore-mouse-events")(trusted, false);
     calls.length = 0;
-    powerListeners.get("resume")();
+    powerListeners.get("unlock-screen")();
     t.mock.timers.tick(1000);
     assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|setIgnoreMouseEvents|send)$/.test(name)), [
         ["setAlwaysOnTop", true, "floating"],
@@ -277,4 +278,60 @@ test("on other platforms there is no periodic raise", async (t) => {
     calls.length = 0;
     t.mock.timers.tick(10000);
     assert.equal(calls.some(([name]) => name === "moveTop"), false);
+});
+
+test("after sleep the renderer is loaded again (the GPU may have been reset); unlocking the screen does not", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
+    fs.rmSync(diagnostics, { force: true });
+    t.after(() => fs.rmSync(diagnostics, { force: true }));
+    const { powerListeners, calls } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    assert.deepEqual([...powerListeners.keys()].sort(), ["lock-screen", "resume", "suspend", "unlock-screen"]);
+    calls.length = 0;
+    powerListeners.get("unlock-screen")();
+    t.mock.timers.tick(1000);
+    assert.equal(calls.some(([name]) => name === "reloadIgnoringCache"), false);
+    powerListeners.get("suspend")();
+    powerListeners.get("resume")();
+    t.mock.timers.tick(1000);
+    assert.equal(calls.filter(([name]) => name === "reloadIgnoringCache").length, 1);
+    // Click-through starts again from the configured state after the page was reloaded.
+    assert.deepEqual(calls.filter(([name]) => name === "setIgnoreMouseEvents").at(-1), ["setIgnoreMouseEvents", true, { forward: true }]);
+    const log = fs.readFileSync(diagnostics, "utf8");
+    for (const word of ["unlock-screen", "suspend", "resume", "reload renderer (resume)"]) assert.match(log, new RegExp(word.replace(/[()]/g, "\\$&")));
+});
+
+test("the page's mouse event counts are written to the diagnostics log when they change", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+    const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
+    fs.rmSync(diagnostics, { force: true });
+    t.after(() => fs.rmSync(diagnostics, { force: true }));
+    const { calls } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const loaded = calls.find(([name, event]) => name === "webContents.on" && event === "did-finish-load")[2];
+    loaded();
+    assert.ok(calls.some(([name, script]) => name === "executeJavaScript" && /__n2dDiag|\(\(\) =>/.test(script)));
+    t.mock.timers.tick(5000);
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(5000);
+    await new Promise((resolve) => setImmediate(resolve));
+    const log = fs.readFileSync(diagnostics, "utf8");
+    assert.match(log, /renderer loaded/);
+    assert.equal((log.match(/renderer \{"moves":1\} ignore=true onTop=true/g) ?? []).length, 1);
+});
+
+test("game errors and denied window requests are written to the diagnostics log", async (t) => {
+    const diagnostics = path.join(os.tmpdir(), "diagnostics.log");
+    fs.rmSync(diagnostics, { force: true });
+    t.after(() => fs.rmSync(diagnostics, { force: true }));
+    const { calls, handlers } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const consoleMessage = calls.find(([name, event]) => name === "webContents.on" && event === "console-message")[2];
+    consoleMessage({ level: "error", message: "Error: boom" });
+    consoleMessage({ level: "info", message: "ignored" });
+    consoleMessage({}, 3, "legacy error");
+    assert.throws(() => handlers.get("next2d:window:set-ignore-mouse-events")({ sender: {}, senderFrame: { url: "https://example.com/" } }, true), /access denied/);
+    const log = fs.readFileSync(diagnostics, "utf8");
+    assert.match(log, /console error: Error: boom/);
+    assert.doesNotMatch(log, /ignored/);
+    assert.match(log, /console 3: legacy error/);
+    assert.match(log, /window API access denied \(frame url: https:\/\/example.com\/\)/);
 });

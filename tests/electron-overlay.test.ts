@@ -236,8 +236,8 @@ test("a desktop overlay runs once: a second launch quits before any window or Do
     const first = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
     assert.equal(first.windows.length, 1);
     assert.equal(first.calls.some(([name]) => name === "exit"), false);
-    // The running instance shows its Dock icon itself (the app is packaged as an agent app).
-    assert.equal(first.calls.some(([name]) => name === "dock.show"), process.platform === "darwin");
+    // The overlay is an agent app: no instance shows a Dock icon.
+    assert.equal(first.calls.some(([name]) => name === "dock.show"), false);
     assert.equal(denied.calls.some(([name]) => name === "dock.show"), false);
     first.calls.length = 0;
     first.appListeners.get("second-instance")();

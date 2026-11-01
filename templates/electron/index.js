@@ -58,6 +58,14 @@ const keepOnTop = () => {
     mainWindow.setAlwaysOnTop(true, "floating");
     mainWindow.moveTop();
 };
+// Windows forwards mouse moves to a click-through window with a system mouse hook, and Electron installs it only
+// when forwarding switches on. After sleep (closing the lid) the hook can be gone while Electron still thinks it is
+// installed, so the page never sees the pointer. Switching forwarding off and on again installs a fresh hook.
+const refreshForwarding = () => {
+    if (!overlayIgnore || !mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setIgnoreMouseEvents(false);
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+};
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     // The preload reads these flags; each API is exposed only when its feature is configured.
@@ -102,7 +110,7 @@ const createWindow = async () => {
             for (const name of events) screen.removeListener(name, onDisplayChange);
         });
         if (process.platform === "win32") {
-            const timer = setInterval(keepOnTop, 3000);
+            const timer = setInterval(() => { keepOnTop(); refreshForwarding(); }, 3000);
             timer.unref?.();
             mainWindow.once("closed", () => clearInterval(timer));
         }

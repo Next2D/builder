@@ -251,10 +251,17 @@ test("on Windows the overlay is put back on top every few seconds and when the d
     const platform = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { value: "win32" });
     t.after(() => Object.defineProperty(process, "platform", platform));
-    const { calls, listeners } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
+    const { calls, listeners, handlers, windows } = await startHost(t, { window: { overlay: { enabled: true, clickThrough: true } } });
     calls.length = 0;
     t.mock.timers.tick(3000);
     assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|moveTop)$/.test(name)), [["setAlwaysOnTop", true, "floating"], ["moveTop"]]);
+    // Click-through is on: the mouse-forwarding hook is installed again (off, then on).
+    assert.deepEqual(calls.filter(([name]) => name === "setIgnoreMouseEvents"), [["setIgnoreMouseEvents", false], ["setIgnoreMouseEvents", true, { forward: true }]]);
+    // While the page captures the mouse (pointer over the pet) nothing is toggled under it.
+    handlers.get("next2d:window:set-ignore-mouse-events")({ sender: windows[0].webContents, senderFrame: Object.assign(windows[0].webContents.mainFrame, { url: "next2d://game/index.html" }) }, false);
+    calls.length = 0;
+    t.mock.timers.tick(3000);
+    assert.equal(calls.some(([name]) => name === "setIgnoreMouseEvents"), false);
     calls.length = 0;
     listeners.get("display-added")();
     assert.deepEqual(calls.filter(([name]) => /^(setAlwaysOnTop|moveTop)$/.test(name)), [["setAlwaysOnTop", true, "floating"], ["moveTop"]]);

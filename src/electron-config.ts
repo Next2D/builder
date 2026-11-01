@@ -151,9 +151,16 @@ export const createElectronPackagerOptions = (
         "extraResource": [resources, ...config.nativeBridge ? [path.join(path.dirname(resources), "native")] : []],
         "ignore": [/^\/native(?:\/|$)/, /^\/resources(?:\/|$)/, /^\/icons(?:\/|$)/, /^\/forge\.config\.[cm]?js$/, /^\/entitlements\.plist$/, /(?:^|\/)steam_appid\.txt$/],
         ...os !== "linux" && config.icons[os] ? { "icon": path.resolve(root, config.icons[os]) } : {},
-        ...os === "macos" && config.macos.localNetworkUsageDescription ? {
-            "extendInfo": { "NSLocalNetworkUsageDescription": config.macos.localNetworkUsageDescription },
-            "extendHelperInfo": { "NSLocalNetworkUsageDescription": config.macos.localNetworkUsageDescription }
+        ...os === "macos" && (config.macos.localNetworkUsageDescription || config.window.overlay?.enabled) ? {
+            "extendInfo": {
+                ...config.macos.localNetworkUsageDescription ? { "NSLocalNetworkUsageDescription": config.macos.localNetworkUsageDescription } : {},
+                // An overlay starts as an agent app (no Dock icon) so that a second launch, which quits at once,
+                // never shows one. The first instance shows its Dock icon itself (templates/electron/index.js).
+                ...config.window.overlay?.enabled ? { "LSUIElement": true } : {}
+            },
+            ...config.macos.localNetworkUsageDescription ? {
+                "extendHelperInfo": { "NSLocalNetworkUsageDescription": config.macos.localNetworkUsageDescription }
+            } : {}
         } : {},
         ...os === "macos" && sign ? {
             "osxSign": {

@@ -66,6 +66,26 @@ const refreshForwarding = () => {
     mainWindow.setIgnoreMouseEvents(false);
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
 };
+// A small log of power/display/GPU events (userData/diagnostics.log) to find out what happened after sleep.
+const diagnosticsFile = () => path.join(app.getPath("userData"), "diagnostics.log");
+const diag = (message) => {
+    if (!overlay) return;
+    try {
+        const file = diagnosticsFile();
+        if (fs.existsSync(file) && fs.statSync(file).size > 200000) fs.writeFileSync(file, "");
+        fs.appendFileSync(file, `${new Date().toISOString()} ${message}\n`);
+    } catch { /* diagnostics must never break the game */ }
+};
+// After sleep (closing a laptop lid) the GPU is often reset. The renderer then keeps showing its last frame but can
+// no longer draw (the web page is not told), so the pet looks alive and menus never appear. Load the page again to
+// get a fresh GPU device. The game saves automatically, so progress is kept.
+const reloadRenderer = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    diag("reload renderer (resume)");
+    overlayIgnore = Boolean(overlay?.clickThrough);
+    mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
+    mainWindow.webContents.reloadIgnoringCache();
+};
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     // The preload reads these flags; each API is exposed only when its feature is configured.
@@ -103,8 +123,10 @@ const createWindow = async () => {
         if (overlay.clickThrough) {
             mainWindow.setIgnoreMouseEvents(true, { forward: true });
         }
+        mainWindow.webContents.on("unresponsive", () => diag("renderer unresponsive"));
+        mainWindow.webContents.on("responsive", () => diag("renderer responsive"));
         const events = ["display-metrics-changed", "display-added", "display-removed"];
-        const onDisplayChange = () => { placeOverlay(); keepOnTop(); };
+        const onDisplayChange = () => { diag("display changed"); placeOverlay(); keepOnTop(); };
         for (const name of events) screen.on(name, onDisplayChange);
         mainWindow.once("closed", () => {
             for (const name of events) screen.removeListener(name, onDisplayChange);
@@ -210,7 +232,18 @@ app.whenReady().then(async () => {
             mainWindow.setIgnoreMouseEvents(overlayIgnore, overlayIgnore ? { forward: true } : undefined);
             mainWindow.webContents.send("next2d:window:resume");
         };
-        for (const name of ["resume", "unlock-screen"]) powerMonitor.on(name, () => setTimeout(recoverOverlay, 1000));
+        for (const name of ["suspend", "lock-screen"]) powerMonitor.on(name, () => diag(name));
+        for (const name of ["resume", "unlock-screen"]) {
+            powerMonitor.on(name, () => {
+                diag(name);
+                setTimeout(() => {
+                    recoverOverlay();
+                    // Only a resume from sleep can reset the GPU (unlocking the screen cannot).
+                    if (name === "resume") reloadRenderer();
+                }, 1000);
+            });
+        }
+        app.on("child-process-gone", (_event, details) => diag(`child-process-gone ${details.type} ${details.reason}`));
         ipcMain.handle("next2d:window:quit", (event) => {
             trusted(event);
             // Reply before the window is torn down.

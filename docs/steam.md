@@ -107,6 +107,8 @@ const off = window.next2dWindow.onResume(() => { /* 状態の再送など */ });
 
 重ね表示が有効なときは、アプリは**1つだけ**起動します（2つ目の起動はすぐに終了します。macOSではDockにアイコンも出しません）。開発中に複数起動したいときは `--next2d-allow-multiple` を付けて起動します。
 
+スリープ（ノートPCのふたを閉じる等）から復帰すると、GPUがリセットされて描画が止まることがあるため、画面（renderer）を読み込み直します（ゲームは自動保存を前提にしてください）。電源・ディスプレイ・GPUのイベントは `userData/diagnostics.log`（Windowsは `%APPDATA%\<appId>\diagnostics.log`）に記録されます。
+
 Linuxの透明表示はコンポジタが必要です。
 
 ### STEP4：認証を用意する
@@ -326,6 +328,8 @@ const off = window.next2dWindow.onResume(() => { /* resend state, etc. */ });
 ```
 
 With the overlay enabled the app runs **once**: a second launch quits at once (and, on macOS, never shows a Dock icon). Start with `--next2d-allow-multiple` to run several copies while developing.
+
+After sleep (e.g. closing a laptop lid) the GPU may be reset and drawing stops, so the page (renderer) is loaded again; the game should save automatically. Power, display and GPU events are logged to `userData/diagnostics.log` (Windows: `%APPDATA%\<appId>\diagnostics.log`).
 
 Transparency on Linux requires a compositor.
 

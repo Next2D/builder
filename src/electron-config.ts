@@ -7,6 +7,10 @@ import type { INativeBridgeConfig } from "./electron-native.js";
 
 export type ElectronOS = "windows" | "macos" | "linux";
 export interface IElectronOverlayConfig { enabled: boolean; anchor: "bottom"; clickThrough: boolean }
+export type ElectronMiniAnchor = "bottom-right" | "bottom-left" | "top-right" | "top-left";
+/** A small always-on-top window the game can switch to and back from at run time (idle/companion modes). */
+export interface IElectronMiniConfig { width: number; height: number; anchor: ElectronMiniAnchor; margin: number; alwaysOnTop: boolean }
+const MINI_ANCHORS: readonly ElectronMiniAnchor[] = ["bottom-right", "bottom-left", "top-right", "top-left"];
 export interface IElectronConfig {
     nativeBridge?: INativeBridgeConfig;
     appId: string;
@@ -16,7 +20,7 @@ export interface IElectronConfig {
     companyName: string;
     icons: Partial<Record<ElectronOS, string>>;
     architectures: Partial<Record<ElectronOS, string>>;
-    window: { width: number; height: number; fullscreen: boolean; overlay?: IElectronOverlayConfig };
+    window: { width: number; height: number; fullscreen: boolean; overlay?: IElectronOverlayConfig; mini?: IElectronMiniConfig };
     steam?: { appId: string | null; depots: Partial<Record<ElectronOS, string | null>>; branch?: string };
     macos: { sign: boolean; notarize: boolean; localNetworkUsageDescription?: string };
 }
@@ -91,6 +95,32 @@ export const readElectronConfig = (root: string): IElectronConfig => {
         // A transparent desktop overlay is never a fullscreen game window.
         if (enabled) {
             config.window.fullscreen = false;
+        }
+    }
+    const mini: Partial<IElectronMiniConfig> | undefined = config.window.mini;
+    if (mini !== undefined) {
+        if (!mini || typeof mini !== "object" || Array.isArray(mini)) {
+            throw new Error("electron.config.json window.mini must be an object.");
+        }
+        config.window.mini = { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true, ...mini };
+        const { width, height, anchor, margin, alwaysOnTop } = config.window.mini;
+        for (const dimension of [width, height]) {
+            if (!Number.isInteger(dimension) || dimension < 1 || dimension > 16384) {
+                throw new Error("electron.config.json window.mini.width/height must be integers between 1 and 16384.");
+            }
+        }
+        if (!MINI_ANCHORS.includes(anchor)) {
+            throw new Error(`electron.config.json window.mini.anchor must be one of ${MINI_ANCHORS.map((a) => `"${a}"`).join(", ")}.`);
+        }
+        if (!Number.isInteger(margin) || margin < 0 || margin > 1000) {
+            throw new Error("electron.config.json window.mini.margin must be an integer between 0 and 1000.");
+        }
+        if (typeof alwaysOnTop !== "boolean") {
+            throw new Error("electron.config.json window.mini.alwaysOnTop must be a boolean.");
+        }
+        // The overlay already is the small always-on-top window, and it never takes keyboard focus.
+        if (config.window.overlay?.enabled) {
+            throw new Error("electron.config.json window.mini cannot be combined with window.overlay.enabled.");
         }
     }
     if (config.macos.notarize && !config.macos.sign) {

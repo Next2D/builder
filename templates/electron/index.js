@@ -34,7 +34,92 @@ protocol.registerSchemesAsPrivileged([{
 
 const startURL = "next2d://game/index.html";
 const overlay = config.window.overlay?.enabled ? config.window.overlay : null;
+// The game can switch between its normal window ("full") and a small always-on-top window ("mini") at run time.
+const mini = !overlay && config.window.mini ? config.window.mini : null;
 let mainWindow;
+let windowMode = "full";
+// How the window looked before it became small, to put it back exactly (position, size, maximized, fullscreen).
+let fullState = null;
+// Where the player last left the small window (it has a title bar and can be moved).
+let miniPosition = null;
+// Mode changes are applied one after another (leaving fullscreen is animated on macOS).
+let modeQueue = Promise.resolve();
+const alive = () => Boolean(mainWindow && !mainWindow.isDestroyed());
+const modeInfo = () => {
+    const [width, height] = mainWindow.getContentSize();
+    return { mode: windowMode, width, height };
+};
+// Entering and leaving fullscreen is animated on macOS: wait for it, so the size the page is told is the real one.
+const setFullScreenAndWait = (win, value) => new Promise((resolve) => {
+    if (win.isFullScreen() === value) {
+        resolve();
+        return;
+    }
+    let timer;
+    const finish = () => {
+        clearTimeout(timer);
+        resolve();
+    };
+    // Some window managers never report it; do not wait forever.
+    timer = setTimeout(finish, 1500);
+    win.once(value ? "enter-full-screen" : "leave-full-screen", finish);
+    win.setFullScreen(value);
+});
+const cornerOf = (win) => {
+    const { width, height } = win.getBounds();
+    const { workArea } = screen.getDisplayMatching(win.getBounds());
+    const right = mini.anchor.endsWith("right");
+    const bottom = mini.anchor.startsWith("bottom");
+    return {
+        x: right ? workArea.x + workArea.width - width - mini.margin : workArea.x + mini.margin,
+        y: bottom ? workArea.y + workArea.height - height - mini.margin : workArea.y + mini.margin
+    };
+};
+const toMini = async () => {
+    const win = mainWindow;
+    fullState = { bounds: win.getNormalBounds(), maximized: win.isMaximized(), fullScreen: win.isFullScreen() };
+    await setFullScreenAndWait(win, false);
+    if (win.isMaximized()) win.unmaximize();
+    // Resize first: some platforms ignore size changes of a window that is no longer resizable.
+    win.setContentSize(mini.width, mini.height);
+    win.setFullScreenable(false);
+    win.setMaximizable(false);
+    win.setResizable(false);
+    const { x, y } = miniPosition ?? cornerOf(win);
+    win.setPosition(x, y);
+    if (mini.alwaysOnTop) {
+        win.setAlwaysOnTop(true, "floating");
+        if (process.platform === "darwin") win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+    windowMode = "mini";
+};
+const toFull = async () => {
+    const win = mainWindow;
+    const [x, y] = win.getPosition();
+    miniPosition = { x, y };
+    if (mini.alwaysOnTop) {
+        win.setAlwaysOnTop(false);
+        if (process.platform === "darwin") win.setVisibleOnAllWorkspaces(false);
+    }
+    win.setResizable(true);
+    win.setMaximizable(true);
+    win.setFullScreenable(true);
+    if (fullState) {
+        win.setBounds(fullState.bounds);
+        if (fullState.maximized) win.maximize();
+        if (fullState.fullScreen) await setFullScreenAndWait(win, true);
+    }
+    win.focus();
+    windowMode = "full";
+};
+const setWindowMode = (mode) => {
+    modeQueue = modeQueue.then(async () => {
+        if (!alive() || mode === windowMode) return;
+        await (mode === "mini" ? toMini() : toFull());
+        mainWindow.webContents.send("next2d:window:mode", modeInfo());
+    }).catch((error) => console.error("Window mode change failed:", error));
+    return modeQueue.then(() => (alive() ? modeInfo() : { mode: windowMode, width: 0, height: 0 }));
+};
 // The last click-through state asked for, so it can be applied again after sleep/lock.
 let overlayIgnore = Boolean(config.window.overlay?.enabled && config.window.overlay.clickThrough);
 // Bottom anchor: flush with the primary display's work area (above the taskbar/Dock), centred.
@@ -129,7 +214,8 @@ const createWindow = async () => {
     // The preload reads these flags; each API is exposed only when its feature is configured.
     const preloadFlags = [
         ...(config.nativeBridge ? ["--next2d-native-bridge"] : []),
-        ...(overlay ? ["--next2d-overlay"] : [])
+        ...(overlay ? ["--next2d-overlay"] : []),
+        ...(mini ? ["--next2d-window-mode"] : [])
     ];
     mainWindow = new BrowserWindow({
         width: Math.min(config.window.width, width),
@@ -197,7 +283,8 @@ const createWindow = async () => {
         }
     });
     mainWindow.webContents.on("before-input-event", (event, input) => {
-        if (input.type !== "keyDown" || overlay) {
+        // The small window never goes fullscreen; Escape belongs to the game there.
+        if (input.type !== "keyDown" || overlay || windowMode === "mini") {
             return;
         }
         if (input.key === "F11" || (input.alt && input.key === "Enter")) {
@@ -259,23 +346,41 @@ app.whenReady().then(async () => {
             return nativeBridge.request(method, params);
         });
     }
+    const trusted = (event) => {
+        if (!isTrustedSender(event, mainWindow)) {
+            diag(`window API access denied (frame url: ${event?.senderFrame?.url})`);
+            throw new Error("Window API access denied");
+        }
+    };
+    if (overlay || mini) {
+        ipcMain.handle("next2d:window:get-bounds", (event) => {
+            trusted(event);
+            const bounds = mainWindow.getBounds();
+            return { ...bounds, scaleFactor: screen.getDisplayMatching(bounds).scaleFactor };
+        });
+        ipcMain.handle("next2d:window:quit", (event) => {
+            trusted(event);
+            // Reply before the window is torn down.
+            setImmediate(() => app.quit());
+        });
+    }
+    if (mini) {
+        ipcMain.handle("next2d:window:get-mode", (event) => {
+            trusted(event);
+            return modeInfo();
+        });
+        ipcMain.handle("next2d:window:set-mode", (event, mode) => {
+            trusted(event);
+            if (mode !== "full" && mode !== "mini") throw new TypeError("mode must be \"full\" or \"mini\"");
+            return setWindowMode(mode);
+        });
+    }
     if (overlay) {
-        const trusted = (event) => {
-            if (!isTrustedSender(event, mainWindow)) {
-                diag(`window API access denied (frame url: ${event?.senderFrame?.url})`);
-                throw new Error("Window API access denied");
-            }
-        };
         ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {
             trusted(event);
             if (typeof ignore !== "boolean") throw new TypeError("ignore must be a boolean");
             overlayIgnore = ignore;
             mainWindow.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
-        });
-        ipcMain.handle("next2d:window:get-bounds", (event) => {
-            trusted(event);
-            const bounds = mainWindow.getBounds();
-            return { ...bounds, scaleFactor: screen.getDisplayMatching(bounds).scaleFactor };
         });
         // After sleep or screen lock the OS can drop the mouse-forwarding hook and reset the window's
         // z-order/bounds. Apply the overlay state again and tell the page so it can recover too.
@@ -300,11 +405,6 @@ app.whenReady().then(async () => {
             });
         }
         app.on("child-process-gone", (_event, details) => diag(`child-process-gone ${details.type} ${details.reason}`));
-        ipcMain.handle("next2d:window:quit", (event) => {
-            trusted(event);
-            // Reply before the window is torn down.
-            setImmediate(() => app.quit());
-        });
     }
     await createWindow();
 }).catch((error) => {

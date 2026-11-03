@@ -111,6 +111,38 @@ Windowsでスリープ（ノートPCのふたを閉じる等）から復帰す�
 
 Linuxの透明表示はコンポジタが必要です。
 
+#### ミニウィンドウ（通常の窓 ⇄ 小窓）
+
+ゲーム中に、通常の窓（全画面を含む）と、デスクトップの隅に置く最前面の小窓を切り替えられます。放置ゲームの「作業しながら遊ぶ」表示などに使います。`window.mini` 未指定なら従来どおりです。重ね表示（`window.overlay.enabled: true`）とは同時に使えません。
+
+```json
+"window": {
+  "width": 1920, "height": 1080, "fullscreen": true,
+  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true }
+}
+```
+
+| 項目 | 内容 |
+|---|---|
+| `width` / `height` | 小窓の中身（タイトルバーを除く）の大きさ。既定 720×180 |
+| `anchor` | 初めて小窓にしたときの位置。`"bottom-right"`（既定）/ `"bottom-left"` / `"top-right"` / `"top-left"`。窓のある画面の作業領域（タスクバー・Dockを除く）の隅 |
+| `margin` | 隅からの間隔（px）。既定 `16` |
+| `alwaysOnTop` | `true`（既定）で小窓を最前面に置く（macOSは全ワークスペース・全画面アプリ上にも表示） |
+
+小窓は通常の窓のまま（タイトルバーあり。タイトルバーで動かせる）で、キー入力も受け取ります。リサイズ・最大化・全画面はできません。動かした位置は、アプリを終了するまで次の小窓で使います。通常の窓に戻すと、小窓にする前の位置・大きさ・最大化・全画面に戻ります。小窓の間は F11／Alt+Enter／Esc で全画面を切り替えません（Esc はゲームに届きます）。
+
+rendererへ `window.next2dWindow` を公開します（アプリのメインフレームのみ）。
+
+```ts
+const { mode, width, height } = await window.next2dWindow.getMode();    // mode は "full" か "mini"
+await window.next2dWindow.setMode("mini");                                // 切り替えが終わると { mode, width, height } で解決
+const off = window.next2dWindow.onModeChange(({ mode, width, height }) => { /* 表示を合わせ直す */ });
+const { x, y, width: w, height: h, scaleFactor } = await window.next2dWindow.getBounds();
+await window.next2dWindow.quit();
+```
+
+`width` / `height` は窓の中身の大きさ（CSS ピクセル）です。Next2D のステージは縦横比を保ったまま窓に合わせて縮むため、1920×1080 のステージを 720×180 の小窓で表示すると、ステージの範囲は高さ 180・幅 320 になります（`options.fullScreen: true` なら、左右のステージの外も描かれます）。小窓用の表示は、この大きさに合わせてゲーム側で配置してください。
+
 ### STEP4：認証を用意する
 
 #### macOSの署名・公証
@@ -332,6 +364,38 @@ With the overlay enabled the app runs **once**: a second launch quits at once. O
 On Windows, after sleep (e.g. closing a laptop lid) the overlay window can stop receiving the mouse, so a fresh window replaces it; the game should save automatically. Power, display and GPU events are logged to `userData/diagnostics.log` (Windows: `%APPDATA%\<appId>\diagnostics.log`).
 
 Transparency on Linux requires a compositor.
+
+#### Mini window (normal window ⇄ small window)
+
+At run time the game can switch between its normal window (fullscreen included) and a small always-on-top window in a corner of the desktop, for "play while you work" idle modes and the like. Without `window.mini` the window behaves as before. It cannot be combined with the overlay (`window.overlay.enabled: true`).
+
+```json
+"window": {
+  "width": 1920, "height": 1080, "fullscreen": true,
+  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true }
+}
+```
+
+| Field | Behaviour |
+|---|---|
+| `width` / `height` | Content size of the small window (title bar excluded). Default 720×180. |
+| `anchor` | Where the small window first appears: `"bottom-right"` (default), `"bottom-left"`, `"top-right"` or `"top-left"` corner of the work area (taskbar/Dock excluded) of the display the window is on. |
+| `margin` | Distance from that corner in px. Default `16`. |
+| `alwaysOnTop` | `true` (default) keeps the small window on top (on macOS also on every workspace and above fullscreen apps). |
+
+The small window stays a normal window: it has a title bar (drag it to move the window) and takes keyboard input. It cannot be resized, maximized or made fullscreen. Where the player moves it is used for the next small window until the app quits. Switching back restores the position, size, maximized and fullscreen state from before. In the small window F11 / Alt+Enter / Escape do not toggle fullscreen (Escape reaches the game).
+
+The renderer gets `window.next2dWindow` (app main frame only):
+
+```ts
+const { mode, width, height } = await window.next2dWindow.getMode();    // mode is "full" or "mini"
+await window.next2dWindow.setMode("mini");                                // resolves with { mode, width, height } once applied
+const off = window.next2dWindow.onModeChange(({ mode, width, height }) => { /* lay the page out again */ });
+const { x, y, width: w, height: h, scaleFactor } = await window.next2dWindow.getBounds();
+await window.next2dWindow.quit();
+```
+
+`width` / `height` are the content size in CSS pixels. The Next2D stage keeps its aspect ratio when it is fitted into the window, so a 1920×1080 stage shown in a 720×180 window covers 320×180 (with `options.fullScreen: true` the area left and right of the stage is drawn too). Lay out the small-window view for that size in the game.
 
 ### STEP4: Prepare credentials
 

@@ -31,3 +31,24 @@ if (flags.has("--next2d-overlay")) {
         }
     });
 }
+
+// window.mini: switch between the normal window ("full") and the small always-on-top window ("mini").
+// Never set together with the overlay (the config is rejected), so the two never expose next2dWindow twice.
+if (flags.has("--next2d-window-mode")) {
+    contextBridge.exposeInMainWorld("next2dWindow", {
+        getMode: () => ipcRenderer.invoke("next2d:window:get-mode"),
+        setMode: async (mode) => {
+            if (mode !== "full" && mode !== "mini") throw new TypeError("Expected \"full\" or \"mini\"");
+            return ipcRenderer.invoke("next2d:window:set-mode", mode);
+        },
+        getBounds: () => ipcRenderer.invoke("next2d:window:get-bounds"),
+        quit: async () => { await ipcRenderer.invoke("next2d:window:quit"); },
+        // Fires after every change with { mode, width, height } (content size in CSS pixels).
+        onModeChange: (listener) => {
+            if (typeof listener !== "function") throw new TypeError("Expected mode listener");
+            const handler = (_event, info) => listener(info);
+            ipcRenderer.on("next2d:window:mode", handler);
+            return () => ipcRenderer.removeListener("next2d:window:mode", handler);
+        }
+    });
+}

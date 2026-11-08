@@ -36,6 +36,17 @@ if (flags.has("--next2d-overlay")) {
 // Never set together with the overlay (the config is rejected), so the two never expose next2dWindow twice.
 if (flags.has("--next2d-window-mode")) {
     contextBridge.exposeInMainWorld("next2dWindow", {
+        // Only in the transparent mini window (window.mini.transparent): click-through and moving the frameless window.
+        ...(flags.has("--next2d-mini-transparent") ? {
+            setIgnoreMouseEvents: async (ignore) => {
+                if (typeof ignore !== "boolean") throw new TypeError("Expected boolean");
+                await ipcRenderer.invoke("next2d:window:set-ignore-mouse-events", ignore);
+            },
+            moveBy: async (dx, dy) => {
+                if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new TypeError("Expected finite numbers");
+                await ipcRenderer.invoke("next2d:window:move-by", dx, dy);
+            }
+        } : {}),
         getMode: () => ipcRenderer.invoke("next2d:window:get-mode"),
         setMode: async (mode) => {
             if (mode !== "full" && mode !== "mini") throw new TypeError("Expected \"full\" or \"mini\"");

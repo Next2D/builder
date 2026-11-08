@@ -36,12 +36,17 @@ const startURL = "next2d://game/index.html";
 const overlay = config.window.overlay?.enabled ? config.window.overlay : null;
 // The game can switch between its normal window ("full") and a small always-on-top window ("mini") at run time.
 const mini = !overlay && config.window.mini ? config.window.mini : null;
+// mini.transparent: the small window is a different window (transparent, frameless), so a mode change builds a new
+// one instead of reshaping the same one. The page is gone after a change; the game saves before it switches.
+const miniTransparent = Boolean(mini?.transparent);
 let mainWindow;
 let windowMode = "full";
 // How the window looked before it became small, to put it back exactly (position, size, maximized, fullscreen).
 let fullState = null;
 // Where the player last left the small window (it has a title bar and can be moved).
 let miniPosition = null;
+// Transparent mini only: true while the window lets clicks fall through (mouse moves are still forwarded to the page).
+let miniIgnore = true;
 // Mode changes are applied one after another (leaving fullscreen is animated on macOS).
 let modeQueue = Promise.resolve();
 const alive = () => Boolean(mainWindow && !mainWindow.isDestroyed());
@@ -65,14 +70,30 @@ const setFullScreenAndWait = (win, value) => new Promise((resolve) => {
     win.once(value ? "enter-full-screen" : "leave-full-screen", finish);
     win.setFullScreen(value);
 });
-const cornerOf = (win) => {
-    const { width, height } = win.getBounds();
-    const { workArea } = screen.getDisplayMatching(win.getBounds());
+const cornerIn = (workArea, width, height) => {
     const right = mini.anchor.endsWith("right");
     const bottom = mini.anchor.startsWith("bottom");
     return {
         x: right ? workArea.x + workArea.width - width - mini.margin : workArea.x + mini.margin,
         y: bottom ? workArea.y + workArea.height - height - mini.margin : workArea.y + mini.margin
+    };
+};
+const cornerOf = (win) => {
+    const { width, height } = win.getBounds();
+    return cornerIn(screen.getDisplayMatching(win.getBounds()).workArea, width, height);
+};
+// Transparent mini: a frameless window has no title bar, so its outer size is mini.width x mini.height.
+const miniWindowBounds = (display) => {
+    const { x, y } = miniPosition ?? cornerIn(display.workArea, mini.width, mini.height);
+    return { x, y, width: mini.width, height: mini.height };
+};
+// Keep the small window inside the work area of the display it is on.
+const clampToWorkArea = (bounds) => {
+    const { workArea } = screen.getDisplayMatching(bounds);
+    return {
+        ...bounds,
+        x: Math.round(Math.max(workArea.x, Math.min(bounds.x, workArea.x + workArea.width - bounds.width))),
+        y: Math.round(Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - bounds.height)))
     };
 };
 const toMini = async () => {
@@ -112,10 +133,42 @@ const toFull = async () => {
     win.focus();
     windowMode = "full";
 };
+// Transparent mini: build the other kind of window first (so the app never has zero windows), then close the old one.
+const swapWindow = async (mode) => {
+    const old = mainWindow;
+    const previous = windowMode;
+    if (mode === "mini") {
+        fullState = { bounds: old.getNormalBounds(), maximized: old.isMaximized(), fullScreen: old.isFullScreen() };
+        // Do not close a window that is in a fullscreen Space on macOS.
+        if (old.isFullScreen()) await setFullScreenAndWait(old, false);
+        miniIgnore = true;
+    } else {
+        const [x, y] = old.getPosition();
+        miniPosition = { x, y };
+    }
+    // The new page reads the mode with getMode() when it starts.
+    windowMode = mode;
+    const retire = (win) => {
+        if (win.isDestroyed()) return;
+        // Closing on purpose: do not treat the page going away as a crash.
+        win.webContents.removeAllListeners("render-process-gone");
+        win.destroy();
+    };
+    try {
+        await createWindow();
+    } catch (error) {
+        windowMode = previous;
+        const failed = mainWindow;
+        mainWindow = old;
+        if (failed && failed !== old) retire(failed);
+        throw error;
+    }
+    retire(old);
+};
 const setWindowMode = (mode) => {
     modeQueue = modeQueue.then(async () => {
         if (!alive() || mode === windowMode) return;
-        await (mode === "mini" ? toMini() : toFull());
+        await (miniTransparent ? swapWindow(mode) : mode === "mini" ? toMini() : toFull());
         mainWindow.webContents.send("next2d:window:mode", modeInfo());
     }).catch((error) => console.error("Window mode change failed:", error));
     return modeQueue.then(() => (alive() ? modeInfo() : { mode: windowMode, width: 0, height: 0 }));
@@ -147,7 +200,8 @@ const keepOnTop = () => {
 // when forwarding switches on. After sleep (closing the lid) the hook can be gone while Electron still thinks it is
 // installed, so the page never sees the pointer. Switching forwarding off and on again installs a fresh hook.
 const refreshForwarding = () => {
-    if (!overlayIgnore || !mainWindow || mainWindow.isDestroyed()) return;
+    const forwarding = overlay ? overlayIgnore : miniTransparent && windowMode === "mini" && miniIgnore;
+    if (!forwarding || !mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.setIgnoreMouseEvents(false);
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
 };
@@ -211,17 +265,21 @@ const recreateWindow = async () => {
 };
 const createWindow = async () => {
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    const miniWindow = miniTransparent && windowMode === "mini";
+    // Coming back to the normal window after a transparent mini: put it back as it was.
+    const restore = miniTransparent && windowMode === "full" ? fullState : null;
     // The preload reads these flags; each API is exposed only when its feature is configured.
     const preloadFlags = [
         ...(config.nativeBridge ? ["--next2d-native-bridge"] : []),
         ...(overlay ? ["--next2d-overlay"] : []),
-        ...(mini ? ["--next2d-window-mode"] : [])
+        ...(mini ? ["--next2d-window-mode"] : []),
+        ...(miniWindow ? ["--next2d-mini-transparent"] : [])
     ];
     mainWindow = new BrowserWindow({
         width: Math.min(config.window.width, width),
         height: Math.min(config.window.height, height),
         title: config.appName,
-        fullscreen: overlay ? false : config.window.fullscreen,
+        fullscreen: overlay || miniWindow ? false : restore ? restore.fullScreen : config.window.fullscreen,
         ...(config.icon ? { icon: path.join(assetRoot, config.icon) } : {}),
         useContentSize: true,
         backgroundColor: "#000000",
@@ -233,12 +291,35 @@ const createWindow = async () => {
             // The overlay must never take keyboard focus or activation from the apps under it (Word etc.).
             focusable: false
         } : {}),
+        ...(miniWindow ? {
+            ...miniWindowBounds(screen.getDisplayMatching(mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : screen.getPrimaryDisplay().bounds)),
+            transparent: true, frame: false, resizable: false, maximizable: false, hasShadow: false,
+            fullscreenable: false, backgroundColor: "#00000000",
+            // Unlike the overlay it takes keys (the game's key to go back to the normal window).
+            focusable: true
+        } : {}),
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
             ...(preloadFlags.length ? { preload: path.join(__dirname, "preload.cjs"), additionalArguments: preloadFlags } : {}),
             ...(config.nativeBridge ? { backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
         }
     });
+    if (restore) {
+        mainWindow.setBounds(restore.bounds);
+        if (restore.maximized) mainWindow.maximize();
+    }
+    if (miniWindow) {
+        if (mini.alwaysOnTop) {
+            mainWindow.setAlwaysOnTop(true, "floating");
+            if (process.platform === "darwin") mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        }
+        mainWindow.setIgnoreMouseEvents(true, { forward: true });
+        if (process.platform === "win32") {
+            const timer = setInterval(() => { if (mini.alwaysOnTop) keepOnTop(); refreshForwarding(); }, 3000);
+            timer.unref?.();
+            mainWindow.once("closed", () => clearInterval(timer));
+        }
+    }
     if (overlay) {
         mainWindow.setAlwaysOnTop(true, "floating");
         if (process.platform === "darwin") {
@@ -374,6 +455,29 @@ app.whenReady().then(async () => {
             if (mode !== "full" && mode !== "mini") throw new TypeError("mode must be \"full\" or \"mini\"");
             return setWindowMode(mode);
         });
+    }
+    if (miniTransparent) {
+        const inTransparentMini = () => {
+            if (windowMode !== "mini") throw new Error("Only available in the transparent mini window");
+        };
+        ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {
+            trusted(event);
+            inTransparentMini();
+            if (typeof ignore !== "boolean") throw new TypeError("ignore must be a boolean");
+            miniIgnore = ignore;
+            mainWindow.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
+        });
+        ipcMain.handle("next2d:window:move-by", (event, dx, dy) => {
+            trusted(event);
+            inTransparentMini();
+            if (!Number.isFinite(dx) || !Number.isFinite(dy)) throw new TypeError("dx and dy must be finite numbers");
+            const bounds = mainWindow.getBounds();
+            const next = clampToWorkArea({ ...bounds, x: bounds.x + Math.round(dx), y: bounds.y + Math.round(dy) });
+            mainWindow.setBounds(next);
+            miniPosition = { x: next.x, y: next.y };
+        });
+        // After sleep the forwarding hook can be gone (Windows); install it again.
+        for (const name of ["resume", "unlock-screen"]) powerMonitor.on(name, () => setTimeout(refreshForwarding, 1000));
     }
     if (overlay) {
         ipcMain.handle("next2d:window:set-ignore-mouse-events", (event, ignore) => {

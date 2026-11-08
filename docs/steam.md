@@ -118,7 +118,7 @@ Linuxの透明表示はコンポジタが必要です。
 ```json
 "window": {
   "width": 1920, "height": 1080, "fullscreen": true,
-  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true }
+  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true, "transparent": false }
 }
 ```
 
@@ -128,6 +128,7 @@ Linuxの透明表示はコンポジタが必要です。
 | `anchor` | 初めて小窓にしたときの位置。`"bottom-right"`（既定）/ `"bottom-left"` / `"top-right"` / `"top-left"`。窓のある画面の作業領域（タスクバー・Dockを除く）の隅 |
 | `margin` | 隅からの間隔（px）。既定 `16` |
 | `alwaysOnTop` | `true`（既定）で小窓を最前面に置く（macOSは全ワークスペース・全画面アプリ上にも表示） |
+| `transparent` | `true` で背景が透明・枠なしの小窓にする（既定 `false`。下の「透明な小窓」） |
 
 小窓は通常の窓のまま（タイトルバーあり。タイトルバーで動かせる）で、キー入力も受け取ります。リサイズ・最大化・全画面はできません。動かした位置は、アプリを終了するまで次の小窓で使います。通常の窓に戻すと、小窓にする前の位置・大きさ・最大化・全画面に戻ります。小窓の間は F11／Alt+Enter／Esc で全画面を切り替えません（Esc はゲームに届きます）。
 
@@ -142,6 +143,27 @@ await window.next2dWindow.quit();
 ```
 
 `width` / `height` は窓の中身の大きさ（CSS ピクセル）です。Next2D のステージは縦横比を保ったまま窓に合わせて縮むため、1920×1080 のステージを 720×180 の小窓で表示すると、ステージの範囲は高さ 180・幅 320 になります（`options.fullScreen: true` なら、左右のステージの外も描かれます）。小窓用の表示は、この大きさに合わせてゲーム側で配置してください。
+
+##### 透明な小窓（`transparent: true`）
+
+`window.mini.transparent: true`（既定 `false`。`false` なら上の動作のまま）にすると、小窓が「背景が透明・枠なし・影なし」の窓になり、船などの絵だけがデスクトップに浮かびます。透明は窓の作成時にしか決められず（Windows では透明な窓を最大化・全画面にできません）、同じ窓の切り替えでは実現できないため、`setMode` は**窓を作り直します**。
+
+- `setMode("mini")`：透明・枠なし・リサイズ不可の新しい窓を `width`×`height` で `anchor`/`margin`（前回動かした位置があればそこ）に作って同じ URL を読み込み、通常の窓の状態（位置・大きさ・最大化・全画面）を記憶して閉じます。最前面（`alwaysOnTop: true`）、macOS は全ワークスペースに表示、キー入力は受け取ります（F10 などで戻せます）。
+- `setMode("full")`：記憶した状態（全画面を含む）の通常の窓を作り直し、小窓を閉じます。
+- ページは作り直しで破棄されます。**ゲームは切り替える前に自分で保存してください**（localStorage は同じ origin のまま引き継がれます）。新しいページは起動時に `getMode()` で今のモードを読んで表示を決めます（アプリ起動時は常に `"full"`）。
+- `setMode` の Promise は、新しい窓の読み込みが終わってから `{ mode, width, height }` で解決します。
+
+透明な小窓（`mode === "mini"`）の間だけ、次の API が `window.next2dWindow` に加わります（`transparent: false` では公開されません）。
+
+```ts
+// 作成直後は ignore=true：透明な部分は下のアプリへクリックを通し、マウスの移動だけページに届く。
+// 船の上にポインタがあるときだけ false にして、クリック・ドラッグを受け取る。
+await window.next2dWindow.setIgnoreMouseEvents(false);
+// 枠がないので、ゲーム側のドラッグで窓を動かす。作業領域の外には出ない。位置は次の小窓にも使う。
+await window.next2dWindow.moveBy(dx, dy);
+```
+
+Windows でスリープから復帰してもマウス転送が切れないよう、重ね表示と同様に転送フックを張り直します。Linux の透明表示にはコンポジタが必要です。
 
 ### STEP4：認証を用意する
 
@@ -372,7 +394,7 @@ At run time the game can switch between its normal window (fullscreen included) 
 ```json
 "window": {
   "width": 1920, "height": 1080, "fullscreen": true,
-  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true }
+  "mini": { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true, "transparent": false }
 }
 ```
 
@@ -382,6 +404,7 @@ At run time the game can switch between its normal window (fullscreen included) 
 | `anchor` | Where the small window first appears: `"bottom-right"` (default), `"bottom-left"`, `"top-right"` or `"top-left"` corner of the work area (taskbar/Dock excluded) of the display the window is on. |
 | `margin` | Distance from that corner in px. Default `16`. |
 | `alwaysOnTop` | `true` (default) keeps the small window on top (on macOS also on every workspace and above fullscreen apps). |
+| `transparent` | `true` makes it a transparent, frameless window (default `false`; see "Transparent small window" below). |
 
 The small window stays a normal window: it has a title bar (drag it to move the window) and takes keyboard input. It cannot be resized, maximized or made fullscreen. Where the player moves it is used for the next small window until the app quits. Switching back restores the position, size, maximized and fullscreen state from before. In the small window F11 / Alt+Enter / Escape do not toggle fullscreen (Escape reaches the game).
 
@@ -396,6 +419,27 @@ await window.next2dWindow.quit();
 ```
 
 `width` / `height` are the content size in CSS pixels. The Next2D stage keeps its aspect ratio when it is fitted into the window, so a 1920×1080 stage shown in a 720×180 window covers 320×180 (with `options.fullScreen: true` the area left and right of the stage is drawn too). Lay out the small-window view for that size in the game.
+
+##### Transparent small window (`transparent: true`)
+
+With `window.mini.transparent: true` (default `false`; `false` keeps the behaviour above) the small window becomes transparent, frameless and shadowless, so only what the game draws (a ship, say) floats on the desktop. Transparency can only be chosen when a window is created (and on Windows a transparent window cannot be maximized or made fullscreen), so one window cannot be reshaped into it: `setMode` **rebuilds the window**.
+
+- `setMode("mini")`: builds a new transparent, frameless, non-resizable window of `width`×`height` at `anchor`/`margin` (or where it was last moved), loads the same URL, remembers the state of the normal window (position, size, maximized, fullscreen) and closes it. It is always on top (`alwaysOnTop: true`), on every workspace on macOS, and takes keys (so a key such as F10 can switch back).
+- `setMode("full")`: rebuilds the normal window in the remembered state (fullscreen included) and closes the small one.
+- The page is destroyed by the rebuild, so **the game must save before switching** (localStorage carries over: same origin). The new page reads the current mode with `getMode()` at startup (the app always starts in `"full"`).
+- The promise of `setMode` resolves with `{ mode, width, height }` after the new window has finished loading.
+
+Only while the transparent small window is shown (`mode === "mini"`), `window.next2dWindow` also has these (not exposed when `transparent` is `false`):
+
+```ts
+// ignore=true right after creation: transparent parts let clicks fall through to the app below, and only mouse
+// moves reach the page. Set it to false while the pointer is over the ship to receive clicks and drags.
+await window.next2dWindow.setIgnoreMouseEvents(false);
+// There is no frame, so the game drags the window itself. It stays inside the work area; the position is reused by the next small window.
+await window.next2dWindow.moveBy(dx, dy);
+```
+
+Like the overlay, the mouse-forwarding hook is installed again after Windows resumes from sleep. Transparency on Linux requires a compositor.
 
 ### STEP4: Prepare credentials
 

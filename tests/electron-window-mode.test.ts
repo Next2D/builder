@@ -39,19 +39,23 @@ const fakeElectron = (options = {}) => {
     class BrowserWindow {
         constructor(windowOptions) {
             this.options = windowOptions;
+            this.frame = windowOptions.frame === false ? 0 : FRAME;
             this.fullScreen = Boolean(windowOptions.fullscreen);
             this.maximized = false;
             this.flags = { resizable: true, maximizable: true, fullScreenable: true, alwaysOnTop: false };
-            this.bounds = { x: 100, y: 80, width: windowOptions.width, height: windowOptions.height + FRAME };
+            this.bounds = { x: windowOptions.x ?? 100, y: windowOptions.y ?? 80, width: windowOptions.width, height: windowOptions.height + (windowOptions.frame === false ? 0 : FRAME) };
             this.once_ = {};
             this.webContents = {
                 executeJavaScript: async () => "null", setWindowOpenHandler() {},
                 on: (name, cb) => calls.push(["webContents.on", name, cb]),
-                removeAllListeners() {}, send: (...args) => calls.push(["send", ...args]), mainFrame: {}
+                removeAllListeners() {}, send: (...args) => calls.push(["send", ...args]), mainFrame: { url: "next2d://game/index.html" }
             };
+            this.id = windows.length;
             windows.push(this);
         }
-        isDestroyed() { return false; }
+        isDestroyed() { return Boolean(this.destroyed); }
+        destroy() { calls.push(["destroy", this.id]); this.destroyed = true; }
+        moveTop() {}
         isFullScreen() { return this.fullScreen; }
         setFullScreen(value) {
             calls.push(["setFullScreen", value]);
@@ -66,7 +70,7 @@ const fakeElectron = (options = {}) => {
         getNormalBounds() { return { ...this.bounds }; }
         setBounds(bounds) { calls.push(["setBounds", bounds]); this.bounds = { ...bounds }; }
         // In fullscreen the content fills the display; the normal bounds are kept for later.
-        getContentSize() { return this.fullScreen ? [1440, 900] : [this.bounds.width, this.bounds.height - FRAME]; }
+        getContentSize() { return this.fullScreen ? [1440, 900] : [this.bounds.width, this.bounds.height - this.frame]; }
         setContentSize(width, height) {
             calls.push(["setContentSize", width, height, this.flags.resizable]);
             this.bounds = { ...this.bounds, width, height: height + FRAME };
@@ -120,15 +124,15 @@ const startHost = async (t, config, options = {}) => {
 test("mini window defaults and validation", (t) => {
     assert.equal(readElectronConfig(fixture(t)).window.mini, undefined);
     assert.deepEqual(readElectronConfig(fixture(t, { window: { mini: {} } })).window.mini,
-        { width: 720, height: 180, anchor: "bottom-right", margin: 16, alwaysOnTop: true });
-    assert.deepEqual(readElectronConfig(fixture(t, { window: { mini: { width: 480, anchor: "top-left", margin: 0, alwaysOnTop: false } } })).window.mini,
-        { width: 480, height: 180, anchor: "top-left", margin: 0, alwaysOnTop: false });
+        { width: 720, height: 180, anchor: "bottom-right", margin: 16, alwaysOnTop: true, transparent: false });
+    assert.deepEqual(readElectronConfig(fixture(t, { window: { mini: { width: 480, anchor: "top-left", margin: 0, alwaysOnTop: false, transparent: false } } })).window.mini,
+        { width: 480, height: 180, anchor: "top-left", margin: 0, alwaysOnTop: false, transparent: false });
     for (const [mini, message] of [
         [null, /window.mini must be an object/], [[], /must be an object/], [true, /must be an object/],
         [{ width: 0 }, /width\/height must be integers/], [{ height: 1.5 }, /width\/height must be integers/], [{ width: "720" }, /width\/height/],
         [{ anchor: "bottom" }, /anchor must be one of "bottom-right", "bottom-left", "top-right", "top-left"/],
         [{ margin: -1 }, /margin must be an integer/], [{ margin: 1001 }, /margin/],
-        [{ alwaysOnTop: "yes" }, /alwaysOnTop must be a boolean/]
+        [{ alwaysOnTop: "yes" }, /alwaysOnTop must be a boolean/], [{ transparent: "yes" }, /transparent must be a boolean/]
     ]) {
         assert.throws(() => readElectronConfig(fixture(t, { window: { mini } })), message);
     }
@@ -146,7 +150,7 @@ test("without window.mini nothing is exposed and the window behaves as before", 
 
 test("the renderer gets the window mode API only for window.mini", async (t) => {
     const { window, handlers, runtime } = await startHost(t, { window: { width: 1280, height: 720, mini: {} } });
-    assert.deepEqual(runtime.window.mini, { width: 720, height: 180, anchor: "bottom-right", margin: 16, alwaysOnTop: true });
+    assert.deepEqual(runtime.window.mini, { width: 720, height: 180, anchor: "bottom-right", margin: 16, alwaysOnTop: true, transparent: false });
     assert.deepEqual(window.options.webPreferences.additionalArguments, ["--next2d-window-mode"]);
     assert.equal(window.options.webPreferences.sandbox, true);
     assert.equal(window.options.webPreferences.contextIsolation, true);
@@ -292,4 +296,122 @@ test("preload exposes the mode API and checks its arguments", async (t) => {
     assert.deepEqual(seen, [{ mode: "full", width: 1280, height: 720 }]);
     off();
     assert.equal(listeners.has("next2d:window:mode"), false);
+});
+
+
+const transparentConfig = (mini = {}) => ({ window: { width: 1280, height: 720, fullscreen: true, mini: { transparent: true, ...mini } } });
+
+test("transparent mini: validation and defaults", (t) => {
+    assert.equal(readElectronConfig(fixture(t, { window: { mini: {} } })).window.mini.transparent, false);
+    assert.equal(readElectronConfig(fixture(t, { window: { mini: { transparent: true } } })).window.mini.transparent, true);
+});
+
+test("transparent: false keeps the exact old behaviour (no new window, no new API)", async (t) => {
+    const { windows, handlers, window } = await startHost(t, { window: { mini: { transparent: false } } });
+    assert.equal(windows.length, 1);
+    assert.equal(handlers.has("next2d:window:move-by"), false);
+    assert.equal(handlers.has("next2d:window:set-ignore-mouse-events"), false);
+    assert.deepEqual(window.options.webPreferences.additionalArguments, ["--next2d-window-mode"]);
+});
+
+test("transparent mini: full -> mini -> full rebuilds the window", async (t) => {
+    const { windows, handlers, trusted, calls } = await startHost(t, transparentConfig());
+    const [full] = windows;
+    assert.equal(full.options.transparent, undefined);
+    assert.deepEqual(full.options.webPreferences.additionalArguments, ["--next2d-window-mode"]);
+    assert.equal(full.fullScreen, true);
+    const setMode = handlers.get("next2d:window:set-mode");
+
+    assert.deepEqual(await setMode(trusted, "mini"), { mode: "mini", width: 720, height: 180 });
+    assert.equal(windows.length, 2);
+    const mini = windows[1];
+    assert.equal(full.destroyed, true);
+    assert.equal(mini.destroyed, undefined);
+    const o = mini.options;
+    assert.equal(o.transparent, true);
+    assert.equal(o.frame, false);
+    assert.equal(o.hasShadow, false);
+    assert.equal(o.resizable, false);
+    assert.equal(o.focusable, true);
+    assert.equal(o.fullscreen, false);
+    assert.equal(o.backgroundColor, "#00000000");
+    assert.equal(o.width, 720);
+    assert.equal(o.height, 180);
+    // Bottom-right of the work area: x = 1440 - 720 - 16, y = 25 + 875 - 180 - 16.
+    assert.deepEqual([o.x, o.y], [704, 704]);
+    assert.deepEqual(o.webPreferences.additionalArguments, ["--next2d-window-mode", "--next2d-mini-transparent"]);
+    assert.ok(calls.some((c) => c[0] === "setAlwaysOnTop" && c[1] === true && c[2] === "floating"));
+    assert.ok(calls.some((c) => c[0] === "setIgnoreMouseEvents" && c[1] === true && c[2]?.forward === true));
+    assert.deepEqual(handlers.get("next2d:window:get-mode")({ sender: mini.webContents, senderFrame: mini.webContents.mainFrame }),
+        { mode: "mini", width: 720, height: 180 });
+    // The old window's crash listener was removed before it was destroyed; the new one existed first.
+    assert.ok(calls.findIndex((c) => c[0] === "destroy") > -1);
+
+    const trustedMini = { sender: mini.webContents, senderFrame: Object.assign(mini.webContents.mainFrame, { url: "next2d://game/index.html" }) };
+    assert.deepEqual(await setMode(trustedMini, "full"), { mode: "full", width: 1440, height: 900 });
+    assert.equal(windows.length, 3);
+    assert.equal(mini.destroyed, true);
+    const back = windows[2];
+    assert.equal(back.options.transparent, undefined);
+    assert.equal(back.options.fullscreen, true);
+    assert.deepEqual(back.options.webPreferences.additionalArguments, ["--next2d-window-mode"]);
+});
+
+test("transparent mini: IPC click-through and moveBy (clamped, remembered)", async (t) => {
+    const { windows, handlers, trusted, calls } = await startHost(t, transparentConfig());
+    const setMode = handlers.get("next2d:window:set-mode");
+    const ignore = handlers.get("next2d:window:set-ignore-mouse-events");
+    const moveBy = handlers.get("next2d:window:move-by");
+    // Not available in the full window.
+    assert.throws(() => ignore(trusted, true), /transparent mini/);
+    assert.throws(() => moveBy(trusted, 1, 1), /transparent mini/);
+    await setMode(trusted, "mini");
+    const mini = windows[1];
+    const t2 = { sender: mini.webContents, senderFrame: Object.assign(mini.webContents.mainFrame, { url: "next2d://game/index.html" }) };
+    assert.throws(() => ignore(t2, "no"), TypeError);
+    assert.throws(() => moveBy(t2, NaN, 0), TypeError);
+    assert.throws(() => ignore(trusted, true), /access denied/);
+    calls.length = 0;
+    ignore(t2, false);
+    ignore(t2, true);
+    assert.deepEqual(calls.filter((c) => c[0] === "setIgnoreMouseEvents"),
+        [["setIgnoreMouseEvents", false, undefined], ["setIgnoreMouseEvents", true, { forward: true }]]);
+    moveBy(t2, -100, -50);
+    assert.deepEqual([mini.bounds.x, mini.bounds.y], [604, 654]);
+    moveBy(t2, -5000, -5000);
+    assert.deepEqual([mini.bounds.x, mini.bounds.y], [0, 25]);
+    moveBy(t2, 9000, 9000);
+    assert.deepEqual([mini.bounds.x, mini.bounds.y], [720, 720]);
+    moveBy(t2, -20, 0);
+    // Back to full and mini again: the last position is used.
+    await setMode(t2, "full");
+    await setMode({ sender: windows[2].webContents, senderFrame: Object.assign(windows[2].webContents.mainFrame, { url: "next2d://game/index.html" }) }, "mini");
+    assert.deepEqual([windows[3].options.x, windows[3].options.y], [700, 720]);
+});
+
+test("preload: transparent mini adds setIgnoreMouseEvents and moveBy only with its flag", async (t) => {
+    const load = (extra) => {
+        const exposed = {};
+        const invoked = [];
+        const argv = process.argv;
+        process.argv = [...argv, "--next2d-window-mode", ...extra];
+        try {
+            loadWithElectron(t, path.join(templates, "preload.cjs"), {
+                contextBridge: { exposeInMainWorld: (key, api) => { exposed[key] = api; } },
+                ipcRenderer: { invoke: async (...args) => { invoked.push(args); }, on() {}, removeListener() {} }
+            });
+        } finally {
+            process.argv = argv;
+        }
+        return { api: exposed.next2dWindow, invoked };
+    };
+    assert.equal(load([]).api.moveBy, undefined);
+    assert.equal(load([]).api.setIgnoreMouseEvents, undefined);
+    const { api, invoked } = load(["--next2d-mini-transparent"]);
+    assert.deepEqual(Object.keys(api).sort(), ["getBounds", "getMode", "moveBy", "onModeChange", "quit", "setIgnoreMouseEvents", "setMode"]);
+    await assert.rejects(api.setIgnoreMouseEvents("x"), TypeError);
+    await assert.rejects(api.moveBy("1", 2), TypeError);
+    await api.setIgnoreMouseEvents(false);
+    await api.moveBy(3, 4);
+    assert.deepEqual(invoked, [["next2d:window:set-ignore-mouse-events", false], ["next2d:window:move-by", 3, 4]]);
 });

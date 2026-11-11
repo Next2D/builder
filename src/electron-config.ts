@@ -9,7 +9,7 @@ export type ElectronOS = "windows" | "macos" | "linux";
 export interface IElectronOverlayConfig { enabled: boolean; anchor: "bottom"; clickThrough: boolean }
 export type ElectronMiniAnchor = "bottom-right" | "bottom-left" | "top-right" | "top-left";
 /** A small always-on-top window the game can switch to and back from at run time (idle/companion modes). */
-export interface IElectronMiniConfig { width: number; height: number; anchor: ElectronMiniAnchor; margin: number; alwaysOnTop: boolean }
+export interface IElectronMiniConfig { width: number; height: number; anchor: ElectronMiniAnchor; margin: number; alwaysOnTop: boolean; transparent: boolean }
 const MINI_ANCHORS: readonly ElectronMiniAnchor[] = ["bottom-right", "bottom-left", "top-right", "top-left"];
 export interface IElectronConfig {
     nativeBridge?: INativeBridgeConfig;
@@ -102,8 +102,8 @@ export const readElectronConfig = (root: string): IElectronConfig => {
         if (!mini || typeof mini !== "object" || Array.isArray(mini)) {
             throw new Error("electron.config.json window.mini must be an object.");
         }
-        config.window.mini = { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true, ...mini };
-        const { width, height, anchor, margin, alwaysOnTop } = config.window.mini;
+        config.window.mini = { "width": 720, "height": 180, "anchor": "bottom-right", "margin": 16, "alwaysOnTop": true, "transparent": false, ...mini };
+        const { width, height, anchor, margin, alwaysOnTop, transparent } = config.window.mini;
         for (const dimension of [width, height]) {
             if (!Number.isInteger(dimension) || dimension < 1 || dimension > 16384) {
                 throw new Error("electron.config.json window.mini.width/height must be integers between 1 and 16384.");
@@ -117,6 +117,9 @@ export const readElectronConfig = (root: string): IElectronConfig => {
         }
         if (typeof alwaysOnTop !== "boolean") {
             throw new Error("electron.config.json window.mini.alwaysOnTop must be a boolean.");
+        }
+        if (typeof transparent !== "boolean") {
+            throw new Error("electron.config.json window.mini.transparent must be a boolean.");
         }
         // The overlay already is the small always-on-top window, and it never takes keyboard focus.
         if (config.window.overlay?.enabled) {

@@ -66,4 +66,15 @@ for f in "${FILES[@]}"; do
     echo "OK   $f"
 done
 
+# WebGL2 バインディング (OpenGL ES 3 ヘッダは third_party/khronos を使用)
+for f in src/bindings/webgl/WebGL2.cpp; do
+    c++ -fsyntax-only -std=c++20 -Wall -Wextra -Isrc -I. -Ithird_party/khronos -isystem "${V8INC}" \
+        -DV8_COMPRESS_POINTERS -DNEXT2D_ENABLE_WEBGL2=1 "$f"
+    echo "OK   $f"
+done
+# getContext('webgl2') の接続点 (NEXT2D_ENABLE_WEBGL2 有効時の Canvas.cpp)
+c++ -fsyntax-only -std=c++20 -Isrc -I. -isystem "${V8INC}" \
+    -DV8_COMPRESS_POINTERS -DNEXT2D_ENABLE_WEBGL2=1 src/bindings/Canvas.cpp
+echo "OK   src/bindings/Canvas.cpp (NEXT2D_ENABLE_WEBGL2)"
+
 echo "all checks passed"

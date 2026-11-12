@@ -346,8 +346,11 @@ player の実 API 使用を全面調査し、以下を実装済み。**この環
 
 - **JIT 禁止は Switch も同様** → jitless V8 の構成をそのまま使用。
 - **グラフィックス**: Dawn に Switch(NVN) バックエンドは無いため、`HostContext::backend` を
-  `WebGL2` にして `canvas.getContext('webgl2')` を Switch の GL に実装する
-  (`Canvas.cpp` の `«SWITCH»`)。player は WebGL2 バックエンドを持つため描画コードは再利用できる。
+  `WebGL2` にして `canvas.getContext('webgl2')` を OpenGL ES 3 へ変換する
+  (`src/bindings/webgl/WebGL2.cpp`、CMake の `NEXT2D_ENABLE_WEBGL2`)。player は WebGL2
+  バックエンドを持つため描画コードは再利用できる。コンテキスト生成と提示は
+  `src/gpu/GlesContext.h` のインターフェース越しで、バインディング本体はプラットフォーム非依存。
+  `tests/webgl2/run.sh` で Node(V8) + ANGLE を使い、実 GPU 上の描画結果を検証できる。
 - **SDK**: NintendoSDK は NDA 下で、承認 + devkit が必須。SDK 呼び出し箇所を埋めた
   スキャフォールドとして拡張する。
 

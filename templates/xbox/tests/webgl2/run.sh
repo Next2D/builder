@@ -39,3 +39,22 @@ c++ -std=c++20 -O1 -g -Wall -Wextra -shared -undefined dynamic_lookup -fPIC \
 # ./libGLESv2.dylib を読む。そのため ANGLE のディレクトリをカレントにして実行する。
 TEST_JS="$(pwd)/tests/webgl2/test.cjs"
 (cd "${ANGLE_DIR}" && NEXT2D_WEBGL2_ADDON="${OUT}/webgl2_test.node" node "${TEST_JS}")
+
+# 結合テスト: Next2D player の renderer worker (WebGL バックエンド) をバインディング上で動かす。
+# player のソース (依存インストール済み) が必要。PLAYER_DIR 未指定なら builder の隣を探し、無ければ省略。
+PLAYER_DIR="${PLAYER_DIR:-$(cd ../.. && pwd)/../player}"
+if [ ! -x "${PLAYER_DIR}/node_modules/.bin/rollup" ]; then
+    echo "skip: player integration test (set PLAYER_DIR to a Next2D player checkout with dependencies installed)"
+    exit 0
+fi
+PLAYER_DIR="$(cd "${PLAYER_DIR}" && pwd)"
+echo "player: ${PLAYER_DIR}"
+(cd "${PLAYER_DIR}" && ./node_modules/.bin/rollup packages/renderer/src/index.ts \
+    -f iife -n RendererWorker --inlineDynamicImports --silent \
+    -p '@rollup/plugin-node-resolve={browser:true,preferBuiltins:false}' \
+    -p @rollup/plugin-commonjs \
+    -p '@rollup/plugin-typescript={tsconfig:"./tsconfig.json",compilerOptions:{outDir:undefined,declaration:false}}' \
+    -o "${OUT}/renderer.worker.js")
+PLAYER_JS="$(pwd)/tests/webgl2/player.cjs"
+(cd "${ANGLE_DIR}" && NEXT2D_WEBGL2_ADDON="${OUT}/webgl2_test.node" \
+    NEXT2D_RENDERER_BUNDLE="${OUT}/renderer.worker.js" node "${PLAYER_JS}")

@@ -421,6 +421,43 @@ void main() { o_color = texture(u_atlas, vec3(v_uv, u_layer)); }`);
     gl.deleteTexture(atlas);
 });
 
+test("pixel buffer binding rules: offsets need a bound buffer, views need none", () => {
+    const pixels = new Uint8Array(4 * 4 * 4);
+    // PIXEL_PACK_BUFFER 非束縛でオフセット指定 → 生ポインタ扱いにせず INVALID_OPERATION
+    gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    assert(gl.getError() === gl.INVALID_OPERATION, "expected INVALID_OPERATION");
+
+    const pbo = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, 4 * 4 * 4, gl.STREAM_READ);
+    // 束縛中に配列指定 → INVALID_OPERATION (配列は書き換わらない)
+    pixels.fill(7);
+    gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    assert(gl.getError() === gl.INVALID_OPERATION, "expected INVALID_OPERATION");
+    assert(pixels.every((v) => v === 7), "array must stay untouched");
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    gl.deleteBuffer(pbo);
+
+    // PIXEL_UNPACK_BUFFER 非束縛でオフセット指定のテクスチャ転送 → INVALID_OPERATION
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    assert(gl.getError() === gl.NO_ERROR, "expected NO_ERROR");
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    assert(gl.getError() === gl.INVALID_OPERATION, "expected INVALID_OPERATION");
+
+    const upload = gl.createBuffer();
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, upload);
+    gl.bufferData(gl.PIXEL_UNPACK_BUFFER, new Uint8Array(4 * 4 * 4).fill(200), gl.STATIC_DRAW);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    assert(gl.getError() === gl.INVALID_OPERATION, "expected INVALID_OPERATION");
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    assert(gl.getError() === gl.NO_ERROR, "expected NO_ERROR");
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+    gl.deleteBuffer(upload);
+    gl.deleteTexture(tex);
+});
+
 test("async readback: PIXEL_PACK_BUFFER + fenceSync + getBufferSubData", () => {
     const { fbo, texture } = makeTarget(4, 4);
     gl.viewport(0, 0, 4, 4);

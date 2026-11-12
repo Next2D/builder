@@ -381,6 +381,14 @@ struct Pixels {
     bool from_image = false;   // true のとき data は詰めた RGBA8 行 (s->scratch)
 };
 
+// 指定の *_BUFFER_BINDING にバッファが束縛されているか。
+bool BufferBound(GLenum binding)
+{
+    GLint name = 0;
+    glGetIntegerv(binding, &name);
+    return name != 0;
+}
+
 // tex(Sub)Image の転送元 a[index] (+ 任意の srcOffset a[index+1]) を GL へ渡せる形にする。
 //   - 省略 / null        : data = nullptr (texImage は領域確保のみ)
 //   - 数値               : PIXEL_UNPACK_BUFFER 内オフセット
@@ -396,6 +404,14 @@ bool ResolvePixels(const Args& a, int index, GLState* s,
         return true;
     }
     v8::Local<v8::Value> src = a[index];
+    // WebGL2 の規則: オフセット指定は PIXEL_UNPACK_BUFFER が束縛されているときだけ、
+    // それ以外の転送元は束縛されていないときだけ有効。守らない呼び出しをドライバへ渡すと
+    // オフセットが生ポインタとして解釈されるので、ここで必ず弾く。
+    const bool unpack_buffer = BufferBound(GL_PIXEL_UNPACK_BUFFER_BINDING);
+    if (src->IsNumber() != unpack_buffer) {
+        SetError(s, GL_INVALID_OPERATION);
+        return false;
+    }
     if (src->IsNumber()) {
         out->data = Offset(a, index);
         return true;
@@ -603,7 +619,14 @@ void ReadPixels(const Args& a)
     const GLint x = I(a, 0), y = I(a, 1);
     const GLsizei w = I(a, 2), h = I(a, 3);
     const GLenum format = U(a, 4), type = U(a, 5);
-    if (a.Length() > 6 && a[6]->IsNumber()) {
+    // オフセット指定は PIXEL_PACK_BUFFER 束縛時のみ、配列指定は非束縛時のみ (WebGL2 の規則)。
+    // 逆の組み合わせをドライバへ渡すと、オフセットが書き込み先ポインタとして扱われる。
+    const bool to_buffer = a.Length() > 6 && a[6]->IsNumber();
+    if (to_buffer != BufferBound(GL_PIXEL_PACK_BUFFER_BINDING)) {
+        SetError(s, GL_INVALID_OPERATION);
+        return;
+    }
+    if (to_buffer) {
         glReadPixels(x, y, w, h, format, type, const_cast<void*>(Offset(a, 6)));
         return;
     }

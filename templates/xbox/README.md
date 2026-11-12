@@ -351,6 +351,9 @@ player の実 API 使用を全面調査し、以下を実装済み。**この環
   バックエンドを持つため描画コードは再利用できる。コンテキスト生成と提示は
   `src/gpu/GlesContext.h` のインターフェース越しで、バインディング本体はプラットフォーム非依存。
   `tests/webgl2/run.sh` で Node(V8) + ANGLE を使い、実 GPU 上の描画結果を検証できる。
+  隣に player のソースがあれば (`PLAYER_DIR`)、player の renderer worker をそのままバインディング上で
+  動かす結合テスト (`tests/webgl2/player.cjs`) も続けて実行する。renderer は `navigator.gpu` が無いと
+  WebGL バックエンドを選ぶので、WebGL2 構成のホストでは `navigator.gpu` を公開しないこと。
 - **SDK**: NintendoSDK は NDA 下で、承認 + devkit が必須。SDK 呼び出し箇所を埋めた
   スキャフォールドとして拡張する。
 

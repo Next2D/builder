@@ -345,17 +345,18 @@ player の実 API 使用を全面調査し、以下を実装済み。**この環
 そのまま流用でき、差分は主に以下:
 
 - **JIT 禁止は Switch も同様** → jitless V8 の構成をそのまま使用。
-- **グラフィックス**: Dawn に Switch(NVN) バックエンドは無いため、`HostContext::backend` を
+- **グラフィックス**: Dawn に Switch 向けバックエンドは無いため、`HostContext::backend` を
   `WebGL2` にして `canvas.getContext('webgl2')` を OpenGL ES 3 へ変換する
   (`src/bindings/webgl/WebGL2.cpp`、CMake の `NEXT2D_ENABLE_WEBGL2`)。player は WebGL2
   バックエンドを持つため描画コードは再利用できる。コンテキスト生成と提示は
   `src/gpu/GlesContext.h` のインターフェース越しで、バインディング本体はプラットフォーム非依存。
-  `tests/webgl2/run.sh` で Node(V8) + ANGLE を使い、実 GPU 上の描画結果を検証できる。
+  `tests/webgl2/run.sh` で Node(V8) + ANGLE (macOS) / Mesa (Linux・CI) を使い、描画結果を検証できる。
   隣に player のソースがあれば (`PLAYER_DIR`)、player の renderer worker をそのままバインディング上で
   動かす結合テスト (`tests/webgl2/player.cjs`) も続けて実行する。renderer は `navigator.gpu` が無いと
   WebGL バックエンドを選ぶので、WebGL2 構成のホストでは `navigator.gpu` を公開しないこと。
-- **SDK**: NintendoSDK は NDA 下で、承認 + devkit が必須。SDK 呼び出し箇所を埋めた
-  スキャフォールドとして拡張する。
+- **SDK**: NintendoSDK は NDA 下で、承認 + devkit が必須。NintendoSDK に依存する実装
+  (プラットフォーム層・ビルド手順) は公開できないため、このリポジトリには含めない。
+  ここに置くのは SDK に依存しない共通コアだけで、SDK 依存の層は各自が非公開の場所で用意する。
 
 ---
 

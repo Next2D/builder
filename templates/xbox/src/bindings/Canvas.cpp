@@ -52,9 +52,17 @@ void GetContextImpl(const v8::FunctionCallbackInfo<v8::Value>& args, bool /*offs
     } else if (type == "webgpu" && host->backend == GraphicsBackend::WebGPU) {
         context = CreateWebGPUCanvasContext(isolate, host);
     } else if ((type == "webgl2" || type == "webgl") && host->backend == GraphicsBackend::WebGL2) {
-        // «SWITCH» WebGL2(GL) バインディングをここで返す。Xbox(WebGPU)では未使用。
+        // WebGL2 → OpenGL ES 3 バインディング。Xbox(WebGPU) ビルドには含めない。
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        context = CreateWebGL2Context(isolate, host);
+        if (context.IsEmpty()) {
+            args.GetReturnValue().SetNull();
+            return;
+        }
+#else
         args.GetReturnValue().SetNull();
         return;
+#endif
     } else {
         args.GetReturnValue().SetNull();
         return;

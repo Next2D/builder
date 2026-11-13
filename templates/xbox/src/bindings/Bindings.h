@@ -28,6 +28,11 @@ void InstallWebGPU(v8::Isolate* isolate, v8::Local<v8::Object> global, HostConte
 // canvas.getContext('webgpu') が返す GPUCanvasContext を生成する (WebGPU.cpp)。
 v8::Local<v8::Object> CreateWebGPUCanvasContext(v8::Isolate* isolate, HostContext* host);
 
+// canvas.getContext('webgl2') が返す WebGL2RenderingContext を生成する (webgl/WebGL2.cpp)。
+// OpenGL ES 3 へ 1 対 1 で変換する。host->gles が無い場合は空の Local を返す。
+// NEXT2D_ENABLE_WEBGL2 を定義したビルドでのみリンクされる。
+v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* host);
+
 // canvas.getContext('2d') / OffscreenCanvas.getContext('2d') を生成する (Canvas2D.cpp)。
 v8::Local<v8::Object> CreateCanvas2DContext(v8::Isolate* isolate, HostContext* host,
                                             int width, int height);

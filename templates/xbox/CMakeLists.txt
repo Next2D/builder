@@ -102,7 +102,21 @@ else()
     message(WARNING "Next2D: assets.rc not found - host-only build (no game assets). Run @next2d/builder to embed.")
 endif()
 
+# WebGL2 → OpenGL ES 3 バインディング (src/bindings/webgl) と EGL コンテキスト。
+# Xbox ホストは WebGPU(Dawn) で描画するため既定では含めない。有効にする場合は
+# OpenGL ES 3 / EGL を提供するライブラリ (ANGLE 等) を別途リンクすること。
+option(NEXT2D_ENABLE_WEBGL2 "Build the WebGL2 (OpenGL ES 3) canvas binding" OFF)
+if(NOT NEXT2D_ENABLE_WEBGL2)
+    list(FILTER NEXT2D_HOST_SOURCES EXCLUDE REGEX "/src/bindings/webgl/|/src/gpu/EglContext\\.(cpp|h)$")
+endif()
+
 add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
+
+if(NEXT2D_ENABLE_WEBGL2)
+    target_compile_definitions(Next2DXboxHost PRIVATE NEXT2D_ENABLE_WEBGL2=1)
+    target_include_directories(Next2DXboxHost PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/khronos")   # GLES3/gl3.h, EGL/egl.h
+endif()
 
 target_include_directories(Next2DXboxHost PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"

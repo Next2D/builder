@@ -10,8 +10,11 @@
 | stb_vorbis.c | https://github.com/nothings/stb | public domain (Unlicense) / MIT のデュアル |
 | dr_mp3.h | https://github.com/mackron/dr_libs | public domain (Unlicense) / MIT-0 のデュアル |
 | dr_wav.h | https://github.com/mackron/dr_libs | public domain (Unlicense) / MIT-0 のデュアル |
+| khronos/GLES3/gl3.h, gl3platform.h | https://github.com/KhronosGroup/OpenGL-Registry | MIT |
+| khronos/EGL/egl.h, eglplatform.h, khronos/KHR/khrplatform.h | https://github.com/KhronosGroup/EGL-Registry | MIT |
 
-いずれも各ファイル末尾に原文のライセンス条文が含まれる。
+stb / dr_libs は各ファイル末尾に原文のライセンス条文が含まれる。Khronos のヘッダは
+各ファイル冒頭に著作権表示と SPDX 識別子があり、WebGL2 バインディング (`NEXT2D_ENABLE_WEBGL2`) でのみ使用する。
 
 ## ローカル修正 / Local patches
 

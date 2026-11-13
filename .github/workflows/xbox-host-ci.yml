@@ -11,6 +11,9 @@
 #   4. gamecore-api-audit  : WINAPI_FAMILY=WINAPI_FAMILY_GAMES でコンパイルし、
 #                            ホスト/V8 platform 層が使う Win32 API がコンソール
 #                            (Game Core) パーティションに存在するかを公開 SDK で監査
+#   5. webgl2-render-tests : WebGL2 → OpenGL ES 3 バインディング (NEXT2D_ENABLE_WEBGL2) を
+#                            Node の V8 + Mesa のソフトウェア描画で実行し、描画結果を検証。
+#                            続けて Next2D player の renderer worker をバインディング上で動かす
 name: xbox-host-ci
 
 on:
@@ -45,6 +48,36 @@ jobs:
       - name: Run raster/stb tests + ASan + V8 syntax check
         working-directory: templates/xbox
         run: tests/check_local.sh "$GITHUB_WORKSPACE/v8_headers/include"
+
+  webgl2-render-tests:
+    name: WebGL2 binding render tests (Linux, Mesa)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install EGL / OpenGL ES (Mesa, software rendering)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dri
+      # 結合テスト用: player の renderer worker をバンドルして動かす
+      - uses: actions/checkout@v6
+        with:
+          repository: Next2D/player
+          path: player
+      - name: Install player dependencies
+        working-directory: player
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run WebGL2 binding tests + player integration test
+        shell: bash   # pipefail を有効にする (tee 越しでもテスト失敗を拾う)
+        working-directory: templates/xbox
+        env:
+          PLAYER_DIR: ${{ github.workspace }}/player
+        run: |
+          tests/webgl2/run.sh | tee "$RUNNER_TEMP/webgl2.log"
+          # player が用意できずに結合テストが省略された場合は失敗にする
+          ! grep -q "^skip:" "$RUNNER_TEMP/webgl2.log"
 
   windows-tests:
     name: RasterCore + Windows platform tests (MSVC)
@@ -231,6 +264,20 @@ jobs:
              @files
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host "OK: all V8-dependent sources compiled"
+
+      - name: Compile-check WebGL2 backend (NEXT2D_ENABLE_WEBGL2)
+        shell: pwsh
+        working-directory: templates/xbox
+        run: |
+          $v8inc = Join-Path $env:GITHUB_WORKSPACE "v8_headers/include"
+          # 既定 OFF のオプション。Khronos の公開ヘッダ (third_party/khronos) だけでコンパイルできる。
+          cl /c /nologo /std:c++20 /Zc:__cplusplus /EHsc /W3 `
+             /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DUNICODE /D_UNICODE `
+             /DV8_COMPRESS_POINTERS /DNEXT2D_ENABLE_WEBGL2=1 `
+             /Isrc /Ithird_party/khronos /I"$v8inc" `
+             src/bindings/webgl/WebGL2.cpp src/gpu/EglContext.cpp src/bindings/Canvas.cpp
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "OK: WebGL2 backend sources compiled"
 
       - name: Compile-check GamepadManager (GameInput.h — warn only)
         shell: pwsh

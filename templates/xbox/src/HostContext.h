@@ -11,6 +11,7 @@ namespace next2d {
 
 class EventLoop;
 class DawnContext;
+class GlesContext;
 class AssetLoader;
 class GamepadManager;
 class AudioEngine;
@@ -33,6 +34,8 @@ public:
 
     EventLoop*       event_loop = nullptr;
     DawnContext*     gpu        = nullptr;
+    // backend==WebGL2 のときの OpenGL ES 3 コンテキスト (WebGPU では nullptr)
+    GlesContext*     gles       = nullptr;
     AssetLoader*     assets     = nullptr;
     GamepadManager*  gamepad    = nullptr;
     AudioEngine*     audio      = nullptr;

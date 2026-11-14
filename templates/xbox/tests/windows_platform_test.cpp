@@ -43,7 +43,9 @@ static int failures = 0;
 static int checks = 0;
 
 #define CHECK(cond) do { ++checks; if (!(cond)) { \
-    ++failures; std::printf("not ok - %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+    ++failures; std::printf("not ok - %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    /* GitHub Actions の注釈としても出す (ジョブの一覧や PR の画面に失敗箇所が表示される) */ \
+    std::printf("::error::CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
 // 2x2 PNG: (0,0)=赤 (1,0)=緑 (0,1)=青 (1,1)=半透明白
 static const unsigned char kTestPng[] = {

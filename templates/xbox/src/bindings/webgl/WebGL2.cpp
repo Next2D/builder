@@ -1517,6 +1517,16 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
     glBindFramebuffer(GL_FRAMEBUFFER, host->gles->default_framebuffer());
     glViewport(0, 0, host->gles->width(), host->gles->height());
 
+    // WebGL の描画バッファは、書き込み時にリニア → sRGB の変換を行わない
+    // (シェーダが出力した値がそのまま表示用の値になる)。一方、デフォルトフレームバッファが
+    // sRGB 形式の環境では、OpenGL ES はこの変換を既定で行うため、色が二重に変換されて
+    // 全体が白っぽくなる。GL_FRAMEBUFFER_SRGB (EXT_sRGB_write_control) で止める。
+    // 拡張が無い環境では INVALID_ENUM になるだけなので、エラーは読み捨てる。
+    constexpr GLenum kFramebufferSrgb = 0x8DB9;
+    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    glDisable(kFramebufferSrgb);
+    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+
     return gl;
 }
 

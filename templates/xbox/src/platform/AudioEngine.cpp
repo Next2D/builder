@@ -1,5 +1,8 @@
+// AudioEngine の XAudio2 実装 (AudioEngine.h を参照)。
 #include "AudioEngine.h"
 #include "AudioDecoder.h"
+
+#if NEXT2D_AUDIO_XAUDIO2
 
 #include <xaudio2.h>
 #include <iostream>
@@ -24,9 +27,13 @@ using Microsoft::WRL::ComPtr;
 
 namespace next2d {
 
-AudioVoice::AudioVoice(IXAudio2* xaudio, std::shared_ptr<PcmBuffer> buffer)
+AudioVoice::AudioVoice(AudioEngine* engine, std::shared_ptr<PcmBuffer> buffer)
     : buffer_(std::move(buffer))
 {
+    IXAudio2* xaudio = engine ? engine->xaudio() : nullptr;
+    if (!xaudio || !buffer_) {
+        return;   // 音声デバイス無し: 再生開始と同時に終了として扱う
+    }
     WAVEFORMATEX wfx = {};
     wfx.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
     wfx.nChannels = static_cast<WORD>(buffer_->channels);
@@ -209,7 +216,14 @@ bool AudioEngine::Decode(const std::vector<uint8_t>& input, PcmBuffer& out)
 
 std::shared_ptr<AudioVoice> AudioEngine::CreateVoice(std::shared_ptr<PcmBuffer> buffer)
 {
-    return std::make_shared<AudioVoice>(xaudio_, std::move(buffer));
+    return std::make_shared<AudioVoice>(this, std::move(buffer));
+}
+
+bool AudioEngine::Render(float*, int, int, int)
+{
+    return false;   // XAudio2 が自分で出力する
 }
 
 } // namespace next2d
+
+#endif // NEXT2D_AUDIO_XAUDIO2

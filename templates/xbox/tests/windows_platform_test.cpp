@@ -23,6 +23,12 @@
 #include "../src/platform/StbTextRasterizer.h"
 #include "../src/platform/AudioEngine.h"
 
+// フォントが特定のグリフを持つかをテスト側でも調べるための stb_truetype
+// (StbTextRasterizer.cpp と同じく、この翻訳単位に閉じた static な実装として取り込む)。
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include "third_party/stb_truetype.h"
+
 #include <fstream>
 
 #include <Windows.h>
@@ -196,25 +202,45 @@ static void TestStbText()
     CHECK(next2d::stbtext::MeasureText("100px Arial", L"M", em));
     CHECK(em.width > 82.0 && em.width < 85.0);
 
-    // 指定フォントに無い文字は、登録済みの他のフォントで補う。Arial に日本語は無いので、
-    // 日本語フォントがある環境では、登録の前後で「あ」の描画結果が変わる。
+    // 指定フォントに無い文字は、登録済みの他のフォントで補う。Arial に「あ」(U+3042) は
+    // 無いので、「あ」を持つフォントを登録すると描画結果が変わる。候補のフォントが本当に
+    // そのグリフを持つかは stb_truetype で直接確かめる (環境によってフォントの有無や
+    // 収録文字が異なるため。持つフォントが無ければこの検証は行わない)。
     next2d::TextBitmap before;
-    CHECK(next2d::stbtext::RasterizeText("48px Arial", L"あ", 0, 0, 0, before));
+    CHECK(next2d::stbtext::RasterizeText("48px Arial", L"\u3042", 0, 0, 0, before));
+    bool fallback_tested = false;
     for (const wchar_t* name : { L"\\Fonts\\meiryo.ttc", L"\\Fonts\\msgothic.ttc", L"\\Fonts\\YuGothM.ttc" }) {
         std::ifstream jp_ifs((std::wstring(windir) + name).c_str(), std::ios::binary);
         std::vector<uint8_t> jp((std::istreambuf_iterator<char>(jp_ifs)),
                                 std::istreambuf_iterator<char>());
-        if (jp.empty() || !next2d::stbtext::RegisterFont("Fallback JP", std::move(jp))) {
+        if (jp.empty()) {
+            continue;
+        }
+        stbtt_fontinfo info = {};
+        const int offset = stbtt_GetFontOffsetForIndex(jp.data(), 0);
+        if (offset < 0 || !stbtt_InitFont(&info, jp.data(), offset) ||
+            stbtt_FindGlyphIndex(&info, 0x3042) == 0) {
+            std::printf("# fallback: %ls has no U+3042 glyph, skipped\n", name);
+            continue;
+        }
+        std::vector<uint8_t> copy = jp;
+        if (!next2d::stbtext::RegisterFont("Fallback JP", std::move(copy))) {
             continue;
         }
         next2d::TextBitmap after;
-        CHECK(next2d::stbtext::RasterizeText("48px Arial", L"あ", 0, 0, 0, after));
+        CHECK(next2d::stbtext::RasterizeText("48px Arial", L"\u3042", 0, 0, 0, after));
+        std::printf("# fallback: %ls, before %dx%d, after %dx%d\n",
+                    name, before.width, before.height, after.width, after.height);
         CHECK(after.rgba != before.rgba);
         // 欧文は引き続き Arial で描かれる (幅が変わらない)
         next2d::TextMetricsInfo em_after;
         CHECK(next2d::stbtext::MeasureText("100px Arial", L"M", em_after));
         CHECK(em_after.width == em.width);
+        fallback_tested = true;
         break;
+    }
+    if (!fallback_tested) {
+        std::printf("# fallback: no font with a U+3042 glyph found, test skipped\n");
     }
 }
 

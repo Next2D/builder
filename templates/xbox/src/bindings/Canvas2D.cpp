@@ -13,7 +13,6 @@
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
-#include <Windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -304,12 +303,49 @@ void FillRect(const v8::FunctionCallbackInfo<v8::Value>& a)
 
 // --- テキスト (DirectWrite / Direct2D — platform/TextRasterizer) -----------
 // NOTE: 実装済みだが実機での見た目(ベースライン位置/合字/絵文字)は要検証。
+// UTF-8 → wstring。wchar_t が 16bit の環境 (Windows) では UTF-16 (サロゲートペア)、
+// 32bit の環境ではコードポイントをそのまま入れる。不正なバイト列は U+FFFD にする。
 static std::wstring ToWide(const std::string& s)
 {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(n, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    std::wstring w;
+    w.reserve(s.size());
+    const auto* p = reinterpret_cast<const unsigned char*>(s.data());
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        uint32_t cp = p[i];
+        int extra = 0;
+        if (cp < 0x80) {
+            extra = 0;
+        } else if ((cp & 0xE0) == 0xC0) {
+            cp &= 0x1F; extra = 1;
+        } else if ((cp & 0xF0) == 0xE0) {
+            cp &= 0x0F; extra = 2;
+        } else if ((cp & 0xF8) == 0xF0) {
+            cp &= 0x07; extra = 3;
+        } else {
+            cp = 0xFFFD;
+        }
+        ++i;
+        for (int k = 0; k < extra; ++k) {
+            if (i >= n || (p[i] & 0xC0) != 0x80) {
+                cp = 0xFFFD;
+                break;
+            }
+            cp = (cp << 6) | (p[i] & 0x3F);
+            ++i;
+        }
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            cp = 0xFFFD;
+        }
+        if (sizeof(wchar_t) == 2 && cp >= 0x10000) {
+            cp -= 0x10000;
+            w.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+            w.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+        } else {
+            w.push_back(static_cast<wchar_t>(cp));
+        }
+    }
     return w;
 }
 

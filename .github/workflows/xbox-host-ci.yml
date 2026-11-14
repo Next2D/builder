@@ -139,6 +139,19 @@ jobs:
           if errorlevel 1 exit /b 1
           platform_test.exe
 
+      - name: Build & run software audio mixer tests
+        shell: cmd
+        working-directory: templates/xbox
+        run: |
+          rem OS の音声 API を使わない実装 (Windows 以外の既定) を、Windows 上で選んで検証する。
+          cl /nologo /utf-8 /std:c++17 /EHsc /W3 /DNOMINMAX /DNEXT2D_AUDIO_MIXER=1 /Isrc /I. ^
+             tests\audio_mixer_test.cpp ^
+             src\platform\AudioMixer.cpp ^
+             src\platform\AudioDecoder.cpp ^
+             /Fe:audio_mixer_test.exe
+          if errorlevel 1 exit /b 1
+          audio_mixer_test.exe
+
   gamecore-api-audit:
     name: Game Core API partition audit (WINAPI_FAMILY_GAMES)
     runs-on: windows-2022

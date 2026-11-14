@@ -4,11 +4,22 @@
 #include "EventTarget.h"
 #include "v8/V8Util.h"
 
+#ifdef _WIN32
 #include <Windows.h>
 #include <bcrypt.h>
-#include <cstdio>
-
 #pragma comment(lib, "bcrypt.lib")
+#else
+#include <random>
+#endif
+
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
 
 namespace next2d {
 
@@ -58,14 +69,15 @@ void NoopEventTarget(v8::Isolate* isolate, v8::Local<v8::Object> obj)
 
 namespace {
 
-// navigator.clipboard.readText() -> Promise<string> (Win32 クリップボード)
-void ClipboardReadText(const v8::FunctionCallbackInfo<v8::Value>& args)
-{
-    v8::Isolate* isolate = args.GetIsolate();
-    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
-    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
-    args.GetReturnValue().Set(resolver->GetPromise());
+// ---- OS に依存する部分 ------------------------------------------------------
+// クリップボード、乱数、名前付きストレージの保存先だけが OS ごとに異なる。
+// Windows 以外では、クリップボードは空として扱い、乱数は標準ライブラリから取り、
+// ストレージは埋め込み側が渡した保存先 (HostContext::storage_dir) を使う。
 
+#ifdef _WIN32
+
+std::string ReadClipboardText()
+{
     std::string text;
     if (OpenClipboard(nullptr)) {
         HANDLE h = GetClipboardData(CF_UNICODETEXT);
@@ -82,7 +94,84 @@ void ClipboardReadText(const v8::FunctionCallbackInfo<v8::Value>& args)
         }
         CloseClipboard();
     }
-    resolver->Resolve(ctx, Str(isolate, text)).Check();
+    return text;
+}
+
+void WriteClipboardText(const std::string& s)
+{
+    if (!OpenClipboard(nullptr)) {
+        return;
+    }
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n > 0) {
+        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, static_cast<size_t>(n) * sizeof(wchar_t));
+        if (h) {
+            auto* w = static_cast<wchar_t*>(GlobalLock(h));
+            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w, n);
+            GlobalUnlock(h);
+            EmptyClipboard();
+            SetClipboardData(CF_UNICODETEXT, h);
+        }
+    }
+    CloseClipboard();
+}
+
+void FillRandom(uint8_t* bytes, size_t size)
+{
+    BCryptGenRandom(nullptr, bytes, static_cast<ULONG>(size), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+}
+
+// 保存先の既定: %LOCALAPPDATA%\Next2D (PC / Gaming.Desktop / CI)。
+//
+// コンソール実機 (Gaming.Xbox.*) のストレージ対応 (要 devkit 検証):
+//   - localStorage / indexedDB のようなタイトルローカル永続化は XPersistentLocalStorage
+//     (XPersistentLocalStorageGetPath で得たパス配下へ同じファイル I/O) が対応先。
+//     同期 API のため現行の同期ストレージ契約 (StorageLoad/StorageSave) にそのまま載る。
+//   - ユーザー毎のクラウド同期セーブが要る場合のみ XGameSave (非同期・XUser 必須) を使う。
+// いずれも console GDK ヘッダと signed-in user / SCID 構成が必要で、devkit 実機でしか
+// コンパイル・実行検証できないため未実装 (現状はファイルパスのフォールバックで動作)。
+std::filesystem::path DefaultStorageDirectory()
+{
+    wchar_t base[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) {
+        return {};   // フォールバック: カレント
+    }
+    return std::filesystem::path(base) / L"Next2D";
+}
+
+#else // !_WIN32
+
+std::string ReadClipboardText()
+{
+    return {};
+}
+
+void WriteClipboardText(const std::string&) {}
+
+void FillRandom(uint8_t* bytes, size_t size)
+{
+    std::random_device device;
+    for (size_t i = 0; i < size; ++i) {
+        bytes[i] = static_cast<uint8_t>(device());
+    }
+}
+
+// 既定の保存先は無い。埋め込み側が storage_dir を渡さなければ、保存せずメモリ上に持つ。
+std::filesystem::path DefaultStorageDirectory()
+{
+    return {};
+}
+
+#endif // _WIN32
+
+// navigator.clipboard.readText() -> Promise<string>
+void ClipboardReadText(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
+    args.GetReturnValue().Set(resolver->GetPromise());
+    resolver->Resolve(ctx, Str(isolate, ReadClipboardText())).Check();
 }
 
 // navigator.clipboard.writeText(text) -> Promise
@@ -93,20 +182,8 @@ void ClipboardWriteText(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto resolver = v8::Promise::Resolver::New(ctx).ToLocalChecked();
     args.GetReturnValue().Set(resolver->GetPromise());
 
-    if (args.Length() > 0 && OpenClipboard(nullptr)) {
-        const std::string s = v8util::ToStdString(isolate, args[0]);
-        int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-        if (n > 0) {
-            HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, static_cast<size_t>(n) * sizeof(wchar_t));
-            if (h) {
-                auto* w = static_cast<wchar_t*>(GlobalLock(h));
-                MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w, n);
-                GlobalUnlock(h);
-                EmptyClipboard();
-                SetClipboardData(CF_UNICODETEXT, h);
-            }
-        }
-        CloseClipboard();
+    if (args.Length() > 0) {
+        WriteClipboardText(v8util::ToStdString(isolate, args[0]));
     }
     resolver->Resolve(ctx, v8::Undefined(isolate)).Check();
 }
@@ -122,8 +199,7 @@ void CryptoGetRandomValues(const v8::FunctionCallbackInfo<v8::Value>& args)
     auto view = args[0].As<v8::ArrayBufferView>();
     std::vector<uint8_t> bytes(view->ByteLength());
     if (!bytes.empty()) {
-        BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
-                        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        FillRandom(bytes.data(), bytes.size());
         // view のバッキングへ書き戻す
         auto ab = view->Buffer();
         auto* dst = static_cast<uint8_t*>(ab->GetBackingStore()->Data()) + view->ByteOffset();
@@ -137,7 +213,7 @@ void CryptoRandomUUID(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     v8::Isolate* isolate = args.GetIsolate();
     uint8_t b[16] = {};
-    BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    FillRandom(b, sizeof(b));
     b[6] = static_cast<uint8_t>((b[6] & 0x0f) | 0x40);   // version 4
     b[8] = static_cast<uint8_t>((b[8] & 0x3f) | 0x80);   // variant
     char buf[37];
@@ -151,34 +227,39 @@ void CryptoRandomUUID(const v8::FunctionCallbackInfo<v8::Value>& args)
 // --- 名前付きストレージの永続化バックエンド ---------------------------------
 // localStorage / indexedDB のセマンティクスは Polyfills.cpp の JS 側が実装し、
 // ここは名前ごとのファイル I/O のみを担う。
-// 保存先: %LOCALAPPDATA%\Next2D\<name>.json (PC / Gaming.Desktop / CI)。
-//
-// コンソール実機 (Gaming.Xbox.*) のストレージ対応 (要 devkit 検証):
-//   - localStorage / indexedDB のようなタイトルローカル永続化は XPersistentLocalStorage
-//     (XPersistentLocalStorageGetPath で得たパス配下へ同じファイル I/O) が対応先。
-//     同期 API のため現行の同期ストレージ契約 (StorageLoad/StorageSave) にそのまま載る。
-//   - ユーザー毎のクラウド同期セーブが要る場合のみ XGameSave (非同期・XUser 必須) を使う。
-// いずれも console GDK ヘッダと signed-in user / SCID 構成が必要で、devkit 実機でしか
-// コンパイル・実行検証できないため未実装 (現状はファイルパスのフォールバックで動作)。
-std::wstring StorageFilePath(const std::string& name)
+// 保存先は、埋め込み側が指定したディレクトリ (HostContext::storage_dir)、無ければ OS の既定
+// (DefaultStorageDirectory)。どちらも無ければファイルへは保存せず、メモリ上にだけ持つ
+// (プロセスが終わると消える)。ファイル名は <name>.json。
+
+std::map<std::string, std::string>& MemoryStorage()
+{
+    static std::map<std::string, std::string> storage;
+    return storage;
+}
+
+// 保存先のファイルパス。保存先が無ければ空。
+std::filesystem::path StorageFilePath(HostContext* host, const std::string& name)
 {
     // ファイル名として安全な文字だけを残す
-    std::wstring safe;
+    std::string safe;
     for (char c : name) {
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                         (c >= '0' && c <= '9') || c == '_' || c == '-';
-        safe.push_back(ok ? static_cast<wchar_t>(c) : L'_');
+        safe.push_back(ok ? c : '_');
     }
     if (safe.empty()) {
-        safe = L"storage";
+        safe = "storage";
     }
-    wchar_t base[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH)) {
-        return safe + L".json";   // フォールバック: カレント
+
+    std::filesystem::path dir = (host && !host->storage_dir.empty())
+        ? std::filesystem::u8path(host->storage_dir)
+        : DefaultStorageDirectory();
+    if (dir.empty()) {
+        return {};
     }
-    std::wstring dir = std::wstring(base) + L"\\Next2D";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\" + safe + L".json";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir / (safe + ".json");
 }
 
 // __next2d_storage_load(name) -> string
@@ -187,19 +268,18 @@ void StorageLoad(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Isolate* isolate = args.GetIsolate();
     const std::string name = args.Length() > 0
         ? v8util::ToStdString(isolate, args[0]) : "localStorage";
-    HANDLE h = CreateFileW(StorageFilePath(name).c_str(), GENERIC_READ, FILE_SHARE_READ,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        args.GetReturnValue().Set(Str(isolate, ""));
+    const std::filesystem::path path = StorageFilePath(HostContext::From(isolate), name);
+    if (path.empty()) {
+        const auto it = MemoryStorage().find(name);
+        args.GetReturnValue().Set(Str(isolate, it == MemoryStorage().end() ? std::string() : it->second));
         return;
     }
-    DWORD size = GetFileSize(h, nullptr);
-    std::string data(size, '\0');
-    DWORD read = 0;
-    ReadFile(h, data.data(), size, &read, nullptr);
-    CloseHandle(h);
-    data.resize(read);
-    args.GetReturnValue().Set(Str(isolate, data));
+    std::ifstream ifs(path, std::ios::binary);
+    std::ostringstream data;
+    if (ifs) {
+        data << ifs.rdbuf();
+    }
+    args.GetReturnValue().Set(Str(isolate, data.str()));
 }
 
 // __next2d_storage_save(name, data)
@@ -211,14 +291,15 @@ void StorageSave(const v8::FunctionCallbackInfo<v8::Value>& args)
     v8::Isolate* isolate = args.GetIsolate();
     const std::string name = v8util::ToStdString(isolate, args[0]);
     const std::string data = v8util::ToStdString(isolate, args[1]);
-    HANDLE h = CreateFileW(StorageFilePath(name).c_str(), GENERIC_WRITE, 0,
-                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
+    const std::filesystem::path path = StorageFilePath(HostContext::From(isolate), name);
+    if (path.empty()) {
+        MemoryStorage()[name] = data;
         return;
     }
-    DWORD written = 0;
-    WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
-    CloseHandle(h);
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    if (ofs) {
+        ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
 }
 
 // new OffscreenCanvas(width, height)
@@ -301,7 +382,7 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     SetValue(isolate, navigator, "language", Str(isolate, "en-US"));
     SetValue(isolate, navigator, "platform", Str(isolate, "Xbox"));
 
-    // navigator.clipboard (テキスト貼付/コピー、Win32 クリップボード)
+    // navigator.clipboard (テキスト貼付/コピー。Windows 以外では常に空)
     v8::Local<v8::Object> clipboard = v8::Object::New(isolate);
     SetMethod(isolate, clipboard, "readText", ClipboardReadText);
     SetMethod(isolate, clipboard, "writeText", ClipboardWriteText);

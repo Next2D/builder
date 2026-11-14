@@ -70,6 +70,12 @@ public:
         needs_present = false;
     }
 
+    void Resize(int width, int height)
+    {
+        width_ = width;
+        height_ = height;
+    }
+
     int width() const override { return width_; }
     int height() const override { return height_; }
     uint32_t default_framebuffer() const override { return default_framebuffer_; }
@@ -306,6 +312,9 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
     h->host.viewport_width = std::max(1, static_cast<int>(std::lround(config->width / dpr)));
     h->host.viewport_height = std::max(1, static_cast<int>(std::lround(config->height / dpr)));
     h->host.backend = GraphicsBackend::WebGL2;
+    if (config->storage_dir) {
+        h->host.storage_dir = config->storage_dir;
+    }
     h->gles = std::make_unique<CallbackGlesContext>(*config);
     h->host.gles = h->gles.get();
 
@@ -498,6 +507,56 @@ void next2d_host_set_gamepad(Next2DHost* h, int32_t index, const Next2DGamepadSt
         snap.pressed[i] = state->buttons[i] > 0.5f;
     }
     h->gamepad->SetSnapshot(index, snap);
+}
+
+void next2d_host_resize(Next2DHost* h, int32_t width, int32_t height)
+{
+    if (!h || width <= 0 || height <= 0) {
+        return;
+    }
+    const double dpr = h->host.device_pixel_ratio;
+    const int vw = std::max(1, static_cast<int>(std::lround(width / dpr)));
+    const int vh = std::max(1, static_cast<int>(std::lround(height / dpr)));
+    h->gles->Resize(width, height);
+    if (vw == h->host.viewport_width && vh == h->host.viewport_height) {
+        return;
+    }
+    h->host.viewport_width = vw;
+    h->host.viewport_height = vh;
+
+    // ブラウザのウィンドウサイズ変更と同じ: innerWidth などを更新して resize を配送する。
+    // アプリ (player) は resize を受けて、新しいサイズで描画バッファを作り直す。
+    {
+        v8::Isolate* isolate = h->runtime->isolate();
+        v8::Isolate::Scope isolate_scope(isolate);
+        v8::HandleScope hs(isolate);
+        v8::Local<v8::Context> ctx = h->runtime->context();
+        v8::Context::Scope cs(ctx);
+        v8::Local<v8::Object> global = ctx->Global();
+        SetNum(isolate, global, "innerWidth", vw);
+        SetNum(isolate, global, "innerHeight", vh);
+        v8::Local<v8::Value> screen;
+        if (global->Get(ctx, v8::String::NewFromUtf8Literal(isolate, "screen")).ToLocal(&screen) &&
+            screen->IsObject()) {
+            SetNum(isolate, screen.As<v8::Object>(), "width", vw);
+            SetNum(isolate, screen.As<v8::Object>(), "height", vh);
+        }
+        if (!h->host.main_canvas.IsEmpty()) {
+            v8::Local<v8::Object> canvas = h->host.main_canvas.Get(isolate);
+            SetNum(isolate, canvas, "clientWidth", vw);
+            SetNum(isolate, canvas, "clientHeight", vh);
+        }
+    }
+    h->FireEvent("resize", [](v8::Isolate*, v8::Local<v8::Object>) {});
+}
+
+int32_t next2d_host_render_audio(Next2DHost* h, float* out, int32_t frames,
+                                 int32_t channels, int32_t sample_rate)
+{
+    if (!h || !h->audio) {
+        return 0;
+    }
+    return h->audio->Render(out, frames, channels, sample_rate) ? 1 : 0;
 }
 
 int32_t next2d_host_register_font(const char* name, const uint8_t* data, size_t size)

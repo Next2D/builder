@@ -508,6 +508,115 @@ bool ResolvePixels(const Args& a, int index, GLState* s,
     return true;
 }
 
+// ---- 確保した領域のゼロ初期化 -----------------------------------------------
+// WebGL は、新しく確保したテクスチャとレンダーバッファの中身を必ずゼロ (透明な黒、
+// 深度 1、ステンシル 0) にする。OpenGL ES では中身は不定で、以前のメモリの内容が残る。
+// アプリは「確保直後は透明」を前提に、クリアせずに描き足すことがある (キャッシュ用の
+// テクスチャなど) ため、初期化しないとノイズが透けて見える。確保の直後に一時的な
+// フレームバッファへ取り付けてクリアする。
+
+enum class StorageClass { Color, ColorInt, ColorUint, Depth, Stencil, DepthStencil };
+
+StorageClass ClassifyStorage(GLenum internalformat)
+{
+    switch (internalformat) {
+        case GL_DEPTH_COMPONENT16:
+        case GL_DEPTH_COMPONENT24:
+        case GL_DEPTH_COMPONENT32F:
+            return StorageClass::Depth;
+        case GL_STENCIL_INDEX8:
+            return StorageClass::Stencil;
+        case GL_DEPTH24_STENCIL8:
+        case GL_DEPTH32F_STENCIL8:
+            return StorageClass::DepthStencil;
+        case GL_R8UI: case GL_R16UI: case GL_R32UI:
+        case GL_RG8UI: case GL_RG16UI: case GL_RG32UI:
+        case GL_RGBA8UI: case GL_RGBA16UI: case GL_RGBA32UI:
+        case GL_RGB10_A2UI:
+            return StorageClass::ColorUint;
+        case GL_R8I: case GL_R16I: case GL_R32I:
+        case GL_RG8I: case GL_RG16I: case GL_RG32I:
+        case GL_RGBA8I: case GL_RGBA16I: case GL_RGBA32I:
+            return StorageClass::ColorInt;
+        default:
+            return StorageClass::Color;
+    }
+}
+
+// 現在束縛されている 2D テクスチャの level、または現在束縛されているレンダーバッファを
+// ゼロで初期化する。描画に使えない形式 (フレームバッファが不完全になる) は何もしない。
+// 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
+void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat)
+{
+    GLint name = 0;
+    glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
+    if (name == 0) {
+        return;
+    }
+
+    GLint saved_fbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
+    const GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
+    GLboolean saved_depth_mask = GL_TRUE;
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &saved_depth_mask);
+    GLint saved_stencil_front = 0, saved_stencil_back = 0;
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &saved_stencil_front);
+    glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &saved_stencil_back);
+
+    const StorageClass kind = ClassifyStorage(internalformat);
+    const GLenum attachment =
+        kind == StorageClass::Depth ? GL_DEPTH_ATTACHMENT :
+        kind == StorageClass::Stencil ? GL_STENCIL_ATTACHMENT :
+        kind == StorageClass::DepthStencil ? GL_DEPTH_STENCIL_ATTACHMENT : GL_COLOR_ATTACHMENT0;
+
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+    if (renderbuffer) {
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, attachment, GL_RENDERBUFFER,
+                                  static_cast<GLuint>(name));
+    } else {
+        glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D,
+                               static_cast<GLuint>(name), level);
+    }
+
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_TRUE);
+        glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
+        glStencilMaskSeparate(GL_BACK, 0xFFFFFFFFu);
+
+        const GLfloat zero_f[4] = {0, 0, 0, 0};
+        const GLint zero_i[4] = {0, 0, 0, 0};
+        const GLuint zero_u[4] = {0, 0, 0, 0};
+        const GLfloat one = 1.0f;
+        switch (kind) {
+            case StorageClass::Color:        glClearBufferfv(GL_COLOR, 0, zero_f); break;
+            case StorageClass::ColorInt:     glClearBufferiv(GL_COLOR, 0, zero_i); break;
+            case StorageClass::ColorUint:    glClearBufferuiv(GL_COLOR, 0, zero_u); break;
+            case StorageClass::Depth:        glClearBufferfv(GL_DEPTH, 0, &one); break;
+            case StorageClass::Stencil:      glClearBufferiv(GL_STENCIL, 0, zero_i); break;
+            case StorageClass::DepthStencil: glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0); break;
+        }
+
+        if (saved_scissor) {
+            glEnable(GL_SCISSOR_TEST);
+        }
+        glColorMask(saved_color_mask[0], saved_color_mask[1], saved_color_mask[2], saved_color_mask[3]);
+        glDepthMask(saved_depth_mask);
+        glStencilMaskSeparate(GL_FRONT, static_cast<GLuint>(saved_stencil_front));
+        glStencilMaskSeparate(GL_BACK, static_cast<GLuint>(saved_stencil_back));
+    }
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_fbo));
+    glDeleteFramebuffers(1, &fbo);
+    // 描画に使えない形式を取り付けたときなどのエラーは、アプリに見せない
+    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+}
+
 void TexImage2D(const Args& a)
 {
     GLState* s = S(a);
@@ -532,6 +641,13 @@ void TexImage2D(const Args& a)
     if (px.from_image) {
         ScopedTightUnpack tight(s);
         glTexImage2D(target, level, internal, w, h, 0, format, type, px.data);
+    } else if (!px.data && w > 0 && h > 0 && BytesPerPixel(format, type) &&
+               !BufferBound(GL_PIXEL_UNPACK_BUFFER_BINDING)) {
+        // 転送元なし (null): WebGL は確保した領域をゼロで初期化する。ES では不定なので
+        // ゼロのバッファを渡す。
+        ScopedTightUnpack tight(s);
+        s->scratch.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * BytesPerPixel(format, type), 0);
+        glTexImage2D(target, level, internal, w, h, 0, format, type, s->scratch.data());
     } else {
         glTexImage2D(target, level, internal, w, h, 0, format, type, px.data);
     }
@@ -1234,7 +1350,15 @@ const Method kMethods[] = {
     {"texParameteri", [](const Args& a) { glTexParameteri(U(a, 0), U(a, 1), I(a, 2)); }},
     {"texParameterf", [](const Args& a) { glTexParameterf(U(a, 0), U(a, 1), F(a, 2)); }},
     {"generateMipmap", [](const Args& a) { glGenerateMipmap(U(a, 0)); }},
-    {"texStorage2D", [](const Args& a) { glTexStorage2D(U(a, 0), I(a, 1), U(a, 2), I(a, 3), I(a, 4)); }},
+    {"texStorage2D", [](const Args& a) {
+        glTexStorage2D(U(a, 0), I(a, 1), U(a, 2), I(a, 3), I(a, 4));
+        // WebGL の規則どおり全レベルをゼロで初期化する (2D テクスチャのみ)
+        if (U(a, 0) == GL_TEXTURE_2D) {
+            for (GLint level = 0; level < I(a, 1); ++level) {
+                ZeroInitializeStorage(false, level, U(a, 2));
+            }
+        }
+    }},
     {"texStorage3D", [](const Args& a) {
         glTexStorage3D(U(a, 0), I(a, 1), U(a, 2), I(a, 3), I(a, 4), I(a, 5));
     }},
@@ -1300,14 +1424,15 @@ const Method kMethods[] = {
     {"renderbufferStorage", [](const Args& a) {
         // WebGL1 由来の DEPTH_STENCIL は ES3 のサイズ付き形式へ読み替える。
         const GLenum format = U(a, 1);
-        glRenderbufferStorage(U(a, 0), format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format,
-                              I(a, 2), I(a, 3));
+        const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
+        glRenderbufferStorage(U(a, 0), sized, I(a, 2), I(a, 3));
+        ZeroInitializeStorage(true, 0, sized);
     }},
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
-        glRenderbufferStorageMultisample(U(a, 0), I(a, 1),
-                                         format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format,
-                                         I(a, 3), I(a, 4));
+        const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
+        glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
+        ZeroInitializeStorage(true, 0, sized);
     }},
 
     // --- シェーダー / プログラム

@@ -352,7 +352,9 @@ void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, H
     InstallNetwork(isolate, global, host);  // XMLHttpRequest/Blob/URL/ImageData
     InstallImage(isolate, global, host);
     InstallAudio(isolate, global, host);
+#if !defined(NEXT2D_ENABLE_WEBGPU) || NEXT2D_ENABLE_WEBGPU
     InstallWebGPU(isolate, global, host);   // navigator.gpu
+#endif
     InstallGamepad(isolate, global, host);  // navigator.getGamepads
 
     // TextEncoder/TextDecoder/queueMicrotask。bootstrap.js はメインコンテキスト

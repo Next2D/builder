@@ -22,7 +22,7 @@
 #include "../../gpu/GlesContext.h"
 #include "../../v8/V8Util.h"
 
-#include <GLES3/gl3.h>
+#include "GlApi.h"   // GLES3/gl3.h + (任意) 関数テーブル経由の呼び出し
 
 #include <algorithm>
 #include <cstring>

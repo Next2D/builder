@@ -171,39 +171,90 @@ const Font* SelectFont(const CssFont& css)
     return &fonts.front();
 }
 
+// cp を描けるフォントを返す。primary にグリフがあればそれを使い、無ければ他の登録フォント
+// から探す (太さが一致するものを優先)。ブラウザのフォントフォールバックに相当し、
+// 欧文フォントを指定したテキストに日本語が混ざっていても豆腐にならない。
+// どのフォントにも無ければ primary (豆腐/空白を描く)。
+const Font* FontForCodepoint(const Font* primary, uint32_t cp, bool bold)
+{
+    if (stbtt_FindGlyphIndex(&primary->info, static_cast<int>(cp)) != 0) {
+        return primary;
+    }
+    const Font* any = nullptr;
+    for (const auto& f : Fonts()) {
+        if (&f == primary || stbtt_FindGlyphIndex(&f.info, static_cast<int>(cp)) == 0) {
+            continue;
+        }
+        if (f.bold == bold) {
+            return &f;
+        }
+        if (!any) {
+            any = &f;
+        }
+    }
+    return any ? any : primary;
+}
+
 // 計測とラスタライズで共有するレイアウト計算。
-struct Layout {
+struct Glyph {
     const Font* font = nullptr;
-    float scale = 0;
-    int ascent = 0, descent = 0;   // フォント単位
-    double width = 0;              // px
-    std::vector<uint32_t> cps;
+    float scale = 0;      // このグリフのフォントでの px スケール
+    int cp = 0;
+};
+
+struct Layout {
+    std::vector<Glyph> glyphs;
+    double ascent = 0, descent = 0;   // px (使用した全フォントの最大)
+    double width = 0;                 // px
 };
 
 bool ComputeLayout(const std::string& css_font, const std::wstring& text, Layout& lo)
 {
     const CssFont css = ParseCssFont(css_font);
-    lo.font = SelectFont(css);
-    if (!lo.font) {
+    const Font* primary = SelectFont(css);
+    if (!primary) {
         return false;
     }
-    lo.scale = stbtt_ScaleForPixelHeight(&lo.font->info, static_cast<float>(css.px));
-    int line_gap = 0;
-    stbtt_GetFontVMetrics(&lo.font->info, &lo.ascent, &lo.descent, &line_gap);
-    lo.cps = ToCodepoints(text);
+
+    const auto add_metrics = [&lo](const Font* font, float scale) {
+        int ascent = 0, descent = 0, line_gap = 0;
+        stbtt_GetFontVMetrics(&font->info, &ascent, &descent, &line_gap);
+        lo.ascent = std::max(lo.ascent, static_cast<double>(ascent) * scale);
+        lo.descent = std::max(lo.descent, -static_cast<double>(descent) * scale);   // stbtt の descent は負値
+    };
+
+    // CSS の font-size は em の大きさ。ascent + descent の合計を px に合わせる
+    // stbtt_ScaleForPixelHeight ではなく、em を px に対応させるスケールを使う
+    // (前者だと、行の高さが em より大きいフォントほどブラウザより小さく描かれる)。
+    const float primary_scale = stbtt_ScaleForMappingEmToPixels(&primary->info, static_cast<float>(css.px));
+    add_metrics(primary, primary_scale);
+
+    const std::vector<uint32_t> cps = ToCodepoints(text);
+    lo.glyphs.reserve(cps.size());
+    for (const uint32_t cp : cps) {
+        Glyph g;
+        g.cp = static_cast<int>(cp);
+        g.font = FontForCodepoint(primary, cp, css.bold);
+        if (g.font == primary) {
+            g.scale = primary_scale;
+        } else {
+            g.scale = stbtt_ScaleForMappingEmToPixels(&g.font->info, static_cast<float>(css.px));
+            add_metrics(g.font, g.scale);
+        }
+        lo.glyphs.push_back(g);
+    }
 
     // Keep layout arithmetic in double; stb's bitmap API still takes float.
-    const double scale = lo.scale;
     double x = 0;
-    for (size_t i = 0; i < lo.cps.size(); ++i) {
+    for (size_t i = 0; i < lo.glyphs.size(); ++i) {
+        const Glyph& g = lo.glyphs[i];
         int advance = 0, lsb = 0;
-        stbtt_GetCodepointHMetrics(&lo.font->info, static_cast<int>(lo.cps[i]), &advance, &lsb);
-        x += advance * scale;
-        if (i + 1 < lo.cps.size()) {
-            x += stbtt_GetCodepointKernAdvance(
-                     &lo.font->info,
-                     static_cast<int>(lo.cps[i]),
-                     static_cast<int>(lo.cps[i + 1])) * scale;
+        stbtt_GetCodepointHMetrics(&g.font->info, g.cp, &advance, &lsb);
+        x += static_cast<double>(advance) * g.scale;
+        // カーニングは同じフォントが続くときだけ
+        if (i + 1 < lo.glyphs.size() && lo.glyphs[i + 1].font == g.font) {
+            x += static_cast<double>(stbtt_GetCodepointKernAdvance(
+                     &g.font->info, g.cp, lo.glyphs[i + 1].cp)) * g.scale;
         }
     }
     lo.width = x;
@@ -241,10 +292,9 @@ bool MeasureText(const std::string& css_font, const std::wstring& text,
     if (!ComputeLayout(css_font, text, lo)) {
         return false;
     }
-    const double scale = lo.scale;
     out.width   = lo.width;
-    out.ascent  = lo.ascent * scale;
-    out.descent = -static_cast<double>(lo.descent) * scale;   // stbtt の descent は負値
+    out.ascent  = lo.ascent;
+    out.descent = lo.descent;
     return true;
 }
 
@@ -259,34 +309,33 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
         return false;
     }
 
-    const double scale = lo.scale;
-    const double ascent_px  = lo.ascent * scale;
-    const double descent_px = -static_cast<double>(lo.descent) * scale;
     const int width  = std::max(1, static_cast<int>(std::ceil(lo.width)) + 2);
-    const int height = std::max(1, static_cast<int>(std::ceil(ascent_px + descent_px)) + 2);
-    const int baseline = static_cast<int>(std::ceil(ascent_px)) + 1;
+    const int height = std::max(1, static_cast<int>(std::ceil(lo.ascent + lo.descent)) + 2);
+    const int baseline = static_cast<int>(std::ceil(lo.ascent)) + 1;
 
     // 8bit カバレッジへ全グリフを合成してから RGBA 化する
     std::vector<uint8_t> coverage(static_cast<size_t>(width) * height, 0);
     double pen_x = 1.0;
-    for (size_t i = 0; i < lo.cps.size(); ++i) {
-        const int cp = static_cast<int>(lo.cps[i]);
+    for (size_t i = 0; i < lo.glyphs.size(); ++i) {
+        const Glyph& gl = lo.glyphs[i];
+        const stbtt_fontinfo* info = &gl.font->info;
+        const double scale = gl.scale;
         int advance = 0, lsb = 0;
-        stbtt_GetCodepointHMetrics(&lo.font->info, cp, &advance, &lsb);
+        stbtt_GetCodepointHMetrics(info, gl.cp, &advance, &lsb);
 
         int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
         const float shift_x =
             static_cast<float>(pen_x + lsb * scale - std::floor(pen_x + lsb * scale));
         stbtt_GetCodepointBitmapBoxSubpixel(
-            &lo.font->info, cp, lo.scale, lo.scale, shift_x, 0, &x0, &y0, &x1, &y1);
+            info, gl.cp, gl.scale, gl.scale, shift_x, 0, &x0, &y0, &x1, &y1);
 
         const int gw = x1 - x0;
         const int gh = y1 - y0;
         if (gw > 0 && gh > 0) {
             std::vector<uint8_t> glyph(static_cast<size_t>(gw) * gh);
             stbtt_MakeCodepointBitmapSubpixel(
-                &lo.font->info, glyph.data(), gw, gh, gw,
-                lo.scale, lo.scale, shift_x, 0, cp);
+                info, glyph.data(), gw, gh, gw,
+                gl.scale, gl.scale, shift_x, 0, gl.cp);
 
             const int dst_x = static_cast<int>(std::floor(pen_x + lsb * scale));
             const int dst_y = baseline + y0;
@@ -303,9 +352,8 @@ bool RasterizeText(const std::string& css_font, const std::wstring& text,
         }
 
         pen_x += advance * scale;
-        if (i + 1 < lo.cps.size()) {
-            pen_x += stbtt_GetCodepointKernAdvance(
-                         &lo.font->info, cp, static_cast<int>(lo.cps[i + 1])) * scale;
+        if (i + 1 < lo.glyphs.size() && lo.glyphs[i + 1].font == gl.font) {
+            pen_x += stbtt_GetCodepointKernAdvance(info, gl.cp, lo.glyphs[i + 1].cp) * scale;
         }
     }
 

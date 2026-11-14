@@ -187,6 +187,33 @@ static void TestStbText()
 
     next2d::TextBitmap empty;
     CHECK(!next2d::stbtext::RasterizeText("24px Arial", L"", 0, 0, 0, empty));
+
+    // CSS の font-size は em の大きさ。Arial の "M" の送り幅は 1706/2048 em なので
+    // 100px なら約 83.3px (ascent + descent を 100px に合わせる実装だと約 74.6px になる)。
+    next2d::TextMetricsInfo em;
+    CHECK(next2d::stbtext::MeasureText("100px Arial", L"M", em));
+    CHECK(em.width > 82.0 && em.width < 85.0);
+
+    // 指定フォントに無い文字は、登録済みの他のフォントで補う。Arial に日本語は無いので、
+    // 日本語フォントがある環境では、登録の前後で「あ」の描画結果が変わる。
+    next2d::TextBitmap before;
+    CHECK(next2d::stbtext::RasterizeText("48px Arial", L"あ", 0, 0, 0, before));
+    for (const wchar_t* name : { L"\\Fonts\\meiryo.ttc", L"\\Fonts\\msgothic.ttc", L"\\Fonts\\YuGothM.ttc" }) {
+        std::ifstream jp_ifs((std::wstring(windir) + name).c_str(), std::ios::binary);
+        std::vector<uint8_t> jp((std::istreambuf_iterator<char>(jp_ifs)),
+                                std::istreambuf_iterator<char>());
+        if (jp.empty() || !next2d::stbtext::RegisterFont("Fallback JP", std::move(jp))) {
+            continue;
+        }
+        next2d::TextBitmap after;
+        CHECK(next2d::stbtext::RasterizeText("48px Arial", L"あ", 0, 0, 0, after));
+        CHECK(after.rgba != before.rgba);
+        // 欧文は引き続き Arial で描かれる (幅が変わらない)
+        next2d::TextMetricsInfo em_after;
+        CHECK(next2d::stbtext::MeasureText("100px Arial", L"M", em_after));
+        CHECK(em_after.width == em.width);
+        break;
+    }
 }
 
 // --- 音声デコード (decodeAudioData の実体) -----------------------------------

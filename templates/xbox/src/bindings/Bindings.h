@@ -37,6 +37,10 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
 v8::Local<v8::Object> CreateCanvas2DContext(v8::Isolate* isolate, HostContext* host,
                                             int width, int height);
 
+// 2D コンテキストのビットマップを指定サイズで作り直し、描画状態を既定へ戻す (Canvas2D.cpp)。
+// canvas.width / canvas.height の代入時に Canvas.cpp が呼ぶ。
+void ResizeCanvas2DContext(v8::Local<v8::Object> context2d, int width, int height);
+
 // navigator.getGamepads / gamepad イベント基盤 (GameInput)
 void InstallGamepad(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host);
 

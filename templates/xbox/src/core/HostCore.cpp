@@ -306,6 +306,9 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
     h->host.viewport_width = std::max(1, static_cast<int>(std::lround(config->width / dpr)));
     h->host.viewport_height = std::max(1, static_cast<int>(std::lround(config->height / dpr)));
     h->host.backend = GraphicsBackend::WebGL2;
+    if (config->storage_dir) {
+        h->host.storage_dir = config->storage_dir;
+    }
     h->gles = std::make_unique<CallbackGlesContext>(*config);
     h->host.gles = h->gles.get();
 

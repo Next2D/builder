@@ -7,6 +7,8 @@
 
 #include <v8.h>
 
+#include <string>
+
 namespace next2d {
 
 class EventLoop;
@@ -51,6 +53,10 @@ public:
     int viewport_width  = 1920;
     int viewport_height = 1080;
     double device_pixel_ratio = 1.0;
+
+    // localStorage / indexedDB の保存先ディレクトリ (UTF-8)。空なら OS の既定
+    // (Windows は %LOCALAPPDATA%\Next2D。既定が無い OS ではメモリ上にだけ保持する)。
+    std::string storage_dir;
 
     static HostContext* From(v8::Isolate* isolate)
     {

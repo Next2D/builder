@@ -9,7 +9,9 @@
 #include "v8/V8Util.h"
 #include "v8/WeakHandle.h"
 
-#include <objbase.h>
+#ifdef _WIN32
+#include <objbase.h>   // WIC フォールバック用の COM 初期化
+#endif
 
 #include <cstring>
 #include <iostream>
@@ -372,7 +374,9 @@ void InstallImage(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContex
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
 
     // COM (WIC 用) 初期化
+#ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     v8::Local<v8::FunctionTemplate> image_tmpl =
         v8::FunctionTemplate::New(isolate, ImageConstructor);

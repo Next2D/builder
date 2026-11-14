@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-#define NEXT2D_HOST_CORE_API_VERSION 1u
+#define NEXT2D_HOST_CORE_API_VERSION 2u
 
 typedef struct Next2DHost Next2DHost;
 
@@ -66,6 +66,10 @@ typedef struct Next2DHostConfig {
     int32_t (*gl_make_current)(void* user);
     /* bindFramebuffer(target, null) の束縛先。通常 0。 */
     uint32_t default_framebuffer;
+
+    /* localStorage / indexedDB の保存先ディレクトリ。UTF-8。NULL なら OS の既定
+     * (既定の保存先が無い OS では保存されず、終了すると消える)。 */
+    const char* storage_dir;
 } Next2DHostConfig;
 
 /* ポインタイベントの種類。 */

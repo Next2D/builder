@@ -15,6 +15,7 @@
 #ifndef NEXT2D_HOST_CORE_H_
 #define NEXT2D_HOST_CORE_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -39,9 +40,11 @@ typedef struct Next2DHostConfig {
     /* 必ず NEXT2D_HOST_CORE_API_VERSION を入れる (不一致なら create は失敗する)。 */
     uint32_t api_version;
 
-    /* デフォルトフレームバッファのピクセルサイズと devicePixelRatio。 */
+    /* デフォルトフレームバッファのピクセルサイズ。 */
     int32_t width;
     int32_t height;
+    /* devicePixelRatio。アプリから見たビューポート (innerWidth / innerHeight、CSS ピクセル) は
+     * width / height をこの値で割ったものになる。等倍なら 1.0。 */
     double  device_pixel_ratio;
 
     /* アプリ資材のディレクトリ (index.html がある場所)。UTF-8。 */
@@ -87,7 +90,8 @@ NEXT2D_HOST_CORE_API Next2DHost* next2d_host_create(const Next2DHostConfig* conf
  * 続行なら 1、終了すべきなら 0 を返す。 */
 NEXT2D_HOST_CORE_API int32_t next2d_host_frame(Next2DHost* host);
 
-/* ポインタ入力 (マウス / タッチ)。x, y は左上原点のピクセル座標。
+/* ポインタ入力 (マウス / タッチ)。x, y は左上原点の、フレームバッファのピクセル座標
+ * (コアが devicePixelRatio で割って DOM イベントの座標にする)。
  * pointer_type は "mouse" / "touch" など。NULL なら "mouse"。 */
 NEXT2D_HOST_CORE_API void next2d_host_pointer_event(
     Next2DHost* host, int32_t kind, double x, double y,
@@ -100,6 +104,14 @@ NEXT2D_HOST_CORE_API void next2d_host_key_event(
 /* index 番 (0..3) のゲームパッド状態を書き込む。 */
 NEXT2D_HOST_CORE_API void next2d_host_set_gamepad(
     Next2DHost* host, int32_t index, const Next2DGamepadState* state);
+
+/* フォント (TTF / OTF のバイト列) を登録する。コアはシステムフォントを使わないので、
+ * アプリが文字を描くには 1 つ以上のフォントが必要。next2d_host_create の前に呼ぶこと。
+ * name は CSS の font-family と照合する名前 (例 "Arial")。太字のフォントは名前に
+ * "Bold" を含める (例 "Arial Bold")。指定と一致するフォントが無ければ最初に登録した
+ * フォントで描く。データはコピーされる。成功時 1、不正なフォントなら 0。 */
+NEXT2D_HOST_CORE_API int32_t next2d_host_register_font(
+    const char* name, const uint8_t* data, size_t size);
 
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);

@@ -109,6 +109,19 @@ NEXT2D_HOST_CORE_API void next2d_host_key_event(
 NEXT2D_HOST_CORE_API void next2d_host_set_gamepad(
     Next2DHost* host, int32_t index, const Next2DGamepadState* state);
 
+/* デフォルトフレームバッファのピクセルサイズが変わったことを伝える (表示先の解像度が
+ * 切り替わったときなど)。アプリには、ブラウザのウィンドウサイズ変更と同じ resize として届く。 */
+NEXT2D_HOST_CORE_API void next2d_host_resize(Next2DHost* host, int32_t width, int32_t height);
+
+/* 再生中の音声を合成して out (32bit float、インターリーブ、frames × channels 個) へ書き込む。
+ * コアが自分で音声を出力しない構成 (Windows 以外) で、埋め込み側が音声出力へ渡す PCM を
+ * 取り出すために使う。この関数だけは、音声出力のスレッドなど他のスレッドから呼んでよい
+ * (ただし next2d_host_destroy と同時に呼ばないこと)。
+ * 合成した場合 1。コアが自分で出力する構成 (Windows) では何も書かず 0 を返す。
+ * 一度も呼ばれない間、音声は「再生開始と同時に終了」として扱われる。 */
+NEXT2D_HOST_CORE_API int32_t next2d_host_render_audio(
+    Next2DHost* host, float* out, int32_t frames, int32_t channels, int32_t sample_rate);
+
 /* フォント (TTF / OTF のバイト列) を登録する。コアはシステムフォントを使わないので、
  * アプリが文字を描くには 1 つ以上のフォントが必要。next2d_host_create の前に呼ぶこと。
  * name は CSS の font-family と照合する名前 (例 "Arial")。太字のフォントは名前に

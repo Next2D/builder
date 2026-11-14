@@ -204,7 +204,8 @@ struct Glyph {
 
 struct Layout {
     std::vector<Glyph> glyphs;
-    double ascent = 0, descent = 0;   // px (使用した全フォントの最大)
+    double ascent = 0, descent = 0;   // px (使用した全フォントの最大。ビットマップの大きさ用)
+    double font_ascent = 0, font_descent = 0;   // px (指定フォントの値。計測結果として返す)
     double width = 0;                 // px
 };
 
@@ -228,6 +229,10 @@ bool ComputeLayout(const std::string& css_font, const std::wstring& text, Layout
     // (前者だと、行の高さが em より大きいフォントほどブラウザより小さく描かれる)。
     const float primary_scale = stbtt_ScaleForMappingEmToPixels(&primary->info, static_cast<float>(css.px));
     add_metrics(primary, primary_scale);
+    // 計測結果の ascent / descent は指定フォントのもの (ブラウザの fontBoundingBox と同じ)。
+    // 補完フォントの値まで含めると、行の高さが文字の内容で変わりレイアウトがずれる。
+    lo.font_ascent = lo.ascent;
+    lo.font_descent = lo.descent;
 
     const std::vector<uint32_t> cps = ToCodepoints(text);
     lo.glyphs.reserve(cps.size());
@@ -293,8 +298,8 @@ bool MeasureText(const std::string& css_font, const std::wstring& text,
         return false;
     }
     out.width   = lo.width;
-    out.ascent  = lo.ascent;
-    out.descent = lo.descent;
+    out.ascent  = lo.font_ascent;
+    out.descent = lo.font_descent;
     return true;
 }
 

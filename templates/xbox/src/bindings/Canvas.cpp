@@ -149,6 +149,62 @@ void TransferToImageBitmap(const v8::FunctionCallbackInfo<v8::Value>& args)
     args.GetReturnValue().Set(WrapImageBitmap(isolate, img));
 }
 
+// canvas.width / canvas.height をアクセサとして設置する。
+// 代入すると (値が同じでも) 2D コンテキストのビットマップと描画状態がリセットされる
+// (HTML の仕様。player はテキスト用キャンバスの使い回しでこの挙動に依存する)。
+// 値は __width / __height に保持する。
+void ApplyCanvasSize(v8::Isolate* isolate, v8::Local<v8::Object> canvas,
+                     const char* slot, v8::Local<v8::Value> value)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    int size = value->Int32Value(ctx).FromMaybe(0);
+    if (size < 0) {
+        size = 0;
+    }
+    SetValue(isolate, canvas, slot, v8::Integer::New(isolate, size));
+
+    v8::Local<v8::Value> ctx2d, wv, hv;
+    if (canvas->Get(ctx, Str(isolate, "__ctx2d")).ToLocal(&ctx2d) && ctx2d->IsObject() &&
+        canvas->Get(ctx, Str(isolate, "__width")).ToLocal(&wv) &&
+        canvas->Get(ctx, Str(isolate, "__height")).ToLocal(&hv)) {
+        ResizeCanvas2DContext(ctx2d.As<v8::Object>(),
+                              wv->Int32Value(ctx).FromMaybe(1),
+                              hv->Int32Value(ctx).FromMaybe(1));
+    }
+}
+
+void InstallCanvasSize(v8::Isolate* isolate, v8::Local<v8::Object> canvas, int width, int height)
+{
+    v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+    SetValue(isolate, canvas, "__width", v8::Integer::New(isolate, width));
+    SetValue(isolate, canvas, "__height", v8::Integer::New(isolate, height));
+
+    canvas->SetNativeDataProperty(ctx, Str(isolate, "width"),
+        [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
+            v8::Local<v8::Value> v;
+            if (info.This()->Get(info.GetIsolate()->GetCurrentContext(),
+                                 Str(info.GetIsolate(), "__width")).ToLocal(&v)) {
+                info.GetReturnValue().Set(v);
+            }
+        },
+        [](v8::Local<v8::Name>, v8::Local<v8::Value> value,
+           const v8::PropertyCallbackInfo<void>& info) {
+            ApplyCanvasSize(info.GetIsolate(), info.This(), "__width", value);
+        }).Check();
+    canvas->SetNativeDataProperty(ctx, Str(isolate, "height"),
+        [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
+            v8::Local<v8::Value> v;
+            if (info.This()->Get(info.GetIsolate()->GetCurrentContext(),
+                                 Str(info.GetIsolate(), "__height")).ToLocal(&v)) {
+                info.GetReturnValue().Set(v);
+            }
+        },
+        [](v8::Local<v8::Name>, v8::Local<v8::Value> value,
+           const v8::PropertyCallbackInfo<void>& info) {
+            ApplyCanvasSize(info.GetIsolate(), info.This(), "__height", value);
+        }).Check();
+}
+
 } // namespace
 
 v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* host,
@@ -158,10 +214,9 @@ v8::Local<v8::Object> CreateCanvasElement(v8::Isolate* isolate, HostContext* hos
     // player の canvasSetPositionService は children[0].localName === "canvas" を確認する
     SetValue(isolate, canvas, "tagName", Str(isolate, "CANVAS"));
     SetValue(isolate, canvas, "localName", Str(isolate, "canvas"));
-    SetValue(isolate, canvas, "width",
-             v8::Integer::New(isolate, width ? width : host->viewport_width));
-    SetValue(isolate, canvas, "height",
-             v8::Integer::New(isolate, height ? height : host->viewport_height));
+    InstallCanvasSize(isolate, canvas,
+                      width ? width : host->viewport_width,
+                      height ? height : host->viewport_height);
     SetValue(isolate, canvas, "clientWidth", v8::Integer::New(isolate, host->viewport_width));
     SetValue(isolate, canvas, "clientHeight", v8::Integer::New(isolate, host->viewport_height));
     SetValue(isolate, canvas, "style", v8::Object::New(isolate));
@@ -242,10 +297,9 @@ v8::Local<v8::Object> CreateOffscreenCanvas(v8::Isolate* isolate, HostContext* h
     v8::Local<v8::Object> canvas = v8::Object::New(isolate);
     // Worker への transfer 検出用マーカー (WorkerRuntime の serializer が参照)
     SetValue(isolate, canvas, "__isOffscreenCanvas", v8::Boolean::New(isolate, true));
-    SetValue(isolate, canvas, "width",
-             v8::Integer::New(isolate, width ? width : host->viewport_width));
-    SetValue(isolate, canvas, "height",
-             v8::Integer::New(isolate, height ? height : host->viewport_height));
+    InstallCanvasSize(isolate, canvas,
+                      width ? width : host->viewport_width,
+                      height ? height : host->viewport_height);
     SetMethod(isolate, canvas, "getContext", Offscreen_GetContext);
     SetMethod(isolate, canvas, "transferToImageBitmap", TransferToImageBitmap);
     SetMethod(isolate, canvas, "addEventListener", [](const v8::FunctionCallbackInfo<v8::Value>&) {});

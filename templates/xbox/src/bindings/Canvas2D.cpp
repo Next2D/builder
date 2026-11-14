@@ -336,11 +336,40 @@ void MeasureText(const v8::FunctionCallbackInfo<v8::Value>& a)
     a.GetReturnValue().Set(metrics);
 }
 
+// CSS font 文字列の "NNpx" を scale 倍にした文字列を返す ("bold 30px Arial", 1.5 → "bold 45px Arial")。
+std::string ScaleFontPixelSize(const std::string& font, double scale)
+{
+    const auto pos = font.find("px");
+    if (pos == std::string::npos) {
+        return font;
+    }
+    size_t start = pos;
+    while (start > 0 && (isdigit(static_cast<unsigned char>(font[start - 1])) || font[start - 1] == '.')) {
+        --start;
+    }
+    if (start == pos) {
+        return font;
+    }
+    char px[32];
+    std::snprintf(px, sizeof(px), "%.3f", FontPixelSize(font) * scale);
+    return font.substr(0, start) + px + font.substr(pos);
+}
+
 // text をラスタライズして surface へ合成する。
 void RasterizeText(Canvas2D* c, const std::wstring& wtext, double x, double y, const RGBA& col)
 {
+    // 現在の変換の拡大率を文字の大きさへ反映する。player は setTransform(scale, 0, 0, scale, ...)
+    // を掛けた状態で、CSS ピクセルのフォントサイズのまま 1 文字ずつ fillText する。拡大率を
+    // 無視すると、位置だけが拡大されて文字は小さいまま (間隔が開いた小さな文字) になる。
+    // 回転と縦横で異なる拡大率は扱わない (縦方向の拡大率を使う)。
+    const Mat& m = c->state.transform;
+    const double scale = std::hypot(m.c, m.d);
+    const std::string font = (scale > 0.0 && std::abs(scale - 1.0) > 1e-3)
+        ? ScaleFontPixelSize(c->state.font, scale)
+        : c->state.font;
+
     TextBitmap bmp;
-    if (!RasterizeTextWithDWrite(c->state.font, wtext, col.r, col.g, col.b, bmp)) return;
+    if (!RasterizeTextWithDWrite(font, wtext, col.r, col.g, col.b, bmp)) return;
 
     // fillText の x,y はベースライン起点。ビットマップは左上起点。
     Point origin = Apply(c->state.transform, x, y);
@@ -818,6 +847,27 @@ bool GetCanvas2DPixels(v8::Local<v8::Object> context2d,
     *out_width = static_cast<uint32_t>(c->surface.width);
     *out_height = static_cast<uint32_t>(c->surface.height);
     return true;
+}
+
+// canvas.width / canvas.height の代入時に呼ぶ。HTML の仕様どおり、(同じ値の代入でも)
+// ビットマップを透明で作り直し、パス・状態スタック・描画状態を既定へ戻す。
+// player はテキスト用のキャンバスを使い回し、幅の代入で内容をリセットする。
+void ResizeCanvas2DContext(v8::Local<v8::Object> context2d, int width, int height)
+{
+    if (context2d->InternalFieldCount() < 1) {
+        return;
+    }
+    auto* c = static_cast<Canvas2D*>(
+        context2d->GetInternalField(0).As<v8::External>()->Value());
+    if (!c) {
+        return;
+    }
+    c->surface = raster::Surface(width > 0 ? width : 1, height > 0 ? height : 1);
+    c->path.clear();
+    c->stack.clear();
+    c->state = State{};
+    c->cur_x = 0.0;
+    c->cur_y = 0.0;
 }
 
 v8::Local<v8::Object> CreateCanvas2DContext(v8::Isolate* isolate, HostContext* /*host*/,

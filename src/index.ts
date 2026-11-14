@@ -10,6 +10,7 @@ import { loadConfig, buildWeb } from "./web.js";
 import { buildElectron } from "./electron.js";
 import { runNative, openNative, buildNative } from "./native.js";
 import { buildXbox } from "./xbox.js";
+import { buildWithPlatformPackage } from "./platform-package.js";
 import fs from "node:fs";
 import path from "node:path";
 import { readElectronConfig } from "./electron-config.js";
@@ -63,6 +64,11 @@ const multiBuild = async (): Promise<void> =>
 
         case "xbox":
             await buildXbox();
+            break;
+
+        // 書き出しの実装を別パッケージ (@next2d/builder-<platform>) が持つプラットフォーム
+        case "switch":
+            await buildWithPlatformPackage(ctx.platform);
             break;
 
         case "web":

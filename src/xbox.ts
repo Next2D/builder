@@ -323,9 +323,9 @@ const embedXboxAssets = async (): Promise<void> =>
  *
  * @return {Promise<string>}
  * @method
- * @private
+ * @public
  */
-const resolveXboxV8Root = async (): Promise<string> =>
+export const resolveXboxV8Root = async (): Promise<string> =>
 {
     // 1. --v8-root 引数
     if (ctx.v8Root) {

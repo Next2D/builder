@@ -92,22 +92,114 @@
         };
     }
 
-    // --- URL の最小補完 -----------------------------------------------------
-    // ローカル実行では基本パスのみ扱えれば十分。標準 URL があればそれを使う。
-    if (typeof global.URL === "undefined") {
-        global.URL = class URL {
-            constructor(url, base) {
-                this.href = base ? String(base).replace(/\/?$/, "/") + url : String(url);
-                this.pathname = this.href.replace(/^[a-z]+:\/\/[^/]*/i, "");
-                this.search = "";
-                this.hash = "";
-            }
-            toString() { return this.href }
+    // --- URL の補完 ---------------------------------------------------------
+    // V8 単体には URL が無い。ネイティブ側は createObjectURL / revokeObjectURL だけを
+    // 持つ素のオブジェクトを URL として公開するので、ここでコンストラクタに置き換える
+    // (静的メソッドは引き継ぐ)。バンドラが出力する
+    // `new URL("../asset.mp3", import.meta.url).href` の相対解決に必要。
+    if (typeof global.URL !== "function") {
+        const previous = global.URL;
+        const PATTERN = /^([a-z][a-z0-9+.-]*:)?(\/\/[^/?#]*)?([^?#]*)(\?[^#]*)?(#.*)?$/i;
+
+        const split = function (text)
+        {
+            const m = PATTERN.exec(text) || [];
+            return {
+                "protocol": m[1] || "",
+                "hasAuthority": m[2] !== undefined,
+                "host": (m[2] || "").slice(2),
+                "path": m[3] || "",
+                "search": m[4] || "",
+                "hash": m[5] || ""
+            };
         };
-        global.URL.createObjectURL = function () { return "" };
-        // 意図的な no-op スタブ (ローカル実行では解放処理は不要)
-        // eslint-disable-next-line no-empty-function
-        global.URL.revokeObjectURL = function () {};
+
+        // "." と ".." を畳む (先頭と末尾のスラッシュは保つ)
+        const normalize = function (path)
+        {
+            const out = [];
+            const parts = path.split("/");
+            for (let i = 0; i < parts.length; ++i) {
+                const part = parts[i];
+                const last = i === parts.length - 1;
+                if (part === "..") {
+                    if (out.length > 1) {
+                        out.pop();
+                    }
+                    if (last) {
+                        out.push("");
+                    }
+                } else if (part === ".") {
+                    if (last) {
+                        out.push("");
+                    }
+                } else {
+                    out.push(part);
+                }
+            }
+            return out.join("/");
+        };
+
+        global.URL = class URL {
+            constructor (url, base)
+            {
+                const u = split(String(url));
+                if (!u.protocol) {
+                    if (base === undefined || base === null) {
+                        throw new TypeError("Invalid URL: " + url);
+                    }
+                    const b = split(String(base));
+                    if (!b.protocol) {
+                        throw new TypeError("Invalid base URL: " + base);
+                    }
+                    u.protocol = b.protocol;
+                    if (!u.hasAuthority) {
+                        u.hasAuthority = b.hasAuthority;
+                        u.host = b.host;
+                        if (u.path === "") {
+                            u.path = b.path;
+                            if (!u.search) {
+                                u.search = b.search;
+                            }
+                        } else if (u.path.charAt(0) !== "/") {
+                            u.path = b.path.replace(/[^/]*$/, "") + u.path;
+                        }
+                    }
+                }
+
+                // 階層を持つ URL だけ正規化する (data: や blob: は触らない)
+                if (u.hasAuthority || u.path.charAt(0) === "/") {
+                    if (u.path.charAt(0) !== "/") {
+                        u.path = "/" + u.path;
+                    }
+                    u.path = normalize(u.path);
+                }
+
+                const colon = u.host.lastIndexOf(":");
+                this.protocol = u.protocol;
+                this.host = u.host;
+                this.hostname = colon >= 0 ? u.host.slice(0, colon) : u.host;
+                this.port = colon >= 0 ? u.host.slice(colon + 1) : "";
+                this.pathname = u.path;
+                this.search = u.search;
+                this.hash = u.hash;
+                this.origin = u.hasAuthority ? u.protocol + "//" + u.host : "null";
+                this.href = u.protocol + (u.hasAuthority ? "//" + u.host : "")
+                    + u.path + u.search + u.hash;
+            }
+
+            toString () { return this.href }
+            toJSON () { return this.href }
+        };
+
+        global.URL.createObjectURL = previous && previous.createObjectURL
+            ? previous.createObjectURL
+            : function () { return "" };
+        global.URL.revokeObjectURL = previous && previous.revokeObjectURL
+            ? previous.revokeObjectURL
+            // 意図的な no-op スタブ (ローカル実行では解放処理は不要)
+            // eslint-disable-next-line no-empty-function
+            : function () {};
     }
 
     // --- URLSearchParams の最小補完 ----------------------------------------

@@ -110,6 +110,10 @@ if(NOT NEXT2D_ENABLE_WEBGL2)
     list(FILTER NEXT2D_HOST_SOURCES EXCLUDE REGEX "/src/bindings/webgl/|/src/gpu/EglContext\\.(cpp|h)$")
 endif()
 
+# src/core は共通コアを共有ライブラリとして出す構成 (core/CMakeLists.txt) 専用。
+# この実行ファイルには含めない。
+list(FILTER NEXT2D_HOST_SOURCES EXCLUDE REGEX "/src/core/")
+
 add_executable(Next2DXboxHost WIN32 ${NEXT2D_HOST_SOURCES})
 
 if(NEXT2D_ENABLE_WEBGL2)

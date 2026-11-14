@@ -3,6 +3,7 @@
 #include "V8Util.h"
 #include "CodeCache.h"
 #include "HostContext.h"
+#include "AssetLoader.h"
 #include "EmbeddedAssets.h"
 #include "bindings/Bindings.h"
 
@@ -131,6 +132,32 @@ bool V8Runtime::Initialize(HostContext* host)
             std::cerr << stack << std::endl;
         }
     });
+
+    // import.meta.url: モジュールの場所を、location.origin ("app://local") 基準の URL で返す。
+    // バンドラが出力する `new URL("../asset.mp3", import.meta.url).href` が
+    // "app://local/assets/asset.mp3" になり、AssetLoader が assets/app 基準で読める。
+    isolate_->SetHostInitializeImportMetaObjectCallback(
+        [](v8::Local<v8::Context> context, v8::Local<v8::Module> module,
+           v8::Local<v8::Object> meta) {
+            v8::Isolate* isolate = v8::Isolate::GetCurrent();
+            auto* self = static_cast<V8Runtime*>(isolate->GetData(kRuntimeSlot));
+            std::string url = "app://local/";
+            if (self && self->host_ && self->host_->assets) {
+                const auto it = self->module_paths_.find(module->GetIdentityHash());
+                if (it != self->module_paths_.end()) {
+                    std::error_code ec;
+                    const fs::path abs = fs::weakly_canonical(fs::path(it->second), ec);
+                    const fs::path root =
+                        fs::weakly_canonical(fs::path(self->host_->assets->root()), ec);
+                    const std::string key = abs.lexically_relative(root).generic_string();
+                    if (!key.empty() && key.rfind("..", 0) != 0) {
+                        url += key;
+                    }
+                }
+            }
+            meta->Set(context, v8util::Str(isolate, "url"),
+                      v8util::Str(isolate, url.c_str())).Check();
+        });
 
     v8::Isolate::Scope isolate_scope(isolate_);
     v8::HandleScope handle_scope(isolate_);

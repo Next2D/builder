@@ -49,8 +49,10 @@ void GetContextImpl(const v8::FunctionCallbackInfo<v8::Value>& args, bool /*offs
     v8::Local<v8::Object> context;
     if (type == "2d") {
         context = CreateCanvas2DContext(isolate, host, width, height);
+#if !defined(NEXT2D_ENABLE_WEBGPU) || NEXT2D_ENABLE_WEBGPU
     } else if (type == "webgpu" && host->backend == GraphicsBackend::WebGPU) {
         context = CreateWebGPUCanvasContext(isolate, host);
+#endif
     } else if ((type == "webgl2" || type == "webgl") && host->backend == GraphicsBackend::WebGL2) {
         // WebGL2 → OpenGL ES 3 バインディング。Xbox(WebGPU) ビルドには含めない。
 #if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2

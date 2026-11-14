@@ -1,9 +1,38 @@
 #include "GamepadManager.h"
 
+#if defined(NEXT2D_GAMEPAD_EXTERNAL) && NEXT2D_GAMEPAD_EXTERNAL
+
+// 外部入力モード: 状態は埋め込み側が SetSnapshot で書き込む。
+namespace next2d {
+
+GamepadManager::GamepadManager() = default;
+GamepadManager::~GamepadManager() = default;
+
+bool GamepadManager::Initialize()
+{
+    snapshots_.resize(4);
+    return true;
+}
+
+void GamepadManager::Poll(double /*now_ms*/) {}
+
+void GamepadManager::SetSnapshot(int index, const GamepadSnapshot& snapshot)
+{
+    if (index >= 0 && index < static_cast<int>(snapshots_.size())) {
+        snapshots_[index] = snapshot;
+    }
+}
+
+} // namespace next2d
+
+#else // GameInput
+
 #include <GameInput.h>
 #include <iostream>
 
 namespace next2d {
+
+void GamepadManager::SetSnapshot(int /*index*/, const GamepadSnapshot& /*snapshot*/) {}
 
 GamepadManager::GamepadManager() = default;
 
@@ -81,3 +110,5 @@ void GamepadManager::Poll(double now_ms)
 }
 
 } // namespace next2d
+
+#endif // NEXT2D_GAMEPAD_EXTERNAL

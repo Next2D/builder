@@ -26,6 +26,7 @@ export const echoHelp = (): void =>
     console.log("For Xbox build example (prebuilt V8 is downloaded automatically):");
     console.log("npx @next2d/builder --platform xbox --env prd");
     console.log("To use your own V8 build: --v8-root C:\\path\\to\\v8");
+    console.log("Nintendo Switch: --platform switch --env prd (needs the @next2d/builder-switch package in your project; licensed developers only)");
     console.log("Steam: --platform steam:windows|steam:macos|steam:linux --env prd");
     console.log("Electron: --arch x64|arm64|universal (default: macOS universal, others x64)");
     console.log("Combine existing Steam packages only: --platform steam:macos --env prd --steam-manifest");
@@ -63,7 +64,7 @@ export interface ParsedArgs {
 export const SUPPORTED_PLATFORMS: Set<string> = new Set([
     "windows", "macos", "linux",
     "steam:windows", "steam:macos", "steam:linux",
-    "ios", "android", "xbox", "web"
+    "ios", "android", "xbox", "switch", "web"
 ]);
 
 /**

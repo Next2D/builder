@@ -58,6 +58,11 @@ public:
     // (Windows は %LOCALAPPDATA%\Next2D。既定が無い OS ではメモリ上にだけ保持する)。
     std::string storage_dir;
 
+    // 保存先のファイルへ書き込んだ直後に呼ばれる (埋め込み側が、書いた内容を確定する
+    // 必要のある保存先を使う場合のための通知)。name は保存したストレージの名前。不要なら nullptr。
+    void (*storage_saved)(const char* name, void* user) = nullptr;
+    void* storage_saved_user = nullptr;
+
     static HostContext* From(v8::Isolate* isolate)
     {
         return static_cast<HostContext*>(isolate->GetData(kHostContextSlot));

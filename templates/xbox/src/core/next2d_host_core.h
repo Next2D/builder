@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-#define NEXT2D_HOST_CORE_API_VERSION 2u
+#define NEXT2D_HOST_CORE_API_VERSION 3u
 
 typedef struct Next2DHost Next2DHost;
 
@@ -70,6 +70,11 @@ typedef struct Next2DHostConfig {
     /* localStorage / indexedDB の保存先ディレクトリ。UTF-8。NULL なら OS の既定
      * (既定の保存先が無い OS では保存されず、終了すると消える)。 */
     const char* storage_dir;
+
+    /* storage_dir のファイルへ書き込んだ直後に呼ばれる。書いた内容を確定する操作が必要な
+     * 保存先を使う場合に、その合図として使う。name は保存したストレージの名前
+     * (例 "localStorage")。next2d_host_frame を呼んだスレッドから呼ばれる。不要なら NULL。 */
+    void (*storage_saved)(const char* name, void* user);
 } Next2DHostConfig;
 
 /* ポインタイベントの種類。 */

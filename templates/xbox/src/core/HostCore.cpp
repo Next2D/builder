@@ -315,6 +315,8 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
     if (config->storage_dir) {
         h->host.storage_dir = config->storage_dir;
     }
+    h->host.storage_saved = config->storage_saved;
+    h->host.storage_saved_user = config->user;
     h->gles = std::make_unique<CallbackGlesContext>(*config);
     h->host.gles = h->gles.get();
 

@@ -296,9 +296,17 @@ void StorageSave(const v8::FunctionCallbackInfo<v8::Value>& args)
         MemoryStorage()[name] = data;
         return;
     }
-    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
-    if (ofs) {
+    {
+        std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+        if (!ofs) {
+            return;
+        }
         ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    // ファイルを閉じてから、埋め込み側へ知らせる
+    HostContext* host = HostContext::From(isolate);
+    if (host && host->storage_saved) {
+        host->storage_saved(name.c_str(), host->storage_saved_user);
     }
 }
 

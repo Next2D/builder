@@ -61,32 +61,34 @@ bool ImageDecodeBase64(const std::string& in, std::vector<uint8_t>* out)
 // 同期デコードは画面遷移時に 1 秒超のフレームヒッチになる (--perf で計測済み)。
 void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const std::string& url)
 {
-    std::vector<uint8_t> input;
-    if (url.rfind("data:", 0) == 0) {
-        const auto comma = url.find(',');
-        if (comma != std::string::npos) {
-            const std::string meta = url.substr(5, comma - 5);
-            const std::string payload = url.substr(comma + 1);
-            if (meta.find(";base64") != std::string::npos) {
-                ImageDecodeBase64(payload, &input);
-            }
-        }
-    } else {
-        // pak (メモリ) 読みなので同期で問題ない。重いのはデコードのみ。
-        AssetLoader* assets = HostContext::From(isolate)->assets;
-        auto bytes = assets->ReadBinary(url);
-        if (bytes) {
-            input = std::move(*bytes);
-        }
-    }
+    // 読み込み (ファイル / data: の base64) もデコードと一緒にプールスレッドで行う。
+    // 資材をファイルから読む構成では、ストレージが遅いとメインスレッドでの読み込みが
+    // そのままフレームの停止になる。
+    AssetLoader* assets = HostContext::From(isolate)->assets;
 
     auto image_ref = std::make_shared<v8::Global<v8::Object>>(isolate, self);
     auto decoded = std::make_shared<DecodedImage>();
     auto ok = std::make_shared<bool>(false);
 
     decodequeue::Submit(
-        // プールスレッド: WIC デコードのみ (V8 に触れない)
-        [input = std::move(input), decoded, ok]() {
+        // プールスレッド: 読み込みとデコード (V8 に触れない)
+        [url, assets, decoded, ok]() {
+            std::vector<uint8_t> input;
+            if (url.rfind("data:", 0) == 0) {
+                const auto comma = url.find(',');
+                if (comma != std::string::npos) {
+                    const std::string meta = url.substr(5, comma - 5);
+                    const std::string payload = url.substr(comma + 1);
+                    if (meta.find(";base64") != std::string::npos) {
+                        ImageDecodeBase64(payload, &input);
+                    }
+                }
+            } else if (assets) {
+                auto bytes = assets->ReadBinary(url);
+                if (bytes) {
+                    input = std::move(*bytes);
+                }
+            }
             *ok = DecodeImage(input, *decoded);
         },
         // メインスレッド: 結果を image オブジェクトへ反映し load を発火

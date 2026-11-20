@@ -132,9 +132,14 @@ void CollectProfileNode(const v8::CpuProfileNode* node, std::map<std::string, un
     std::string key = (name && *name) ? name : "(anonymous)";
     if (script && *script) {
         std::string s(script);
-        const auto slash = s.find_last_of("/\\");
-        if (slash != std::string::npos) {
-            s = s.substr(slash + 1);
+        if (s.rfind("data:", 0) == 0 || s.rfind("blob:", 0) == 0) {
+            // data URL / blob URL から起動した worker のスクリプト (URL 全体は長すぎるので出さない)
+            s = "worker";
+        } else {
+            const auto slash = s.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                s = s.substr(slash + 1);
+            }
         }
         key += " (" + s + ":" + std::to_string(node->GetLineNumber())
              + ":" + std::to_string(node->GetColumnNumber()) + ")";
@@ -421,9 +426,18 @@ int32_t next2d_host_frame(Next2DHost* h)
         runtime.PumpPlatformTasks();
 
         // プロファイル中: メインの JS が長くかかったフレームを含む区間を書き出して仕切り直す
-        if (h->cpu_profiler && t_js - t_tasks > 300.0) {
-            char reason[64];
-            std::snprintf(reason, sizeof(reason), "spike (js %.0f ms)", t_js - t_tasks);
+        // (タイマー側やレンダラ側が長くかかったフレームも対象。しきい値は NEXT2D_HOST_PROFILE に
+        //  ミリ秒で指定でき、数値でなければ 300)
+        static const double profile_threshold = [] {
+            const char* value = std::getenv("NEXT2D_HOST_PROFILE");
+            const double ms = value ? std::atof(value) : 0.0;
+            return ms > 0.0 ? ms : 300.0;
+        }();
+        const double longest = std::max({ t_tasks - now, t_js - t_tasks, t_worker - t_js });
+        if (h->cpu_profiler && longest > profile_threshold) {
+            char reason[96];
+            std::snprintf(reason, sizeof(reason), "spike (tasks %.0f ms, js %.0f ms, worker %.0f ms)",
+                          t_tasks - now, t_js - t_tasks, t_worker - t_js);
             DumpAndRestartProfile(h->cpu_profiler, runtime.isolate(), reason);
         }
 

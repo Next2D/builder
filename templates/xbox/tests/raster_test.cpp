@@ -306,8 +306,46 @@ static void TestClipMask()
     CHECK(clip.active);
 }
 
+// CopyImage は、各ピクセルを Blend(..., 1.0) で合成した結果と一致する (不透明 / 透明 / 半透明、
+// surface からのはみ出しを含む)。
+static void TestCopyImage()
+{
+    const uint32_t sw = 7, sh = 5;
+    std::vector<uint8_t> image(static_cast<size_t>(sw) * sh * 4);
+    for (uint32_t y = 0; y < sh; ++y) {
+        for (uint32_t x = 0; x < sw; ++x) {
+            uint8_t* p = &image[(static_cast<size_t>(y) * sw + x) * 4];
+            p[0] = static_cast<uint8_t>(x * 30 + 10);
+            p[1] = static_cast<uint8_t>(y * 40 + 20);
+            p[2] = static_cast<uint8_t>((x + y) * 17);
+            // 列ごとに 不透明 / 透明 / 半透明 を混ぜる
+            p[3] = (x % 3 == 0) ? 255 : (x % 3 == 1) ? 0 : static_cast<uint8_t>(60 + y * 30);
+        }
+    }
+
+    const int offsets[][2] = { {0, 0}, {2, 1}, {-3, -2}, {6, 4}, {-7, 0}, {0, -5}, {20, 20} };
+    for (const auto& offset : offsets) {
+        Surface fast(8, 6), slow(8, 6);
+        // 合成先を空でない状態にしておく
+        for (size_t i = 0; i < fast.pixels.size(); ++i) {
+            fast.pixels[i] = slow.pixels[i] = static_cast<uint8_t>(i * 7 + 3);
+        }
+        CopyImage(fast, image.data(), sw, sh, offset[0], offset[1]);
+        const ClipRect no_clip;
+        for (uint32_t y = 0; y < sh; ++y) {
+            for (uint32_t x = 0; x < sw; ++x) {
+                const uint8_t* p = &image[(static_cast<size_t>(y) * sw + x) * 4];
+                Blend(slow, no_clip, offset[0] + static_cast<int>(x), offset[1] + static_cast<int>(y),
+                      RGBA{p[0], p[1], p[2], p[3]}, 1.0);
+            }
+        }
+        CHECK(fast.pixels == slow.pixels);
+    }
+}
+
 int main()
 {
+    TestCopyImage();
     TestParseColor();
     TestFontPixelSize();
     TestMatrix();

@@ -121,6 +121,40 @@ inline void Blend(Surface& s, const ClipRect& clip, int x, int y, const RGBA& co
     s.pixels[i+3] = static_cast<uint8_t>(255 * a + s.pixels[i+3] * (1 - a));
 }
 
+// RGBA8 の画像 (sw x sh) を、左上が (left, top) になるように等倍で合成する (クリップなし、不透明度 1)。
+// 各ピクセルを Blend(..., 1.0) で合成した結果と同じだが、行ごとにまとめて処理する:
+// 不透明なピクセルの並びはそのまま写し、透明なピクセルは飛ばし、半透明のピクセルだけ合成する。
+// surface からはみ出す部分は描かない。
+inline void CopyImage(Surface& s, const uint8_t* src, uint32_t sw, uint32_t sh,
+                      int64_t left, int64_t top)
+{
+    const int64_t x_begin = std::max<int64_t>(0, -left);
+    const int64_t y_begin = std::max<int64_t>(0, -top);
+    const int64_t x_end = std::min<int64_t>(sw, static_cast<int64_t>(s.width) - left);
+    const int64_t y_end = std::min<int64_t>(sh, static_cast<int64_t>(s.height) - top);
+    const ClipRect no_clip;
+    for (int64_t yy = y_begin; yy < y_end; ++yy) {
+        const uint8_t* row = &src[static_cast<size_t>(yy) * sw * 4];
+        int64_t xx = x_begin;
+        while (xx < x_end) {
+            const uint8_t alpha = row[xx * 4 + 3];
+            if (alpha == 255) {
+                const int64_t start = xx;
+                while (xx < x_end && row[xx * 4 + 3] == 255) ++xx;
+                std::copy(row + start * 4, row + xx * 4,
+                          &s.pixels[(static_cast<size_t>(top + yy) * s.width + (left + start)) * 4]);
+            } else {
+                if (alpha != 0) {
+                    const uint8_t* p = row + xx * 4;
+                    Blend(s, no_clip, static_cast<int>(left + xx), static_cast<int>(top + yy),
+                          RGBA{p[0], p[1], p[2], p[3]}, 1.0);
+                }
+                ++xx;
+            }
+        }
+    }
+}
+
 // スキャンライン塗り (nonzero winding)。
 // HTML Canvas 仕様どおり、未クローズのサブパスも塗りでは暗黙にクローズする
 // (isPointInPath と同じ扱い)。

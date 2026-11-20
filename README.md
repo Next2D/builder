@@ -24,6 +24,7 @@ Xbox対応は試作・開発段階です。
 | iOS | Xcodeプロジェクトを開く、IPAを書き出す |
 | Android | Android Studioプロジェクトを開く、APKを書き出す |
 | Xbox | GDKネイティブホストの試作・開発段階 |
+| Nintendo Switch | 対応済み（NDAのため実装は非公開。下記参照） |
 
 ### プラットフォーム別ガイド
 
@@ -36,11 +37,12 @@ Xbox対応は試作・開発段階です。
 | [iOS / Android（Capacitor）](docs/capacitor.md#日本語) | ネイティブ設定、SDK、プラグイン、ビルドコマンド、移行、Xcodeの設定 |
 | [Xbox（試作）](docs/xbox.md#日本語) | 開発状況、ホスト生成、ビルド環境、検証範囲 |
 
-### 今後の対応予定
+### Nintendo Switch
 
-| プラットフォーム |
-|---|
-| Nintendo Switch |
+Nintendo Switch向けの書き出しに対応しています。
+ただし、NintendoSDKに依存する実装は秘密保持契約（NDA）の対象のため、このリポジトリには含まれていません。公開しているのは、SDKに依存しない共通部分のみです。
+
+Nintendo Developer PortalでNDAを締結済みの方は、[Discord](https://discord.gg/6c9rv5Uns5)でお声がけください。適宜対応します。
 
 ### ビルド例
 
@@ -75,6 +77,7 @@ Xbox support is a prototype under development.
 | iOS | Open the Xcode project and export an IPA |
 | Android | Open the Android Studio project and export an APK |
 | Xbox | Prototype GDK native host; under development |
+| Nintendo Switch | Supported (implementation is not public due to the NDA; see below) |
 
 ### Platform guides
 
@@ -87,11 +90,12 @@ These guides cover platform-specific configuration, dependencies, builds and dis
 | [iOS / Android (Capacitor)](docs/capacitor.md#english) | Native configuration, SDKs, plugins, build commands, migration and Xcode setup |
 | [Xbox (prototype)](docs/xbox.md#english) | Development status, host generation, build environment and validation scope |
 
-### Planned support
+### Nintendo Switch
 
-| Platform |
-|---|
-| Nintendo Switch |
+Exporting to Nintendo Switch is supported.
+However, the implementation that depends on NintendoSDK is covered by a non-disclosure agreement (NDA) and is not included in this repository. Only the SDK-independent common parts are public.
+
+If you have signed the NDA on the Nintendo Developer Portal, please reach out on [Discord](https://discord.gg/6c9rv5Uns5) and we will help you as needed.
 
 ### Build example
 

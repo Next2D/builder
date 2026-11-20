@@ -430,10 +430,15 @@ int32_t next2d_host_frame(Next2DHost* h)
         // 環境変数 NEXT2D_HOST_PERF を設定すると、時間のかかったフレームの内訳を出す
         // (tasks = タイマー/デコード完了/マイクロタスク、js = メインの rAF、worker = レンダラ)。
         static const bool perf = std::getenv("NEXT2D_HOST_PERF") != nullptr;
-        if (perf && t_worker - now > 50.0) {
-            std::cerr << "[HostCore] slow frame: tasks " << static_cast<int>(t_tasks - now)
-                      << " ms, js " << static_cast<int>(t_js - t_tasks)
-                      << " ms, worker " << static_cast<int>(t_worker - t_js) << " ms" << std::endl;
+        if (perf) {
+            // worker の時間のうち、WebGL2 のメソッド (GL の呼び出し) にかかった分。残りはレンダラの JS
+            const std::string gl = TakeWebGL2PerfSummary();
+            if (t_worker - now > 50.0) {
+                std::cerr << "[HostCore] slow frame: tasks " << static_cast<int>(t_tasks - now)
+                          << " ms, js " << static_cast<int>(t_js - t_tasks)
+                          << " ms, worker " << static_cast<int>(t_worker - t_js) << " ms (" << gl << ")"
+                          << std::endl;
+            }
         }
     }
 

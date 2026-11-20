@@ -9,6 +9,8 @@
 #include "v8/WeakHandle.h"
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -472,6 +474,79 @@ void ResetElement(const std::shared_ptr<AudioElementState>& state)
     state->duration = 0.0;
 }
 
+// ---- 音声ファイルの読み込み (Audio 要素用) ---------------------------------
+// ファイルの読み込みとデコードをバックグラウンドで行い、結果をメインスレッドで渡す。
+//   - メインスレッドでは読まない: 数 MB の BGM を同期で読むと、ストレージが遅い環境では
+//     その間フレームが止まる (実機で 1 回 1.6 秒を計測)。
+//   - 同じ src は 1 回だけ読む: 読み込み中に同じ src の要求が来たら結果を待ち合わせ、
+//     デコード済みで誰かがまだ使っているものは使い回す (BGM の再読み込みと再デコードを避ける)。
+// callback(pcm, found): found が false ならファイルが無い。デコードに失敗した場合は無音になる。
+using SharedAudioCallback = std::function<void(std::shared_ptr<PcmBuffer>, bool)>;
+
+struct SharedAudioLoad {
+    std::shared_ptr<PcmBuffer> pcm = std::make_shared<PcmBuffer>();
+    bool found = false;
+    std::vector<SharedAudioCallback> waiters;
+};
+
+// どちらもメインスレッドからだけ触る。終了時に v8::Global を持つ callback を静的破棄の順序に
+// 巻き込まないよう、意図的に解放しない。
+std::map<std::string, std::shared_ptr<SharedAudioLoad>>& LoadingAudio()
+{
+    static auto* loading = new std::map<std::string, std::shared_ptr<SharedAudioLoad>>();
+    return *loading;
+}
+
+std::map<std::string, std::weak_ptr<PcmBuffer>>& DecodedAudio()
+{
+    static auto* decoded = new std::map<std::string, std::weak_ptr<PcmBuffer>>();
+    return *decoded;
+}
+
+void LoadSharedAudio(HostContext* host, const std::string& src, SharedAudioCallback callback)
+{
+    auto cached = DecodedAudio().find(src);
+    if (cached != DecodedAudio().end()) {
+        if (std::shared_ptr<PcmBuffer> pcm = cached->second.lock()) {
+            decodequeue::Submit([]() {}, [callback, pcm]() { callback(pcm, true); });
+            return;
+        }
+        DecodedAudio().erase(cached);
+    }
+
+    std::shared_ptr<SharedAudioLoad>& slot = LoadingAudio()[src];
+    if (slot) {
+        slot->waiters.push_back(std::move(callback));
+        return;
+    }
+    slot = std::make_shared<SharedAudioLoad>();
+    slot->waiters.push_back(std::move(callback));
+
+    std::shared_ptr<SharedAudioLoad> load = slot;
+    AssetLoader* assets = host->assets;
+    decodequeue::Submit(
+        [load, assets, src]() {
+            auto bytes = assets->ReadBinary(src);
+            load->found = static_cast<bool>(bytes);
+            if (bytes && !AudioEngine::Decode(*bytes, *load->pcm)) {
+                // デコード失敗は無音として扱う (アプリの進行を止めない)
+                load->pcm->samples.clear();
+                load->pcm->channels = load->pcm->channels ? load->pcm->channels : 2;
+                load->pcm->sample_rate = load->pcm->sample_rate ? load->pcm->sample_rate : 48000;
+            }
+        },
+        [load, src]() {
+            LoadingAudio().erase(src);
+            if (load->found) {
+                DecodedAudio()[src] = load->pcm;
+            }
+            std::vector<SharedAudioCallback> waiters = std::move(load->waiters);
+            for (SharedAudioCallback& waiter : waiters) {
+                waiter(load->pcm, load->found);
+            }
+        });
+}
+
 // src を読み込みバックグラウンドでデコードする。完了時に loadedmetadata を発火する。
 void StartElementLoad(v8::Isolate* isolate, v8::Local<v8::Object> el,
                       const std::shared_ptr<AudioElementState>& state)
@@ -488,26 +563,13 @@ void StartElementLoad(v8::Isolate* isolate, v8::Local<v8::Object> el,
         return;   // loadstart ハンドラが src を変えた
     }
 
-    auto bytes = host->assets->ReadBinary(state->src);
     auto self_ref = std::make_shared<v8::Global<v8::Object>>(isolate, el);
-    auto pcm = std::make_shared<PcmBuffer>();
-    auto found = std::make_shared<bool>(static_cast<bool>(bytes));
-    auto input = std::make_shared<std::vector<uint8_t>>(
-        bytes ? std::move(*bytes) : std::vector<uint8_t>());
 
-    // イベントは必ず非同期 (次の Pump 以降) に発火する。呼び出し側が load() / play() の
-    // 後にリスナを付けても拾えるようにするため。
-    decodequeue::Submit(
-        [input, pcm, found]() {
-            if (*found && !AudioEngine::Decode(*input, *pcm)) {
-                // デコード失敗は無音として扱う (アプリの進行を止めない)
-                pcm->samples.clear();
-                pcm->channels = pcm->channels ? pcm->channels : 2;
-                pcm->sample_rate = pcm->sample_rate ? pcm->sample_rate : 48000;
-            }
-            input->clear();
-        },
-        [isolate, self_ref, state, pcm, found, host, generation]() {
+    // ファイルの読み込みとデコードはバックグラウンドで行い、同じ src の結果は使い回す
+    // (LoadSharedAudio)。イベントは必ず非同期 (次の Pump 以降) に発火する。呼び出し側が
+    // load() / play() の後にリスナを付けても拾えるようにするため。
+    LoadSharedAudio(host, state->src,
+        [isolate, self_ref, state, host, generation](std::shared_ptr<PcmBuffer> pcm, bool found) {
             v8::HandleScope hs(isolate);
             v8::Local<v8::Object> element = self_ref->Get(isolate);
             self_ref->Reset();
@@ -518,7 +580,7 @@ void StartElementLoad(v8::Isolate* isolate, v8::Local<v8::Object> el,
             v8::Context::Scope cs(c);
             state->loading = false;
 
-            if (!*found) {
+            if (!found) {
                 v8::Local<v8::Object> error = v8::Object::New(isolate);
                 v8util::SetValue(isolate, error, "code", v8::Integer::New(isolate, 4));
                 v8util::SetValue(isolate, error, "message",

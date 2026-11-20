@@ -1,8 +1,11 @@
 #include "AssetLoader.h"
 #include "EmbeddedAssets.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <regex>
 #include <sstream>
 
@@ -137,6 +140,7 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
     }
 
     const std::string path = Resolve(url);
+    const auto started = std::chrono::steady_clock::now();
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
     if (!ifs) {
         return std::nullopt;
@@ -147,6 +151,14 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
     std::vector<uint8_t> buffer(static_cast<size_t>(size));
     if (size > 0 && !ifs.read(reinterpret_cast<char*>(buffer.data()), size)) {
         return std::nullopt;
+    }
+    // 環境変数 NEXT2D_HOST_PERF: 時間のかかった読み込みを出す (呼び出し元のスレッドを止めるため)
+    static const bool perf = std::getenv("NEXT2D_HOST_PERF") != nullptr;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    if (perf && ms >= 10) {
+        std::cerr << "[HostCore] slow read: " << ms << " ms, " << size << " bytes, "
+                  << RelativeKey(url) << std::endl;
     }
     return buffer;
 }

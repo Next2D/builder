@@ -33,6 +33,10 @@ v8::Local<v8::Object> CreateWebGPUCanvasContext(v8::Isolate* isolate, HostContex
 // NEXT2D_ENABLE_WEBGL2 を定義したビルドでのみリンクされる。
 v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* host);
 
+// 環境変数 NEXT2D_HOST_PERF の指定時: 前回の呼び出し以降に WebGL2 のメソッドにかかった時間の
+// 要約 (合計と、時間のかかった上位のメソッド) を返し、集計を 0 に戻す。未指定時は空文字列。
+std::string TakeWebGL2PerfSummary();
+
 // canvas.getContext('2d') / OffscreenCanvas.getContext('2d') を生成する (Canvas2D.cpp)。
 v8::Local<v8::Object> CreateCanvas2DContext(v8::Isolate* isolate, HostContext* host,
                                             int width, int height);

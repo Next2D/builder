@@ -25,8 +25,12 @@
 #include "GlApi.h"   // GLES3/gl3.h + (任意) 関数テーブル経由の呼び出し
 
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace next2d {
@@ -1599,7 +1603,73 @@ const Constant kConstants[] = {
 #include "WebGL2Constants.inc"
 };
 
+// ---- 計測 (環境変数 NEXT2D_HOST_PERF) ---------------------------------------
+// メソッドごとの呼び出し回数と所要時間を集計する。初めて描くフレームが重いとき、
+// シェーダーのコンパイル・テクスチャ転送・描画命令のどれに時間がかかったかを見分けるためのもの。
+// 計測しないビルド / 実行では、メソッドは元のコールバックのまま登録される。
+constexpr size_t kMethodCount = sizeof(kMethods) / sizeof(kMethods[0]);
+
+struct MethodPerf {
+    uint64_t nanoseconds = 0;
+    uint32_t count = 0;
+};
+MethodPerf g_method_perf[kMethodCount];
+
+template <size_t I>
+void TimedMethod(const Args& a)
+{
+    const auto started = std::chrono::steady_clock::now();
+    kMethods[I].callback(a);
+    g_method_perf[I].nanoseconds += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count());
+    ++g_method_perf[I].count;
+}
+
+template <size_t... Is>
+constexpr std::array<v8::FunctionCallback, sizeof...(Is)> MakeTimedMethods(std::index_sequence<Is...>)
+{
+    return {{ &TimedMethod<Is>... }};
+}
+const auto kTimedMethods = MakeTimedMethods(std::make_index_sequence<kMethodCount>{});
+
+bool PerfEnabled()
+{
+    static const bool enabled = std::getenv("NEXT2D_HOST_PERF") != nullptr;
+    return enabled;
+}
+
 } // namespace
+
+std::string TakeWebGL2PerfSummary()
+{
+    if (!PerfEnabled()) {
+        return std::string();
+    }
+    std::vector<size_t> order;
+    uint64_t total = 0;
+    uint32_t calls = 0;
+    for (size_t i = 0; i < kMethodCount; ++i) {
+        if (g_method_perf[i].count > 0) {
+            order.push_back(i);
+            total += g_method_perf[i].nanoseconds;
+            calls += g_method_perf[i].count;
+        }
+    }
+    std::sort(order.begin(), order.end(), [](size_t l, size_t r) {
+        return g_method_perf[l].nanoseconds > g_method_perf[r].nanoseconds;
+    });
+    std::string text = "gl " + std::to_string(total / 1000000) + " ms / " + std::to_string(calls) + " calls";
+    for (size_t n = 0; n < order.size() && n < 6; ++n) {
+        const MethodPerf& perf = g_method_perf[order[n]];
+        text += std::string(n == 0 ? ": " : ", ") + kMethods[order[n]].name + " "
+              + std::to_string(perf.nanoseconds / 1000000) + " ms x" + std::to_string(perf.count);
+    }
+    for (MethodPerf& perf : g_method_perf) {
+        perf = MethodPerf();
+    }
+    return text;
+}
 
 v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* host)
 {
@@ -1615,10 +1685,13 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
     v8::Local<v8::Object> gl = v8::Object::New(isolate);
     v8::Local<v8::External> data = v8::External::New(isolate, state);
 
-    for (const Method& m : kMethods) {
+    const bool timed = PerfEnabled();
+    for (size_t i = 0; i < kMethodCount; ++i) {
+        const Method& m = kMethods[i];
         v8::Local<v8::String> name = v8::String::NewFromUtf8(
             isolate, m.name, v8::NewStringType::kInternalized).ToLocalChecked();
-        v8::Local<v8::Function> fn = v8::Function::New(ctx, m.callback, data).ToLocalChecked();
+        v8::Local<v8::Function> fn = v8::Function::New(
+            ctx, timed ? kTimedMethods[i] : m.callback, data).ToLocalChecked();
         fn->SetName(name);
         gl->Set(ctx, name, fn).Check();
     }

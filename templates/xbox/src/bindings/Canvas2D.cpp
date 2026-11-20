@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -465,6 +466,22 @@ void DrawImage(const v8::FunctionCallbackInfo<v8::Value>& a)
     }
     double dx = Arg(a,1), dy = Arg(a,2);
     double dw = Arg(a,3, static_cast<double>(sw)), dh = Arg(a,4, static_cast<double>(sh));
+
+    // 等倍・平行移動のみ・不透明度 1・クリップなしの場合 (読み込んだ画像を同じ大きさの canvas へ
+    // 写す、という最も多い使い方) は、行ごとにまとめて処理する。下の汎用の経路は 1 ピクセルごとに
+    // 座標変換と合成を行うため、大きな画像では遅い (1670x1202 の画像 1 枚で、コンソール実機では
+    // 約 0.3 秒フレームが止まった)。結果は汎用の経路と同じ。
+    const Mat& m = c->state.transform;
+    const bool translation_only = m.a == 1.0 && m.b == 0.0 && m.c == 0.0 && m.d == 1.0;
+    const double ox = dx + m.e, oy = dy + m.f;
+    if (translation_only && dw == static_cast<double>(sw) && dh == static_cast<double>(sh) &&
+        c->state.global_alpha == 1.0 && !c->state.clip.active && !c->state.clip.mask &&
+        ox == std::floor(ox) && oy == std::floor(oy) &&
+        std::abs(ox) < 1e9 && std::abs(oy) < 1e9) {
+        raster::CopyImage(c->surface, src, sw, sh, static_cast<int64_t>(ox), static_cast<int64_t>(oy));
+        return;
+    }
+
     for (int yy = 0; yy < static_cast<int>(dh); ++yy) {
         for (int xx = 0; xx < static_cast<int>(dw); ++xx) {
             uint32_t u = static_cast<uint32_t>(xx * sw / dw);
@@ -490,7 +507,18 @@ void GetImageData(const v8::FunctionCallbackInfo<v8::Value>& a)
     size_t bytes = static_cast<size_t>(w) * h * 4;
     auto store = v8::ArrayBuffer::NewBackingStore(iso, bytes);
     auto* dst = static_cast<uint8_t*>(store->Data());
-    for (int yy = 0; yy < h; ++yy)
+    // 範囲がすべて surface の中にある場合は行ごとに写す (ピクセルごとの範囲判定を省く)
+    const bool inside = x >= 0 && y >= 0 && w > 0 && h > 0 &&
+        static_cast<int64_t>(x) + w <= c->surface.width &&
+        static_cast<int64_t>(y) + h <= c->surface.height;
+    if (inside) {
+        for (int yy = 0; yy < h; ++yy) {
+            std::memcpy(&dst[static_cast<size_t>(yy) * w * 4],
+                &c->surface.pixels[(static_cast<size_t>(y + yy) * c->surface.width + x) * 4],
+                static_cast<size_t>(w) * 4);
+        }
+    }
+    for (int yy = 0; !inside && yy < h; ++yy)
         for (int xx = 0; xx < w; ++xx) {
             int sx = x + xx, sy = y + yy;
             size_t di = (static_cast<size_t>(yy)*w+xx)*4;

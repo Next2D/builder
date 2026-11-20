@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -550,6 +551,8 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // 現在束縛されている 2D テクスチャの level、または現在束縛されているレンダーバッファを
 // ゼロで初期化する。描画に使えない形式 (フレームバッファが不完全になる) は何もしない。
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
+bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
+
 void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat)
 {
     GLint name = 0;
@@ -991,6 +994,21 @@ void GetParameter(const Args& a)
         ret.Set(s->unpack_premultiply); return;
     case kUnpackColorspaceWebGL:
         ret.Set(static_cast<uint32_t>(kBrowserDefaultWebGL)); return;
+
+    // テクスチャ / レンダーバッファの最大サイズ。環境変数 NEXT2D_HOST_MAX_TEXTURE_SIZE で上限を
+    // 付けられる (ドライバの値より大きくはならない)。アプリはこの値から作業用の領域の大きさを
+    // 決めることがあり (player はアトラスを「最大サイズの半分」四方で確保する)、ドライバが大きな
+    // 値を返す環境では、画面の大きさに対して過大なメモリと確保時間を使うことになる。
+    case GL_MAX_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: {
+        static const GLint limit = [] {
+            const char* value = std::getenv("NEXT2D_HOST_MAX_TEXTURE_SIZE");
+            return value ? static_cast<GLint>(std::atoi(value)) : 0;
+        }();
+        GLint v = 0;
+        glGetIntegerv(pname, &v);
+        ret.Set(limit > 0 ? std::min(v, limit) : v);
+        return;
+    }
 
     // 真偽値
     case GL_BLEND: case GL_CULL_FACE: case GL_DEPTH_TEST: case GL_DITHER:
@@ -1435,8 +1453,27 @@ const Method kMethods[] = {
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
+        if (!PerfEnabled()) {
+            glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
+            ZeroInitializeStorage(true, 0, sized);
+            return;
+        }
+        // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
+        const auto t0 = std::chrono::steady_clock::now();
         glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
+        glFinish();
+        const auto t1 = std::chrono::steady_clock::now();
         ZeroInitializeStorage(true, 0, sized);
+        glFinish();
+        const auto t2 = std::chrono::steady_clock::now();
+        const auto ms = [](auto from, auto to) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(to - from).count() / 1000.0;
+        };
+        if (ms(t0, t2) >= 5.0) {
+            std::cerr << "[HostCore] renderbufferStorageMultisample: " << I(a, 3) << "x" << I(a, 4)
+                      << " samples " << I(a, 1) << " format 0x" << std::hex << sized << std::dec
+                      << ": storage " << ms(t0, t1) << " ms, zero-init " << ms(t1, t2) << " ms" << std::endl;
+        }
     }},
 
     // --- シェーダー / プログラム

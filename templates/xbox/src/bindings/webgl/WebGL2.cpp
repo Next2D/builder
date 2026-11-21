@@ -120,6 +120,19 @@ struct GLState {
     };
     std::unordered_map<GLuint, PendingClear> renderbuffer_pending_clear;
 
+    // 使われなくなったレンダーバッファ (ステンシル / デプス) の置き場。
+    // 領域の確保そのものが重い環境がある (開発機で 1 回 25〜75 ms)。アプリは必要な大きさが
+    // 変わるたびに確保し直すので、手放した領域を捨てずに置いておき、同じ形式・同じ大きさの
+    // 要求が来たらそれを渡す。大きさは 2 のべき乗へ切り上げて、同じものに当たりやすくする。
+    struct PooledRenderbuffer {
+        GLuint name = 0;
+        GLenum format = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+    };
+    std::vector<PooledRenderbuffer> renderbuffer_pool;   // 末尾が最も新しい
+    int64_t renderbuffer_pool_pixels = 0;
+
     // シェーダのリンク結果の保存と再利用 (linkProgram を参照)
     struct ShaderInfo {
         std::string source;
@@ -691,6 +704,58 @@ void ReplaceBoundRenderbuffer(GLState* s, GLenum target, bool had_storage)
     glDeleteRenderbuffers(1, &old);
     s->renderbuffer_alias[s->bound_renderbuffer_handle] = fresh;
     s->bound_renderbuffer = fresh;
+}
+
+// 置き場に持つ量の上限 (画素数の合計)。ステンシルは 1 画素 1 バイトなので、約 48 MB に当たる。
+constexpr int64_t kRenderbufferPoolMaxPixels = 48ll * 1024 * 1024;
+
+GLsizei PoolBucket(GLsizei v)
+{
+    GLsizei bucket = 256;
+    while (bucket < v) {
+        bucket *= 2;
+    }
+    return bucket;
+}
+
+// 領域を持つ GL のレンダーバッファを置き場へ入れる。上限を超えたら古いものから解放する。
+void PoolRenderbuffer(GLState* s, GLuint name, const GLState::RenderbufferStorage& storage)
+{
+    if (name == 0) {
+        return;
+    }
+    if (storage.format == 0 || storage.width <= 0 || storage.height <= 0) {
+        glDeleteRenderbuffers(1, &name);
+        return;
+    }
+    GLState::PooledRenderbuffer entry;
+    entry.name = name;
+    entry.format = storage.format;
+    entry.width = storage.width;
+    entry.height = storage.height;
+    s->renderbuffer_pool.push_back(entry);
+    s->renderbuffer_pool_pixels += static_cast<int64_t>(storage.width) * storage.height;
+    while (s->renderbuffer_pool_pixels > kRenderbufferPoolMaxPixels && s->renderbuffer_pool.size() > 1) {
+        const GLState::PooledRenderbuffer oldest = s->renderbuffer_pool.front();
+        s->renderbuffer_pool.erase(s->renderbuffer_pool.begin());
+        s->renderbuffer_pool_pixels -= static_cast<int64_t>(oldest.width) * oldest.height;
+        glDeleteRenderbuffers(1, &oldest.name);
+    }
+}
+
+// 置き場から、同じ形式・同じ大きさのものを取り出す。無ければ 0。
+GLuint TakePooledRenderbuffer(GLState* s, GLenum format, GLsizei width, GLsizei height)
+{
+    for (size_t i = s->renderbuffer_pool.size(); i-- > 0;) {
+        const GLState::PooledRenderbuffer& entry = s->renderbuffer_pool[i];
+        if (entry.format == format && entry.width == width && entry.height == height) {
+            const GLuint name = entry.name;
+            s->renderbuffer_pool_pixels -= static_cast<int64_t>(entry.width) * entry.height;
+            s->renderbuffer_pool.erase(s->renderbuffer_pool.begin() + static_cast<std::ptrdiff_t>(i));
+            return name;
+        }
+    }
+    return 0;
 }
 
 // 環境変数 NEXT2D_HOST_PERF_SYNC: glFinish で実行を待って、個々の処理の時間を測る
@@ -1771,14 +1836,22 @@ const Method kMethods[] = {
         const GLuint handle = Name(a, 0, kRenderbuffer);
         if (handle) {
             const GLuint actual = ActualRenderbuffer(s, handle);
-            s->renderbuffer_storage.erase(handle);
+            GLState::RenderbufferStorage storage;
+            const auto stored = s->renderbuffer_storage.find(handle);
+            if (stored != s->renderbuffer_storage.end()) {
+                storage = stored->second;
+                s->renderbuffer_storage.erase(stored);
+            }
             s->renderbuffer_alias.erase(handle);
             s->renderbuffer_pending_clear.erase(handle);
             if (s->bound_renderbuffer_handle == handle) {
+                // 束縛中のものを消すと、GL 上の束縛も外れる。置き場へ入れる場合も同じ状態にする
                 s->bound_renderbuffer_handle = 0;
                 s->bound_renderbuffer = 0;
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
             }
-            glDeleteRenderbuffers(1, &actual);
+            // 使い回しの対象 (大きさを記録しているもの) は、解放せず置き場へ入れる
+            PoolRenderbuffer(s, actual, storage);
             Invalidate(a, 0);
         }
     }},
@@ -1795,13 +1868,13 @@ const Method kMethods[] = {
         const GLsizei width = I(a, 2);
         const GLsizei height = I(a, 3);
 
-        // 領域の確保は環境によって重い (開発機で 1 回 20〜70 ms、画面の切り替えで 9 回続けて
-        // 650 ms かかるのを確認)。アプリはレンダーバッファを使い回しながら、必要な大きさが変わる
-        // たびに確保し直す。そこで、
-        //   - 確保するときは 256 の倍数へ切り上げる
-        //   - すでに同じ形式で十分な大きさの領域を持っていれば、確保し直さず中身を消すだけにする
-        // フレームバッファに付けるバッファ同士の大きさは違っていてよく (OpenGL ES 3)、描画できる
-        // 範囲は小さい方で決まるので、大きめの領域を持っていても描画結果は変わらない。
+        // 領域の確保は環境によって重い (開発機で 1 回 25〜75 ms、画面の切り替えで 9 回続けて
+        // 230〜700 ms かかるのを確認)。アプリはレンダーバッファを使い回しながら、必要な大きさが
+        // 変わるたびに確保し直す。そこで、確保した領域は捨てずに置き場
+        // (GLState::renderbuffer_pool) に置き、同じ形式・同じ大きさの要求にはそれを渡す。
+        // 大きさは 2 のべき乗へ切り上げる。フレームバッファに付けるバッファ同士の大きさは
+        // 違っていてよく (OpenGL ES 3)、描画できる範囲は小さい方で決まるので、大きめの領域を
+        // 渡しても描画結果は変わらない。中身は、アプリが描画先に取り付けたときに消す。
         // 対象はステンシル / デプスだけ (色のバッファは blit の範囲に大きさが関わるのでそのまま)。
         const GLuint bound = S(a)->bound_renderbuffer_handle;
         const StorageClass kind = ClassifyStorage(sized);
@@ -1819,10 +1892,12 @@ const Method kMethods[] = {
             return;
         }
 
-        GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[bound];
-        // 持っている領域が要求の 4 倍を超えるほど大きいときは、使い回さず作り直す (メモリの無駄を抑える)
-        const bool fits = have.format == sized && have.width >= width && have.height >= height
-            && static_cast<int64_t>(have.width) * have.height <= static_cast<int64_t>(width) * height * 4 + 65536;
+        GLState* s = S(a);
+        GLState::RenderbufferStorage& have = s->renderbuffer_storage[bound];
+        // 大きさは 2 のべき乗へ切り上げる。同じ形式・同じ大きさの領域をすでに持っていれば何もしない
+        const GLsizei bucket_width = PoolBucket(width);
+        const GLsizei bucket_height = PoolBucket(height);
+        const bool fits = have.format == sized && have.width == bucket_width && have.height == bucket_height;
         // 計測用 (環境変数 NEXT2D_HOST_PERF_SYNC): 確保と初期化のそれぞれにかかった時間を分けて出す。
         // glFinish で実行を待つので、通常の計測 (NEXT2D_HOST_PERF) とは分けてある
         // (待ちを入れると、溜まった GPU の処理の分だけ描画が止まる)。
@@ -1831,15 +1906,27 @@ const Method kMethods[] = {
             glFinish();   // ここまでに積まれた命令の分を、確保の時間に含めない
         }
         const auto t0 = std::chrono::steady_clock::now();
+        bool pooled = false;
         if (!fits) {
-            const auto round_up = [](GLsizei v) { return (v + 255) & ~255; };
-            const GLsizei w = round_up(width);
-            const GLsizei h = round_up(height);
-            ReplaceBoundRenderbuffer(S(a), U(a, 0), have.format != 0);
-            glRenderbufferStorage(U(a, 0), sized, w, h);
+            // いま持っている GL のレンダーバッファは置き場へ (領域が無ければ解放)
+            const GLuint old = s->bound_renderbuffer;
+            const GLState::RenderbufferStorage old_storage = have;
+            // 置き場に同じ形式・同じ大きさのものがあれば、それを使う。無ければ新しく確保する
+            GLuint fresh = TakePooledRenderbuffer(s, sized, bucket_width, bucket_height);
+            pooled = fresh != 0;
+            if (!pooled) {
+                glGenRenderbuffers(1, &fresh);
+            }
+            glBindRenderbuffer(U(a, 0), fresh);
+            if (!pooled) {
+                glRenderbufferStorage(U(a, 0), sized, bucket_width, bucket_height);
+            }
+            s->renderbuffer_alias[bound] = fresh;
+            s->bound_renderbuffer = fresh;
+            PoolRenderbuffer(s, old, old_storage);
             have.format = sized;
-            have.width = w;
-            have.height = h;
+            have.width = bucket_width;
+            have.height = bucket_height;
         }
         if (perf) {
             glFinish();
@@ -1862,7 +1949,7 @@ const Method kMethods[] = {
             if (ms(t0, t2) >= 5.0) {
                 std::cerr << "[HostCore] renderbufferStorage: " << width << "x" << height
                           << " format 0x" << std::hex << sized << std::dec
-                          << (fits ? " (reused " : " (allocated ") << have.width << "x" << have.height
+                          << (fits ? " (kept " : pooled ? " (from pool " : " (allocated ") << have.width << "x" << have.height
                           << "): storage " << ms(t0, t1) << " ms, zero-init " << ms(t1, t2) << " ms" << std::endl;
             }
         }

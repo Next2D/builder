@@ -71,6 +71,18 @@ struct GLState {
 
     GLuint draw_framebuffer  = 0;   // 0 = デフォルトフレームバッファ (WebGL 上の null)
 
+    // GL の状態の控え。確保した領域を消すとき (ZeroInitializeStorage) に、いまの状態を GL へ
+    // 問い合わせずに済ませるためのもの。状態の問い合わせ (glGet* / glIsEnabled) は、それまでに
+    // 依頼した処理が終わるのを待つことがあり、GPU の処理が溜まっている場面で長い停止になる
+    // (開発機で、1 回 50〜90 ms の待ちを確認)。
+    GLuint  bound_renderbuffer = 0;
+    bool    scissor_enabled    = false;
+    GLint   scissor_box[4]     = {0, 0, 0, 0};
+    GLboolean color_mask[4]    = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    GLboolean depth_mask       = GL_TRUE;
+    GLuint  stencil_mask_front = 0xFFFFFFFFu;
+    GLuint  stencil_mask_back  = 0xFFFFFFFFu;
+
     // バインディング側の検証で検出したエラー。getError が GL のエラーより先に返す。
     GLenum synthetic_error   = GL_NO_ERROR;
 
@@ -580,6 +592,13 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
 bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
 
+// 環境変数 NEXT2D_HOST_PERF_SYNC: glFinish で実行を待って、個々の処理の時間を測る
+bool PerfSyncEnabled()
+{
+    static const bool enabled = std::getenv("NEXT2D_HOST_PERF_SYNC") != nullptr;
+    return enabled;
+}
+
 // ---- シェーダのリンク結果の保存と再利用 -------------------------------------
 // シェーダのコンパイルとリンクは環境によって重い (開発機で 1 つ 30〜190 ms)。アプリは新しい
 // 表現を初めて描くときにプログラムを作るので、その瞬間に画面が止まる。
@@ -683,27 +702,45 @@ void LinkProgramWithCache(GLState* s, GLuint program)
 
 // region_width / region_height が正のときは、左下からその大きさの範囲だけを消す
 // (領域を大きめに持っているレンダーバッファで、使う範囲だけを消すため)。
+// state を渡すと (レンダーバッファのとき)、いまの GL の状態を問い合わせずに state の控えを使い、
+// フレームバッファの状態の確認やエラーの読み捨てもしない (どれも、溜まった処理を待つことがある)。
 void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat,
-                           GLsizei region_width = 0, GLsizei region_height = 0)
+                           GLsizei region_width = 0, GLsizei region_height = 0,
+                           const GLState* state = nullptr)
 {
+    const bool shadowed = renderbuffer && state != nullptr;
+
     GLint name = 0;
-    glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
+    GLint saved_fbo = 0;
+    GLboolean saved_scissor = GL_FALSE;
+    GLint saved_scissor_box[4] = {0, 0, 0, 0};
+    GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    GLboolean saved_depth_mask = GL_TRUE;
+    GLint saved_stencil_front = 0, saved_stencil_back = 0;
+    if (shadowed) {
+        name = static_cast<GLint>(state->bound_renderbuffer);
+        saved_fbo = static_cast<GLint>(state->draw_framebuffer
+            ? state->draw_framebuffer
+            : (state->gles ? state->gles->default_framebuffer() : 0));
+        saved_scissor = state->scissor_enabled ? GL_TRUE : GL_FALSE;
+        std::memcpy(saved_scissor_box, state->scissor_box, sizeof(saved_scissor_box));
+        std::memcpy(saved_color_mask, state->color_mask, sizeof(saved_color_mask));
+        saved_depth_mask = state->depth_mask;
+        saved_stencil_front = static_cast<GLint>(state->stencil_mask_front);
+        saved_stencil_back = static_cast<GLint>(state->stencil_mask_back);
+    } else {
+        glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
+        saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
+        glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &saved_depth_mask);
+        glGetIntegerv(GL_STENCIL_WRITEMASK, &saved_stencil_front);
+        glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &saved_stencil_back);
+    }
     if (name == 0) {
         return;
     }
-
-    GLint saved_fbo = 0;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
-    const GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
-    GLint saved_scissor_box[4] = {0, 0, 0, 0};
-    glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
-    GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
-    glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
-    GLboolean saved_depth_mask = GL_TRUE;
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &saved_depth_mask);
-    GLint saved_stencil_front = 0, saved_stencil_back = 0;
-    glGetIntegerv(GL_STENCIL_WRITEMASK, &saved_stencil_front);
-    glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &saved_stencil_back);
 
     const StorageClass kind = ClassifyStorage(internalformat);
     const GLenum attachment =
@@ -722,7 +759,7 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
                                static_cast<GLuint>(name), level);
     }
 
-    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+    if (shadowed || glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
         if (region_width > 0 && region_height > 0) {
             glEnable(GL_SCISSOR_TEST);
             glScissor(0, 0, region_width, region_height);
@@ -761,8 +798,10 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_fbo));
     glDeleteFramebuffers(1, &fbo);
-    // 描画に使えない形式を取り付けたときなどのエラーは、アプリに見せない
-    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    if (!shadowed) {
+        // 描画に使えない形式を取り付けたときなどのエラーは、アプリに見せない
+        for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    }
 }
 
 void TexImage2D(const Args& a)
@@ -1326,17 +1365,32 @@ struct Method {
 
 const Method kMethods[] = {
     // --- 状態
-    {"enable", [](const Args& a) { glEnable(U(a, 0)); }},
-    {"disable", [](const Args& a) { glDisable(U(a, 0)); }},
+    {"enable", [](const Args& a) {
+        if (U(a, 0) == GL_SCISSOR_TEST) { S(a)->scissor_enabled = true; }
+        glEnable(U(a, 0));
+    }},
+    {"disable", [](const Args& a) {
+        if (U(a, 0) == GL_SCISSOR_TEST) { S(a)->scissor_enabled = false; }
+        glDisable(U(a, 0));
+    }},
     {"isEnabled", [](const Args& a) { a.GetReturnValue().Set(glIsEnabled(U(a, 0)) == GL_TRUE); }},
     {"viewport", [](const Args& a) { glViewport(I(a, 0), I(a, 1), I(a, 2), I(a, 3)); }},
-    {"scissor", [](const Args& a) { glScissor(I(a, 0), I(a, 1), I(a, 2), I(a, 3)); }},
+    {"scissor", [](const Args& a) {
+        GLState* s = S(a);
+        s->scissor_box[0] = I(a, 0); s->scissor_box[1] = I(a, 1);
+        s->scissor_box[2] = I(a, 2); s->scissor_box[3] = I(a, 3);
+        glScissor(I(a, 0), I(a, 1), I(a, 2), I(a, 3));
+    }},
     {"clearColor", [](const Args& a) { glClearColor(F(a, 0), F(a, 1), F(a, 2), F(a, 3)); }},
     {"clearDepth", [](const Args& a) { glClearDepthf(F(a, 0)); }},
     {"clearStencil", [](const Args& a) { glClearStencil(I(a, 0)); }},
     {"clear", [](const Args& a) { glClear(U(a, 0)); Touch(S(a)); }},
-    {"colorMask", [](const Args& a) { glColorMask(B(a, 0), B(a, 1), B(a, 2), B(a, 3)); }},
-    {"depthMask", [](const Args& a) { glDepthMask(B(a, 0)); }},
+    {"colorMask", [](const Args& a) {
+        GLState* s = S(a);
+        for (int i = 0; i < 4; ++i) { s->color_mask[i] = B(a, i); }
+        glColorMask(B(a, 0), B(a, 1), B(a, 2), B(a, 3));
+    }},
+    {"depthMask", [](const Args& a) { S(a)->depth_mask = B(a, 0); glDepthMask(B(a, 0)); }},
     {"depthFunc", [](const Args& a) { glDepthFunc(U(a, 0)); }},
     {"depthRange", [](const Args& a) { glDepthRangef(F(a, 0), F(a, 1)); }},
     {"cullFace", [](const Args& a) { glCullFace(U(a, 0)); }},
@@ -1352,8 +1406,17 @@ const Method kMethods[] = {
     {"blendFuncSeparate", [](const Args& a) { glBlendFuncSeparate(U(a, 0), U(a, 1), U(a, 2), U(a, 3)); }},
     {"stencilFunc", [](const Args& a) { glStencilFunc(U(a, 0), I(a, 1), U(a, 2)); }},
     {"stencilFuncSeparate", [](const Args& a) { glStencilFuncSeparate(U(a, 0), U(a, 1), I(a, 2), U(a, 3)); }},
-    {"stencilMask", [](const Args& a) { glStencilMask(U(a, 0)); }},
-    {"stencilMaskSeparate", [](const Args& a) { glStencilMaskSeparate(U(a, 0), U(a, 1)); }},
+    {"stencilMask", [](const Args& a) {
+        S(a)->stencil_mask_front = U(a, 0);
+        S(a)->stencil_mask_back = U(a, 0);
+        glStencilMask(U(a, 0));
+    }},
+    {"stencilMaskSeparate", [](const Args& a) {
+        const GLenum face = U(a, 0);
+        if (face == GL_FRONT || face == GL_FRONT_AND_BACK) { S(a)->stencil_mask_front = U(a, 1); }
+        if (face == GL_BACK || face == GL_FRONT_AND_BACK) { S(a)->stencil_mask_back = U(a, 1); }
+        glStencilMaskSeparate(face, U(a, 1));
+    }},
     {"stencilOp", [](const Args& a) { glStencilOp(U(a, 0), U(a, 1), U(a, 2)); }},
     {"stencilOpSeparate", [](const Args& a) { glStencilOpSeparate(U(a, 0), U(a, 1), U(a, 2), U(a, 3)); }},
     {"flush", [](const Args&) { glFlush(); }},
@@ -1590,7 +1653,10 @@ const Method kMethods[] = {
             Invalidate(a, 0);
         }
     }},
-    {"bindRenderbuffer", [](const Args& a) { glBindRenderbuffer(U(a, 0), Name(a, 1, kRenderbuffer)); }},
+    {"bindRenderbuffer", [](const Args& a) {
+        S(a)->bound_renderbuffer = Name(a, 1, kRenderbuffer);
+        glBindRenderbuffer(U(a, 0), S(a)->bound_renderbuffer);
+    }},
     {"renderbufferStorage", [](const Args& a) {
         // WebGL1 由来の DEPTH_STENCIL は ES3 のサイズ付き形式へ読み替える。
         const GLenum format = U(a, 1);
@@ -1606,27 +1672,28 @@ const Method kMethods[] = {
         // フレームバッファに付けるバッファ同士の大きさは違っていてよく (OpenGL ES 3)、描画できる
         // 範囲は小さい方で決まるので、大きめの領域を持っていても描画結果は変わらない。
         // 対象はステンシル / デプスだけ (色のバッファは blit の範囲に大きさが関わるのでそのまま)。
-        GLint bound = 0;
-        glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound);
+        const GLuint bound = S(a)->bound_renderbuffer;
         const StorageClass kind = ClassifyStorage(sized);
         const bool reusable = bound != 0 && width > 0 && height > 0
             && (kind == StorageClass::Stencil || kind == StorageClass::Depth
                 || kind == StorageClass::DepthStencil);
         if (!reusable) {
             if (bound != 0) {
-                S(a)->renderbuffer_storage.erase(static_cast<GLuint>(bound));
+                S(a)->renderbuffer_storage.erase(bound);
             }
             glRenderbufferStorage(U(a, 0), sized, width, height);
-            ZeroInitializeStorage(true, 0, sized);
+            ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
             return;
         }
 
-        GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[static_cast<GLuint>(bound)];
+        GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[bound];
         // 持っている領域が要求の 4 倍を超えるほど大きいときは、使い回さず作り直す (メモリの無駄を抑える)
         const bool fits = have.format == sized && have.width >= width && have.height >= height
             && static_cast<int64_t>(have.width) * have.height <= static_cast<int64_t>(width) * height * 4 + 65536;
-        // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
-        const bool perf = PerfEnabled();
+        // 計測用 (環境変数 NEXT2D_HOST_PERF_SYNC): 確保と初期化のそれぞれにかかった時間を分けて出す。
+        // glFinish で実行を待つので、通常の計測 (NEXT2D_HOST_PERF) とは分けてある
+        // (待ちを入れると、溜まった GPU の処理の分だけ描画が止まる)。
+        const bool perf = PerfSyncEnabled();
         if (perf) {
             glFinish();   // ここまでに積まれた命令の分を、確保の時間に含めない
         }
@@ -1645,7 +1712,7 @@ const Method kMethods[] = {
         }
         const auto t1 = std::chrono::steady_clock::now();
         // 消すのは、アプリが使う範囲 (要求された大きさ) だけ
-        ZeroInitializeStorage(true, 0, sized, width, height);
+        ZeroInitializeStorage(true, 0, sized, width, height, S(a));
         if (perf) {
             glFinish();
             const auto t2 = std::chrono::steady_clock::now();
@@ -1663,9 +1730,9 @@ const Method kMethods[] = {
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
-        if (!PerfEnabled()) {
+        if (!PerfSyncEnabled()) {
             glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
-            ZeroInitializeStorage(true, 0, sized);
+            ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
             return;
         }
         // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
@@ -1673,7 +1740,7 @@ const Method kMethods[] = {
         glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
         glFinish();
         const auto t1 = std::chrono::steady_clock::now();
-        ZeroInitializeStorage(true, 0, sized);
+        ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
         glFinish();
         const auto t2 = std::chrono::steady_clock::now();
         const auto ms = [](auto from, auto to) {
@@ -2080,6 +2147,16 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
     auto* state = new GLState();
     state->host = host;
     state->gles = host->gles;
+    // 状態の控えの初期値 (ここで 1 度だけ GL から読む)
+    state->scissor_enabled = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+    glGetIntegerv(GL_SCISSOR_BOX, state->scissor_box);
+    glGetBooleanv(GL_COLOR_WRITEMASK, state->color_mask);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &state->depth_mask);
+    GLint mask = 0;
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &mask);
+    state->stencil_mask_front = static_cast<GLuint>(mask);
+    glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &mask);
+    state->stencil_mask_back = static_cast<GLuint>(mask);
 
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> gl = v8::Object::New(isolate);

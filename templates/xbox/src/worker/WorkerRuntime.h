@@ -119,6 +119,13 @@ private:
     bool wake_ = false;
     std::atomic<bool> terminated_{false};
 
+    // 計測用 (NEXT2D_HOST_PERF): 親がメッセージを投函した時刻と、worker が返事を投函するまでの時間
+    std::atomic<long long> perf_posted_us_{0};   // 0 = 返事待ちのメッセージなし
+    int perf_replies_ = 0;                       // 以下は worker のスレッドだけが触る
+    int perf_late_replies_ = 0;
+    double perf_reply_total_ms_ = 0.0;
+    double perf_reply_max_ms_ = 0.0;
+
     // 専用スレッドの worker だけが持つもの (スレッドの中で作り、スレッドの中で破棄する)
     std::unique_ptr<HostContext> thread_host_;
     std::unique_ptr<WorkerRuntime> thread_workers_;   // 入れ子の Worker 用

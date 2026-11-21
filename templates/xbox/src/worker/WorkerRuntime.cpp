@@ -727,10 +727,25 @@ void WorkerInstance::Wake()
     cv_.notify_one();
 }
 
+namespace {
+
+long long SteadyMicroseconds()
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
 void WorkerInstance::PostToWorker(WorkerMessage message)
 {
     if (terminated_) {
         return;
+    }
+    if (threaded_) {
+        // 計測用: 返事待ちが無ければ、この投函の時刻を覚える (返事までの時間を測る)
+        long long none = 0;
+        perf_posted_us_.compare_exchange_strong(none, SteadyMicroseconds());
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -741,6 +756,18 @@ void WorkerInstance::PostToWorker(WorkerMessage message)
 
 void WorkerInstance::PostToMain(WorkerMessage message)
 {
+    if (threaded_) {
+        const long long posted = perf_posted_us_.exchange(0);
+        if (posted != 0) {
+            const double ms = (SteadyMicroseconds() - posted) / 1000.0;
+            ++perf_replies_;
+            perf_reply_total_ms_ += ms;
+            perf_reply_max_ms_ = std::max(perf_reply_max_ms_, ms);
+            if (ms > 12.0) {
+                ++perf_late_replies_;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         to_main_.push_back(std::move(message));
@@ -1000,12 +1027,21 @@ void WorkerInstance::ThreadLoop()
             }
             if (loop_->Now() - stat_started_ms >= 2000.0) {
                 if (stat_turns > 0) {
-                    char line[160];
+                    // reply = 親がメッセージを投函してから worker が返事を投函するまでの時間。
+                    // 12 ms を超えると、親の次のフレームに間に合わないことが多い。
+                    char line[240];
                     std::snprintf(line, sizeof(line),
-                        "[Worker] %d render turns / 2 s: work avg %.1f ms, max %.0f ms, over 16 ms: %d",
-                        stat_turns, stat_total_ms / stat_turns, stat_max_ms, stat_over);
+                        "[Worker] %d render turns / 2 s: work avg %.1f ms, max %.0f ms, over 16 ms: %d; "
+                        "reply %d times, avg %.1f ms, max %.0f ms, over 12 ms: %d",
+                        stat_turns, stat_total_ms / stat_turns, stat_max_ms, stat_over,
+                        perf_replies_, perf_replies_ ? perf_reply_total_ms_ / perf_replies_ : 0.0,
+                        perf_reply_max_ms_, perf_late_replies_);
                     std::cerr << line << std::endl;
                 }
+                perf_replies_ = 0;
+                perf_late_replies_ = 0;
+                perf_reply_total_ms_ = 0.0;
+                perf_reply_max_ms_ = 0.0;
                 stat_started_ms = loop_->Now();
                 stat_turns = 0;
                 stat_over = 0;

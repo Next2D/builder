@@ -495,8 +495,13 @@ int32_t next2d_host_frame(Next2DHost* h)
 
     // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える
     // (提示しないフレームや VSync 無しの環境で空回りしないように)。
+    // 環境変数 NEXT2D_HOST_NO_PACING を設定すると、ここでは待たない。埋め込み側が画面の更新
+    // (垂直同期) に合わせて next2d_host_frame を呼ぶ場合に使う。ここでの待ちは画面の更新とは
+    // 無関係な一定間隔なので、垂直同期のある環境で併用すると、フレームの間隔が画面の更新と
+    // 少しずつずれて、動きが周期的に引っかかって見える。
+    static const bool pacing = std::getenv("NEXT2D_HOST_NO_PACING") == nullptr;
     const double frame_ms = event_loop.Now() - now;
-    if (frame_ms < 15.0) {
+    if (pacing && frame_ms < 15.0) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(static_cast<long long>((15.0 - frame_ms) * 1000.0)));
     }

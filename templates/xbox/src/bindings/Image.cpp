@@ -70,6 +70,7 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
     auto decoded = std::make_shared<DecodedImage>();
     auto ok = std::make_shared<bool>(false);
 
+    decodequeue::AddSceneLoad(+1);
     decodequeue::Submit(
         // プールスレッド: 読み込みとデコード (V8 に触れない)
         [url, assets, decoded, ok]() {
@@ -93,6 +94,7 @@ void LoadImageFromSrc(v8::Isolate* isolate, v8::Local<v8::Object> self, const st
         },
         // メインスレッド: 結果を image オブジェクトへ反映し load を発火
         [isolate, image_ref, decoded, ok]() {
+            decodequeue::AddSceneLoad(-1);
             v8::HandleScope hs(isolate);
             v8::Local<v8::Object> img_obj = image_ref->Get(isolate);
             v8::Local<v8::Context> ctx = img_obj->GetCreationContextChecked();

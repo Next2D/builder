@@ -24,4 +24,9 @@ void Submit(std::function<void()> work, std::function<void()> complete);
 void Pump();
 void Shutdown();
 
+// 画面の資材 (画像、BGM などの音声要素) を読み込んでいる数。読み込みの開始で +1、完了の反映で -1 する。
+// 画面の切り替えが始まったことを知る手がかりに使う (効果音のように再生のたびに行うデコードは数えない)。
+void AddSceneLoad(int delta);
+int SceneLoads();
+
 } // namespace next2d::decodequeue

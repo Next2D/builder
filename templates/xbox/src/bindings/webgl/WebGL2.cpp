@@ -108,6 +108,18 @@ struct GLState {
     std::unordered_map<GLuint, GLuint> renderbuffer_alias;
     GLuint next_renderbuffer_handle = 0;
 
+    // 確保したあと、まだ中身を消していないレンダーバッファ (ステンシル / デプス)。
+    // WebGL では確保した領域は消えた状態で始まるが、OpenGL ES では不定なので、ホストが消す。
+    // 確保した直後に消すには、そのためだけに描画先を切り替える必要があり、環境によっては
+    // 切り替えのたびに、それまでに依頼した GPU の処理が終わるのを待たされる。そこで、アプリが
+    // そのバッファを描画先に取り付けたとき (framebufferRenderbuffer) に、その描画先の上で消す。
+    struct PendingClear {
+        GLenum format = 0;
+        GLsizei width = 0;    // 消す範囲 (0 なら全体)
+        GLsizei height = 0;
+    };
+    std::unordered_map<GLuint, PendingClear> renderbuffer_pending_clear;
+
     // シェーダのリンク結果の保存と再利用 (linkProgram を参照)
     struct ShaderInfo {
         std::string source;
@@ -601,6 +613,59 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // ゼロで初期化する。描画に使えない形式 (フレームバッファが不完全になる) は何もしない。
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
 bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
+
+// いまの描画先に取り付けられているステンシル / デプスを消し、変えた状態を控えから戻す。
+// 状態の問い合わせも描画先の切り替えもしない (GLState::renderbuffer_pending_clear の説明を参照)。
+void ClearAttachedStorage(const GLState* s, const GLState::PendingClear& pending)
+{
+    if (pending.width > 0 && pending.height > 0) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, pending.width, pending.height);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    const GLint zero = 0;
+    const GLfloat one = 1.0f;
+    switch (ClassifyStorage(pending.format)) {
+        case StorageClass::Stencil:
+            glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
+            glStencilMaskSeparate(GL_BACK, 0xFFFFFFFFu);
+            glClearBufferiv(GL_STENCIL, 0, &zero);
+            break;
+        case StorageClass::Depth:
+            glDepthMask(GL_TRUE);
+            glClearBufferfv(GL_DEPTH, 0, &one);
+            break;
+        case StorageClass::DepthStencil:
+            glDepthMask(GL_TRUE);
+            glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
+            glStencilMaskSeparate(GL_BACK, 0xFFFFFFFFu);
+            glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
+            break;
+        default:
+            break;
+    }
+    if (s->scissor_enabled) {
+        glEnable(GL_SCISSOR_TEST);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    glScissor(s->scissor_box[0], s->scissor_box[1], s->scissor_box[2], s->scissor_box[3]);
+    glDepthMask(s->depth_mask);
+    glStencilMaskSeparate(GL_FRONT, s->stencil_mask_front);
+    glStencilMaskSeparate(GL_BACK, s->stencil_mask_back);
+}
+
+// 形式に対応する取り付け先 (ステンシル / デプス以外は 0)
+GLenum AttachmentForStorage(GLenum internalformat)
+{
+    switch (ClassifyStorage(internalformat)) {
+        case StorageClass::Stencil:      return GL_STENCIL_ATTACHMENT;
+        case StorageClass::Depth:        return GL_DEPTH_ATTACHMENT;
+        case StorageClass::DepthStencil: return GL_DEPTH_STENCIL_ATTACHMENT;
+        default:                         return 0;
+    }
+}
 
 // アプリが持っているレンダーバッファの名前を、GL 上の名前へ読み替える
 GLuint ActualRenderbuffer(const GLState* s, GLuint handle)
@@ -1669,8 +1734,20 @@ const Method kMethods[] = {
         glFramebufferTextureLayer(U(a, 0), U(a, 1), Name(a, 2, kTexture), I(a, 3), I(a, 4));
     }},
     {"framebufferRenderbuffer", [](const Args& a) {
-        glFramebufferRenderbuffer(U(a, 0), U(a, 1), U(a, 2),
-                                  ActualRenderbuffer(S(a), Name(a, 3, kRenderbuffer)));
+        GLState* s = S(a);
+        const GLenum target = U(a, 0);
+        const GLenum attachment = U(a, 1);
+        const GLuint handle = Name(a, 3, kRenderbuffer);
+        glFramebufferRenderbuffer(target, attachment, U(a, 2), ActualRenderbuffer(s, handle));
+
+        // まだ消していないバッファを描画先に取り付けたら、ここで消す
+        const auto pending = s->renderbuffer_pending_clear.find(handle);
+        if (pending != s->renderbuffer_pending_clear.end()
+            && (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)
+            && attachment == AttachmentForStorage(pending->second.format)) {
+            ClearAttachedStorage(s, pending->second);
+            s->renderbuffer_pending_clear.erase(pending);
+        }
     }},
     {"blitFramebuffer", [](const Args& a) {
         glBlitFramebuffer(I(a, 0), I(a, 1), I(a, 2), I(a, 3), I(a, 4), I(a, 5), I(a, 6), I(a, 7),
@@ -1696,6 +1773,7 @@ const Method kMethods[] = {
             const GLuint actual = ActualRenderbuffer(s, handle);
             s->renderbuffer_storage.erase(handle);
             s->renderbuffer_alias.erase(handle);
+            s->renderbuffer_pending_clear.erase(handle);
             if (s->bound_renderbuffer_handle == handle) {
                 s->bound_renderbuffer_handle = 0;
                 s->bound_renderbuffer = 0;
@@ -1767,8 +1845,14 @@ const Method kMethods[] = {
             glFinish();
         }
         const auto t1 = std::chrono::steady_clock::now();
-        // 消すのは、アプリが使う範囲 (要求された大きさ) だけ
-        ZeroInitializeStorage(true, 0, sized, width, height, S(a));
+        // 消すのは、アプリが使う範囲 (要求された大きさ) だけ。その場では消さず、アプリが描画先に
+        // 取り付けたときに消す (GLState::renderbuffer_pending_clear)。
+        {
+            GLState::PendingClear& pending = S(a)->renderbuffer_pending_clear[bound];
+            pending.format = sized;
+            pending.width = width;
+            pending.height = height;
+        }
         if (perf) {
             glFinish();
             const auto t2 = std::chrono::steady_clock::now();
@@ -1796,7 +1880,16 @@ const Method kMethods[] = {
         }
         if (!PerfSyncEnabled()) {
             glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
-            ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
+            const GLuint bound_handle = S(a)->bound_renderbuffer_handle;
+            if (bound_handle != 0 && AttachmentForStorage(sized) != 0) {
+                // ステンシル / デプスは、描画先に取り付けたときに消す
+                GLState::PendingClear& pending = S(a)->renderbuffer_pending_clear[bound_handle];
+                pending.format = sized;
+                pending.width = 0;
+                pending.height = 0;
+            } else {
+                ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
+            }
             return;
         }
         // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)

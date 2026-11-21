@@ -84,11 +84,13 @@
 #define glGetFloatv ::next2d::glapi::g_table.glGetFloatv_
 #define glGetInteger64v ::next2d::glapi::g_table.glGetInteger64v_
 #define glGetIntegerv ::next2d::glapi::g_table.glGetIntegerv_
+#define glGetProgramBinary ::next2d::glapi::g_table.glGetProgramBinary_
 #define glGetProgramInfoLog ::next2d::glapi::g_table.glGetProgramInfoLog_
 #define glGetProgramiv ::next2d::glapi::g_table.glGetProgramiv_
 #define glGetShaderInfoLog ::next2d::glapi::g_table.glGetShaderInfoLog_
 #define glGetShaderiv ::next2d::glapi::g_table.glGetShaderiv_
 #define glGetShaderPrecisionFormat ::next2d::glapi::g_table.glGetShaderPrecisionFormat_
+#define glGetString ::next2d::glapi::g_table.glGetString_
 #define glGetSynciv ::next2d::glapi::g_table.glGetSynciv_
 #define glGetUniformBlockIndex ::next2d::glapi::g_table.glGetUniformBlockIndex_
 #define glGetUniformLocation ::next2d::glapi::g_table.glGetUniformLocation_
@@ -101,6 +103,7 @@
 #define glMapBufferRange ::next2d::glapi::g_table.glMapBufferRange_
 #define glPixelStorei ::next2d::glapi::g_table.glPixelStorei_
 #define glPolygonOffset ::next2d::glapi::g_table.glPolygonOffset_
+#define glProgramBinary ::next2d::glapi::g_table.glProgramBinary_
 #define glReadBuffer ::next2d::glapi::g_table.glReadBuffer_
 #define glReadPixels ::next2d::glapi::g_table.glReadPixels_
 #define glRenderbufferStorage ::next2d::glapi::g_table.glRenderbufferStorage_

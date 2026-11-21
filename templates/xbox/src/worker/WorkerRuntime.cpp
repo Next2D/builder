@@ -727,10 +727,25 @@ void WorkerInstance::Wake()
     cv_.notify_one();
 }
 
+namespace {
+
+long long SteadyMicroseconds()
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
 void WorkerInstance::PostToWorker(WorkerMessage message)
 {
     if (terminated_) {
         return;
+    }
+    if (threaded_) {
+        // 計測用: 返事待ちが無ければ、この投函の時刻を覚える (返事までの時間を測る)
+        long long none = 0;
+        perf_posted_us_.compare_exchange_strong(none, SteadyMicroseconds());
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -741,6 +756,18 @@ void WorkerInstance::PostToWorker(WorkerMessage message)
 
 void WorkerInstance::PostToMain(WorkerMessage message)
 {
+    if (threaded_) {
+        const long long posted = perf_posted_us_.exchange(0);
+        if (posted != 0) {
+            const double ms = (SteadyMicroseconds() - posted) / 1000.0;
+            ++perf_replies_;
+            perf_reply_total_ms_ += ms;
+            perf_reply_max_ms_ = std::max(perf_reply_max_ms_, ms);
+            if (ms > 12.0) {
+                ++perf_late_replies_;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         to_main_.push_back(std::move(message));
@@ -952,8 +979,12 @@ void WorkerInstance::ThreadLoop()
 #if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
         // このスレッドが GL のコンテキストを持っている (レンダラ) なら、描いたフレームを提示する
         const bool renderer = WebGL2CurrentOnThisThread();
+        double present_ms = 0.0;   // 提示にかかった時間 (垂直同期の待ちを含む)
         if (renderer && thread_host_->gles && thread_host_->gles->needs_present) {
+            CaptureWebGL2Frame(thread_host_->gles);
+            const double present_started_ms = loop_->Now();
             thread_host_->gles->SwapBuffers();
+            present_ms = loop_->Now() - present_started_ms;
         }
 #else
         const bool renderer = false;
@@ -977,6 +1008,45 @@ void WorkerInstance::ThreadLoop()
             const std::string gl = TakeWebGL2PerfSummary();
             if (turn_ms > 50) {
                 std::cerr << "[Worker] slow render turn: " << turn_ms << " ms (" << gl << ")" << std::endl;
+            }
+            // 2 秒ごとに、描画の回数と 1 回の時間 (平均 / 最大)、画面の更新 1 回分 (16 ms) を超えた回数を出す。
+            // 時間は提示 (垂直同期の待ち) を除いた、描画の処理そのものの時間。
+            static double stat_started_ms = started_ms;
+            static int stat_turns = 0;
+            static int stat_over = 0;
+            static double stat_total_ms = 0.0;
+            static double stat_max_ms = 0.0;
+            if (had_messages) {
+                const double exact_ms = loop_->Now() - started_ms - present_ms;
+                ++stat_turns;
+                stat_total_ms += exact_ms;
+                stat_max_ms = std::max(stat_max_ms, exact_ms);
+                if (exact_ms > 16.0) {
+                    ++stat_over;
+                }
+            }
+            if (loop_->Now() - stat_started_ms >= 2000.0) {
+                if (stat_turns > 0) {
+                    // reply = 親がメッセージを投函してから worker が返事を投函するまでの時間。
+                    // 12 ms を超えると、親の次のフレームに間に合わないことが多い。
+                    char line[240];
+                    std::snprintf(line, sizeof(line),
+                        "[Worker] %d render turns / 2 s: work avg %.1f ms, max %.0f ms, over 16 ms: %d; "
+                        "reply %d times, avg %.1f ms, max %.0f ms, over 12 ms: %d",
+                        stat_turns, stat_total_ms / stat_turns, stat_max_ms, stat_over,
+                        perf_replies_, perf_replies_ ? perf_reply_total_ms_ / perf_replies_ : 0.0,
+                        perf_reply_max_ms_, perf_late_replies_);
+                    std::cerr << line << std::endl;
+                }
+                perf_replies_ = 0;
+                perf_late_replies_ = 0;
+                perf_reply_total_ms_ = 0.0;
+                perf_reply_max_ms_ = 0.0;
+                stat_started_ms = loop_->Now();
+                stat_turns = 0;
+                stat_over = 0;
+                stat_total_ms = 0.0;
+                stat_max_ms = 0.0;
             }
         }
 #else

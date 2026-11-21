@@ -16,7 +16,9 @@ NODE_INC="$(dirname "$(dirname "$(node -p process.execPath)")")/include/node"
 OUT="${TMPDIR:-/tmp}/next2d_webgl2_test"
 mkdir -p "${OUT}"
 
-SOURCES=(tests/webgl2/addon.cpp src/bindings/webgl/WebGL2.cpp src/gpu/EglContext.cpp)
+# WebGL2.cpp が使うホスト側の部品 (シェーダのリンク結果の保存先) も一緒にビルドする
+SOURCES=(tests/webgl2/addon.cpp src/bindings/webgl/WebGL2.cpp src/gpu/EglContext.cpp
+         src/platform/HostCache.cpp)
 FLAGS=(-std=c++20 -O1 -g -Wall -Wextra -shared -fPIC -DNEXT2D_ENABLE_WEBGL2=1
        -Isrc -I. -Ithird_party/khronos -isystem "${NODE_INC}")
 

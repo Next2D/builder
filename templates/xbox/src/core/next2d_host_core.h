@@ -75,7 +75,8 @@ typedef struct Next2DHostConfig {
 
     /* storage_dir のファイルへ書き込んだ直後に呼ばれる。書いた内容を確定する操作が必要な
      * 保存先を使う場合に、その合図として使う。name は保存したストレージの名前
-     * (例 "localStorage")。next2d_host_frame を呼んだスレッドから呼ばれる。不要なら NULL。 */
+     * (例 "localStorage")。next2d_host_frame を呼んだスレッドから呼ばれる。不要なら NULL。
+     * next2d_host_set_cache_dir の保存先へ書いたときも、name を "cache" として呼ばれる。 */
     void (*storage_saved)(const char* name, void* user);
 } Next2DHostConfig;
 
@@ -162,6 +163,18 @@ NEXT2D_HOST_CORE_API void next2d_host_set_load_callback(
  * NULL を渡すと元に戻る (描画も next2d_host_frame を呼んだスレッドで行う)。 */
 NEXT2D_HOST_CORE_API void next2d_host_set_render_thread(
     int32_t (*make_current)(void* user), void (*release_current)(void* user), void* user);
+
+/* 作り直せるデータを、次の起動へ持ち越すための保存先のディレクトリ (UTF-8) を設定する
+ * (不要なら呼ばなくてよい)。next2d_host_create の前に呼ぶこと。
+ * いまは、シェーダのリンク結果を保存する。リンクは環境によって 1 つ数十〜百数十ミリ秒かかり、
+ * 新しい表現を初めて描く瞬間に画面が止まる原因になる。保存してあれば、2 回目以降の起動では
+ * リンクせずに読み込む。
+ * 保存したデータは消えても動作に影響しない (無ければ作り直す) ので、ゲームの保存データ
+ * (storage_dir) とは別の、消えてよいデータ用の場所を渡すこと。大きさの目安は、プログラム 1 つに
+ * つき数十 KB で、合計 1〜2 MB 程度。
+ * 設定しない場合、Windows では %LOCALAPPDATA%\Next2D\cache を使い、それ以外の環境では保存しない。
+ * NULL か空文字列を渡すと既定に戻る。 */
+NEXT2D_HOST_CORE_API void next2d_host_set_cache_dir(const char* directory);
 
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);

@@ -5,8 +5,11 @@
 // バインディング本体はプラットフォーム非依存に保たれ、実装側だけを差し替えられる
 // (デスクトップ検証は EGL + ANGLE、他プラットフォームは各自の実装を用意する)。
 //
-// スレッドモデル: ホストは単一スレッド (worker も同一 Isolate の協調実行) なので、
+// スレッドモデル: 既定ではホストは単一スレッド (worker も同一 Isolate の協調実行) で、
 // コンテキストは起動時に 1 度 MakeCurrent したら current のまま使う。
+// worker を専用スレッドで動かす構成 (HostContext::threaded_workers) では、WebGL2 の
+// コンテキストを作ったスレッド (レンダラの worker) が MakeCurrent し、以後そのスレッドだけが
+// GL を呼んで提示も行う。そのスレッドは終了時に ReleaseCurrent する。
 #pragma once
 
 #include <cstdint>
@@ -19,6 +22,9 @@ public:
 
     // このスレッドでコンテキストを current にする。成功時 true。
     virtual bool MakeCurrent() = 0;
+
+    // このスレッドでの current を外す (別のスレッドが MakeCurrent できるようにする)。
+    virtual void ReleaseCurrent() {}
 
     // デフォルトフレームバッファを画面へ提示する。
     virtual void SwapBuffers() = 0;

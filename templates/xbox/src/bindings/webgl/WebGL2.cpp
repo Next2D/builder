@@ -176,8 +176,9 @@ enum Kind : int32_t {
 v8::Local<v8::ObjectTemplate> WrapperTemplate(v8::Isolate* isolate)
 {
     // Eternal は isolate と同じ寿命で、終了時の解放順序を気にしなくてよい。
-    static v8::Isolate* owner = nullptr;
-    static v8::Eternal<v8::ObjectTemplate> tmpl;
+    // スレッドごとに持つ (worker を専用スレッドの別 isolate で動かす構成のため)
+    thread_local v8::Isolate* owner = nullptr;
+    thread_local v8::Eternal<v8::ObjectTemplate> tmpl;
     if (owner != isolate) {
         v8::Local<v8::ObjectTemplate> t = v8::ObjectTemplate::New(isolate);
         t->SetInternalFieldCount(2);
@@ -1708,11 +1709,32 @@ std::string TakeWebGL2PerfSummary()
     return text;
 }
 
+namespace {
+
+// このスレッドが GL のコンテキストを current にしたか (worker を専用スレッドで動かす構成で使う)
+thread_local bool t_gl_current = false;
+
+} // namespace
+
+bool WebGL2CurrentOnThisThread()
+{
+    return t_gl_current;
+}
+
+void ReleaseWebGL2Thread(HostContext* host)
+{
+    if (t_gl_current && host && host->gles) {
+        host->gles->ReleaseCurrent();
+    }
+    t_gl_current = false;
+}
+
 v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* host)
 {
     if (!host || !host->gles || !host->gles->MakeCurrent()) {
         return v8::Local<v8::Object>();
     }
+    t_gl_current = true;
 
     auto* state = new GLState();
     state->host = host;

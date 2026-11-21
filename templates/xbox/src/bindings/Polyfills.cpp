@@ -26,6 +26,25 @@ const char kPolyfills1[] = R"JS(
             Promise.resolve().then(callback);
         };
     }
+
+    // DOMException: アプリ側のライブラリが、読み込みの中断などを
+    // `new DOMException(message, "AbortError")` で表す。無いと、その場で ReferenceError になり、
+    // 中断の処理そのものが途中で止まる (読み込み中の音声を止める処理で確認)。
+    if (typeof global.DOMException === "undefined") {
+        global.DOMException = class DOMException extends Error {
+            constructor(message, name) {
+                super(message === undefined ? "" : String(message));
+                Object.defineProperty(this, "name", {
+                    "value": name === undefined ? "Error" : String(name),
+                    "configurable": true,
+                    "writable": true
+                });
+            }
+            get code() {
+                return this.name === "AbortError" ? 20 : 0;
+            }
+        };
+    }
 })(globalThis);
 )JS";
 

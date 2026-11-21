@@ -33,6 +33,13 @@ v8::Local<v8::Object> CreateWebGPUCanvasContext(v8::Isolate* isolate, HostContex
 // NEXT2D_ENABLE_WEBGL2 を定義したビルドでのみリンクされる。
 v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* host);
 
+// worker を専用スレッドで動かす構成用: 呼び出したスレッドが WebGL2 のコンテキストを作った
+// (GL のコンテキストを current にした) かどうか。
+bool WebGL2CurrentOnThisThread();
+
+// 呼び出したスレッドが GL のコンテキストを current にしていれば外す (スレッドの終了時に呼ぶ)。
+void ReleaseWebGL2Thread(HostContext* host);
+
 // 環境変数 NEXT2D_HOST_PERF の指定時: 前回の呼び出し以降に WebGL2 のメソッドにかかった時間の
 // 要約 (合計と、時間のかかった上位のメソッド) を返し、集計を 0 に戻す。未指定時は空文字列。
 std::string TakeWebGL2PerfSummary();

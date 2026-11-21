@@ -2,6 +2,7 @@
 #pragma once
 
 #include <v8.h>
+#include <atomic>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -26,12 +27,13 @@ inline v8::Local<v8::String> Str(v8::Isolate* isolate, std::string_view s)
 // を v8::Eternal で保持し、2 回目以降はハッシュマップ参照のみにする。
 // jitless では JS↔C++ 境界のコストが相対的に重いため、ここの削減が全体に効く。
 // キーは内容比較 (std::string) なので呼び出し元がリテラル以外を渡しても安全。
-// ホストは単一 Isolate 運用 (worker も同一 Isolate の別 Context) だが、
-// 念のため isolate が変わったらキャッシュを破棄する (Eternal は isolate 寿命に紐づく)。
+// キャッシュはスレッドごとに持つ (worker を専用スレッドの別 isolate で動かす構成では、
+// isolate はスレッドと 1 対 1 に対応する)。念のため isolate が変わったらキャッシュを破棄する
+// (Eternal は isolate 寿命に紐づく)。
 inline v8::Local<v8::String> PropName(v8::Isolate* isolate, const char* key)
 {
-    static v8::Isolate* cached_isolate = nullptr;
-    static std::unordered_map<std::string, v8::Eternal<v8::String>> cache;
+    thread_local v8::Isolate* cached_isolate = nullptr;
+    thread_local std::unordered_map<std::string, v8::Eternal<v8::String>> cache;
     if (cached_isolate != isolate) {
         cache.clear();
         cached_isolate = isolate;
@@ -92,11 +94,10 @@ inline void ThrowTypeError(v8::Isolate* isolate, std::string_view message)
 // する。暴走ログ防止に先頭 200 件までに制限。ファイルは実行ディレクトリの next2d-error.log。
 inline void AppendErrorLog(const std::string& line)
 {
-    static int written = 0;
-    if (written >= 200) {
+    static std::atomic<int> written{0};
+    if (written.fetch_add(1) >= 200) {
         return;
     }
-    ++written;
     std::ofstream ofs("next2d-error.log", std::ios::app);
     if (ofs) {
         ofs << line << std::endl;

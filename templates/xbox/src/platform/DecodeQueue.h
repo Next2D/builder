@@ -9,7 +9,7 @@
 // 契約:
 //   - work    : プールスレッドで実行される。V8 / JS ヒープに触れてはならない。
 //               (WIC/MF は per-call 実装で COM はスレッド毎に MTA 初期化済み)
-//   - complete: work 完了後、メインスレッドの Pump() から実行される。V8 可。
+//   - complete: work 完了後、Submit を呼んだスレッドの Pump() から実行される。V8 可。
 //               (v8::Global を捕捉してよい。Pump は isolate/コンテキストスコープ外で
 //                呼ばれるため、complete 側で HandleScope/Context::Scope を張ること)
 //   - Shutdown: 全スレッドを join し、未実行の work / complete を破棄する。
@@ -23,6 +23,10 @@ namespace next2d::decodequeue {
 void Submit(std::function<void()> work, std::function<void()> complete);
 void Pump();
 void Shutdown();
+
+// 呼び出したスレッドが依頼した分のうち、まだ始まっていない work と未実行の complete を破棄する。
+// worker のスレッドが終わるとき、その isolate を破棄する前に呼ぶ (complete が v8::Global を持つため)。
+void DropForThisThread();
 
 // 画面の資材 (画像、BGM などの音声要素) を読み込んでいる数。読み込みの開始で +1、完了の反映で -1 する。
 // 画面の切り替えが始まったことを知る手がかりに使う (効果音のように再生のたびに行うデコードは数えない)。

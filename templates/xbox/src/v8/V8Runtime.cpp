@@ -35,7 +35,67 @@ std::string ReadTextFile(const std::string& path)
     return oss.str();
 }
 
+// 未処理の Promise 拒否を stderr へ報告する (メインと worker の isolate で共通)。
+void ReportPromiseReject(v8::PromiseRejectMessage message)
+{
+    if (message.GetEvent() != v8::kPromiseRejectWithNoHandler) {
+        return;   // 後からハンドラが付く分などは報告しない
+    }
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    v8::HandleScope hs(isolate);
+    v8::Local<v8::Value> value = message.GetValue();
+    std::string text = "(no value)";
+    std::string stack;
+    if (!value.IsEmpty()) {
+        text = v8util::ToStdString(isolate, value);
+        v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
+        if (!ctx.IsEmpty() && value->IsObject()) {
+            v8::Local<v8::Value> s;
+            if (value.As<v8::Object>()
+                    ->Get(ctx, v8util::Str(isolate, "stack")).ToLocal(&s) &&
+                s->IsString()) {
+                stack = v8util::ToStdString(isolate, s);
+            }
+        }
+    }
+    std::cerr << "[V8] Unhandled promise rejection: " << text << std::endl;
+    if (!stack.empty() && stack != text) {
+        std::cerr << stack << std::endl;
+    }
+}
+
+// young generation の大きさ (V8Runtime::Initialize の説明を参照)
+constexpr size_t kYoungGenerationBytes = 64 * 1024 * 1024;
+
 } // namespace
+
+v8::ArrayBuffer::Allocator* V8Runtime::SharedArrayBufferAllocator()
+{
+    // 破棄しない。ArrayBuffer の実体 (BackingStore) は postMessage の transfer で isolate を
+    // またいで移り、確保した isolate より長く生きることがある。解放のときに確保元の allocator が
+    // 要るので、プロセスで 1 つだけ作って最後まで残す (既定の allocator は状態を持たない)。
+    static v8::ArrayBuffer::Allocator* allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+    return allocator;
+}
+
+v8::Isolate* V8Runtime::NewWorkerIsolate(HostContext* host)
+{
+    v8::Isolate::CreateParams params;
+    params.array_buffer_allocator = SharedArrayBufferAllocator();
+    params.constraints.set_max_young_generation_size_in_bytes(kYoungGenerationBytes);
+    v8::Isolate* isolate = v8::Isolate::New(params);
+    isolate->SetData(kHostContextSlot, host);
+    isolate->SetData(kRuntimeSlot, nullptr);
+    isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
+    isolate->SetPromiseRejectCallback(ReportPromiseReject);
+    return isolate;
+}
+
+void V8Runtime::PumpPlatformTasksFor(v8::Isolate* isolate)
+{
+    while (v8::platform::PumpMessageLoop(platform_.get(), isolate)) {
+    }
+}
 
 V8Runtime::V8Runtime() = default;
 
@@ -101,16 +161,14 @@ bool V8Runtime::Initialize(HostContext* host)
 {
     host_ = host;
 
-    create_params_.array_buffer_allocator =
-        v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+    create_params_.array_buffer_allocator = SharedArrayBufferAllocator();
 
     // 60fps のゲームはフレーム毎に短命オブジェクト (ディスクリプタ/一時配列) を
     // 大量生成する。young generation を既定 (十数 MB) から 64MB へ拡大して
     // scavenge (minor GC) の頻度を下げ、マイクロヒッチを減らす。
     // scavenge の停止時間は生存オブジェクト量に比例し空間サイズには比例しないため、
     // 拡大はほぼ純粋に頻度低減として効く。
-    create_params_.constraints.set_max_young_generation_size_in_bytes(
-        64 * 1024 * 1024);
+    create_params_.constraints.set_max_young_generation_size_in_bytes(kYoungGenerationBytes);
 
     isolate_ = v8::Isolate::New(create_params_);
     isolate_->SetData(kHostContextSlot, host);
@@ -121,32 +179,7 @@ bool V8Runtime::Initialize(HostContext* host)
 
     // 未処理の Promise 拒否を stderr へ報告する。framework の boot は async のため、
     // この報告が無いと例外がどこにも出ずゲームが無音で停止する (実際に発生した)。
-    isolate_->SetPromiseRejectCallback([](v8::PromiseRejectMessage message) {
-        if (message.GetEvent() != v8::kPromiseRejectWithNoHandler) {
-            return;   // 後からハンドラが付く分などは報告しない
-        }
-        v8::Isolate* isolate = v8::Isolate::GetCurrent();
-        v8::HandleScope hs(isolate);
-        v8::Local<v8::Value> value = message.GetValue();
-        std::string text = "(no value)";
-        std::string stack;
-        if (!value.IsEmpty()) {
-            text = v8util::ToStdString(isolate, value);
-            v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
-            if (!ctx.IsEmpty() && value->IsObject()) {
-                v8::Local<v8::Value> s;
-                if (value.As<v8::Object>()
-                        ->Get(ctx, v8util::Str(isolate, "stack")).ToLocal(&s) &&
-                    s->IsString()) {
-                    stack = v8util::ToStdString(isolate, s);
-                }
-            }
-        }
-        std::cerr << "[V8] Unhandled promise rejection: " << text << std::endl;
-        if (!stack.empty() && stack != text) {
-            std::cerr << stack << std::endl;
-        }
-    });
+    isolate_->SetPromiseRejectCallback(ReportPromiseReject);
 
     // import.meta.url: モジュールの場所を、location.origin ("app://local") 基準の URL で返す。
     // バンドラが出力する `new URL("../asset.mp3", import.meta.url).href` が
@@ -198,10 +231,7 @@ void V8Runtime::Dispose()
         isolate_->Dispose();
         isolate_ = nullptr;
     }
-    if (create_params_.array_buffer_allocator) {
-        delete create_params_.array_buffer_allocator;
-        create_params_.array_buffer_allocator = nullptr;
-    }
+    create_params_.array_buffer_allocator = nullptr;   // 共有の allocator は破棄しない
 }
 
 v8::Local<v8::Context> V8Runtime::context() const

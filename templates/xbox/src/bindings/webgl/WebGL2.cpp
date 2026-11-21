@@ -20,6 +20,7 @@
 #include "../../HostContext.h"
 #include "../ImageSource.h"
 #include "../../gpu/GlesContext.h"
+#include "../../platform/HostCache.h"
 #include "../../v8/V8Util.h"
 
 #include "GlApi.h"   // GLES3/gl3.h + (任意) 関数テーブル経由の呼び出し
@@ -27,10 +28,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -67,12 +71,81 @@ struct GLState {
 
     GLuint draw_framebuffer  = 0;   // 0 = デフォルトフレームバッファ (WebGL 上の null)
 
+    // GL の状態の控え。確保した領域を消すとき (ZeroInitializeStorage) に、いまの状態を GL へ
+    // 問い合わせずに済ませるためのもの。状態の問い合わせ (glGet* / glIsEnabled) は、それまでに
+    // 依頼した処理が終わるのを待つことがあり、GPU の処理が溜まっている場面で長い停止になる
+    // (開発機で、1 回 50〜90 ms の待ちを確認)。
+    GLuint  bound_renderbuffer = 0;         // GL 上の名前 (下の renderbuffer_alias を引いたあと)
+    GLuint  bound_renderbuffer_handle = 0;  // アプリが持っている名前
+    bool    scissor_enabled    = false;
+    GLint   scissor_box[4]     = {0, 0, 0, 0};
+    GLboolean color_mask[4]    = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    GLboolean depth_mask       = GL_TRUE;
+    GLuint  stencil_mask_front = 0xFFFFFFFFu;
+    GLuint  stencil_mask_back  = 0xFFFFFFFFu;
+
     // バインディング側の検証で検出したエラー。getError が GL のエラーより先に返す。
     GLenum synthetic_error   = GL_NO_ERROR;
 
     std::vector<uint8_t> scratch;
     std::vector<GLfloat> fscratch;
     std::vector<GLint>   iscratch;
+
+    // レンダーバッファが実際に持っている領域 (renderbufferStorage の使い回し用)
+    struct RenderbufferStorage {
+        GLenum format = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+    };
+    std::unordered_map<GLuint, RenderbufferStorage> renderbuffer_storage;
+
+    // アプリが持っているレンダーバッファの名前 → いま GL 上で使っている名前。
+    // 領域を確保し直すとき、同じ GL オブジェクトで確保し直すと、そのオブジェクトを使う処理が
+    // GPU に残っている間は終わるのを待たされる。そこで、確保し直すときは新しい GL オブジェクトを
+    // 作って差し替える (古い方は GPU が使い終わったあとで解放される)。
+    // アプリに見せる名前は GL の名前とは別の連番にする (GL は解放した名前を再利用するので、
+    // GL の名前をそのまま見せると、差し替えたあとで別のオブジェクトと番号が重なる)。
+    std::unordered_map<GLuint, GLuint> renderbuffer_alias;
+    GLuint next_renderbuffer_handle = 0;
+
+    // 確保したあと、まだ中身を消していないレンダーバッファ (ステンシル / デプス)。
+    // WebGL では確保した領域は消えた状態で始まるが、OpenGL ES では不定なので、ホストが消す。
+    // 確保した直後に消すには、そのためだけに描画先を切り替える必要があり、環境によっては
+    // 切り替えのたびに、それまでに依頼した GPU の処理が終わるのを待たされる。そこで、アプリが
+    // そのバッファを描画先に取り付けたとき (framebufferRenderbuffer) に、その描画先の上で消す。
+    struct PendingClear {
+        GLenum format = 0;
+        GLsizei width = 0;    // 消す範囲 (0 なら全体)
+        GLsizei height = 0;
+    };
+    std::unordered_map<GLuint, PendingClear> renderbuffer_pending_clear;
+
+    // 使われなくなったレンダーバッファ (ステンシル / デプス) の置き場。
+    // 領域の確保そのものが重い環境がある (開発機で 1 回 25〜75 ms)。アプリは必要な大きさが
+    // 変わるたびに確保し直すので、手放した領域を捨てずに置いておき、同じ形式・同じ大きさの
+    // 要求が来たらそれを渡す。大きさは 2 のべき乗へ切り上げて、同じものに当たりやすくする。
+    struct PooledRenderbuffer {
+        GLuint name = 0;
+        GLenum format = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+    };
+    std::vector<PooledRenderbuffer> renderbuffer_pool;   // 末尾が最も新しい
+    int64_t renderbuffer_pool_pixels = 0;
+
+    // シェーダのリンク結果の保存と再利用 (linkProgram を参照)
+    struct ShaderInfo {
+        std::string source;
+        bool compile_requested = false;   // compileShader が呼ばれた
+        bool compiled = false;            // 実際にコンパイルした
+    };
+    struct ProgramInfo {
+        std::vector<GLuint> shaders;      // attachShader された順
+        std::string attributes;           // bindAttribLocation の内容
+        bool cacheable = true;
+    };
+    std::unordered_map<GLuint, ShaderInfo> shaders;
+    std::unordered_map<GLuint, ProgramInfo> programs;
 };
 
 inline GLState* S(const Args& a)
@@ -554,24 +627,286 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
 bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
 
-void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat)
+// いまの描画先に取り付けられているステンシル / デプスを消し、変えた状態を控えから戻す。
+// 状態の問い合わせも描画先の切り替えもしない (GLState::renderbuffer_pending_clear の説明を参照)。
+void ClearAttachedStorage(const GLState* s, const GLState::PendingClear& pending)
 {
-    GLint name = 0;
-    glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
+    if (pending.width > 0 && pending.height > 0) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, pending.width, pending.height);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    const GLint zero = 0;
+    const GLfloat one = 1.0f;
+    switch (ClassifyStorage(pending.format)) {
+        case StorageClass::Stencil:
+            glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
+            glStencilMaskSeparate(GL_BACK, 0xFFFFFFFFu);
+            glClearBufferiv(GL_STENCIL, 0, &zero);
+            break;
+        case StorageClass::Depth:
+            glDepthMask(GL_TRUE);
+            glClearBufferfv(GL_DEPTH, 0, &one);
+            break;
+        case StorageClass::DepthStencil:
+            glDepthMask(GL_TRUE);
+            glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
+            glStencilMaskSeparate(GL_BACK, 0xFFFFFFFFu);
+            glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
+            break;
+        default:
+            break;
+    }
+    if (s->scissor_enabled) {
+        glEnable(GL_SCISSOR_TEST);
+    } else {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    glScissor(s->scissor_box[0], s->scissor_box[1], s->scissor_box[2], s->scissor_box[3]);
+    glDepthMask(s->depth_mask);
+    glStencilMaskSeparate(GL_FRONT, s->stencil_mask_front);
+    glStencilMaskSeparate(GL_BACK, s->stencil_mask_back);
+}
+
+// 形式に対応する取り付け先 (ステンシル / デプス以外は 0)
+GLenum AttachmentForStorage(GLenum internalformat)
+{
+    switch (ClassifyStorage(internalformat)) {
+        case StorageClass::Stencil:      return GL_STENCIL_ATTACHMENT;
+        case StorageClass::Depth:        return GL_DEPTH_ATTACHMENT;
+        case StorageClass::DepthStencil: return GL_DEPTH_STENCIL_ATTACHMENT;
+        default:                         return 0;
+    }
+}
+
+// アプリが持っているレンダーバッファの名前を、GL 上の名前へ読み替える
+GLuint ActualRenderbuffer(const GLState* s, GLuint handle)
+{
+    const auto it = s->renderbuffer_alias.find(handle);
+    return it == s->renderbuffer_alias.end() ? 0 : it->second;
+}
+
+// いま束縛しているレンダーバッファが領域を持っていたら、新しい GL オブジェクトへ差し替えて束縛する。
+// このあと呼び出し側が領域を確保する (GLState::renderbuffer_alias の説明を参照)。
+void ReplaceBoundRenderbuffer(GLState* s, GLenum target, bool had_storage)
+{
+    if (!had_storage || s->bound_renderbuffer_handle == 0) {
+        return;
+    }
+    GLuint fresh = 0;
+    glGenRenderbuffers(1, &fresh);
+    if (fresh == 0) {
+        return;
+    }
+    const GLuint old = s->bound_renderbuffer;
+    glBindRenderbuffer(target, fresh);
+    glDeleteRenderbuffers(1, &old);
+    s->renderbuffer_alias[s->bound_renderbuffer_handle] = fresh;
+    s->bound_renderbuffer = fresh;
+}
+
+// 置き場に持つ量の上限 (画素数の合計)。ステンシルは 1 画素 1 バイトなので、約 48 MB に当たる。
+constexpr int64_t kRenderbufferPoolMaxPixels = 48ll * 1024 * 1024;
+
+GLsizei PoolBucket(GLsizei v)
+{
+    GLsizei bucket = 256;
+    while (bucket < v) {
+        bucket *= 2;
+    }
+    return bucket;
+}
+
+// 領域を持つ GL のレンダーバッファを置き場へ入れる。上限を超えたら古いものから解放する。
+void PoolRenderbuffer(GLState* s, GLuint name, const GLState::RenderbufferStorage& storage)
+{
     if (name == 0) {
         return;
     }
+    if (storage.format == 0 || storage.width <= 0 || storage.height <= 0) {
+        glDeleteRenderbuffers(1, &name);
+        return;
+    }
+    GLState::PooledRenderbuffer entry;
+    entry.name = name;
+    entry.format = storage.format;
+    entry.width = storage.width;
+    entry.height = storage.height;
+    s->renderbuffer_pool.push_back(entry);
+    s->renderbuffer_pool_pixels += static_cast<int64_t>(storage.width) * storage.height;
+    while (s->renderbuffer_pool_pixels > kRenderbufferPoolMaxPixels && s->renderbuffer_pool.size() > 1) {
+        const GLState::PooledRenderbuffer oldest = s->renderbuffer_pool.front();
+        s->renderbuffer_pool.erase(s->renderbuffer_pool.begin());
+        s->renderbuffer_pool_pixels -= static_cast<int64_t>(oldest.width) * oldest.height;
+        glDeleteRenderbuffers(1, &oldest.name);
+    }
+}
 
+// 置き場から、同じ形式・同じ大きさのものを取り出す。無ければ 0。
+GLuint TakePooledRenderbuffer(GLState* s, GLenum format, GLsizei width, GLsizei height)
+{
+    for (size_t i = s->renderbuffer_pool.size(); i-- > 0;) {
+        const GLState::PooledRenderbuffer& entry = s->renderbuffer_pool[i];
+        if (entry.format == format && entry.width == width && entry.height == height) {
+            const GLuint name = entry.name;
+            s->renderbuffer_pool_pixels -= static_cast<int64_t>(entry.width) * entry.height;
+            s->renderbuffer_pool.erase(s->renderbuffer_pool.begin() + static_cast<std::ptrdiff_t>(i));
+            return name;
+        }
+    }
+    return 0;
+}
+
+// 環境変数 NEXT2D_HOST_PERF_SYNC: glFinish で実行を待って、個々の処理の時間を測る
+bool PerfSyncEnabled()
+{
+    static const bool enabled = std::getenv("NEXT2D_HOST_PERF_SYNC") != nullptr;
+    return enabled;
+}
+
+// ---- シェーダのリンク結果の保存と再利用 -------------------------------------
+// シェーダのコンパイルとリンクは環境によって重い (開発機で 1 つ 30〜190 ms)。アプリは新しい
+// 表現を初めて描くときにプログラムを作るので、その瞬間に画面が止まる。
+// リンクした結果 (プログラムバイナリ) を保存先 (platform/HostCache.h) へ書いておき、次に同じ
+// ソースのプログラムを作るときは、コンパイルもリンクもせずにそれを読み込む。
+//   - compileShader は、その場ではコンパイルしない (保存した結果が使えれば不要になるため)。
+//     リンクで保存が使えなかったとき、またはコンパイル結果を問い合わせられたときに行う。
+//   - 鍵は、GL の実装を表す文字列 (ドライバが変わればバイナリの互換性は無い) と、
+//     各シェーダのソース、属性の割り当て。
+//   - 保存した結果の読み込みに失敗したら (ドライバの更新など)、通常どおりコンパイルして
+//     リンクし、保存し直す。
+// 保存先が無い環境では、遅らせたコンパイルをリンクのときに行うだけで、動作は変わらない。
+
+uint64_t HashBytes(const void* data, size_t size, uint64_t hash)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t HashString(const std::string& text, uint64_t hash)
+{
+    hash = HashBytes(text.data(), text.size(), hash);
+    const unsigned char separator = 0xFF;
+    return HashBytes(&separator, 1, hash);
+}
+
+void EnsureShaderCompiled(GLState* s, GLuint shader)
+{
+    auto it = s->shaders.find(shader);
+    if (it == s->shaders.end() || !it->second.compile_requested || it->second.compiled) {
+        return;
+    }
+    glCompileShader(shader);
+    it->second.compiled = true;
+}
+
+void LinkProgramWithCache(GLState* s, GLuint program)
+{
+    auto found = s->programs.find(program);
+    const bool tracked = found != s->programs.end() && found->second.cacheable
+        && !found->second.shaders.empty();
+    std::string file;
+    if (tracked && !hostcache::Directory().empty()) {
+        uint64_t hash = 1469598103934665603ull;
+        for (const GLenum name : { GL_VENDOR, GL_RENDERER, GL_VERSION }) {
+            const GLubyte* text = glGetString(name);
+            hash = HashString(text ? reinterpret_cast<const char*>(text) : "", hash);
+        }
+        for (const GLuint shader : found->second.shaders) {
+            const auto info = s->shaders.find(shader);
+            hash = HashString(info != s->shaders.end() ? info->second.source : std::string(), hash);
+        }
+        hash = HashString(found->second.attributes, hash);
+        char name[40];
+        std::snprintf(name, sizeof(name), "program-%016llx.bin", static_cast<unsigned long long>(hash));
+        file = name;
+
+        // 保存した結果: 先頭 4 バイトがバイナリの形式、残りが本体
+        std::vector<uint8_t> bytes;
+        if (hostcache::Read(file, &bytes) && bytes.size() > 4) {
+            GLenum format = 0;
+            std::memcpy(&format, bytes.data(), 4);
+            glProgramBinary(program, format, bytes.data() + 4, static_cast<GLsizei>(bytes.size() - 4));
+            GLint linked = 0;
+            glGetProgramiv(program, GL_LINK_STATUS, &linked);
+            if (linked) {
+                return;
+            }
+            for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}   // 読み込みの失敗はここで捨てる
+        }
+    }
+
+    if (found != s->programs.end()) {
+        for (const GLuint shader : found->second.shaders) {
+            EnsureShaderCompiled(s, shader);
+        }
+    }
+    glLinkProgram(program);
+
+    if (!file.empty()) {
+        GLint linked = 0;
+        GLint length = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+        if (linked && length > 0) {
+            std::vector<uint8_t> bytes(static_cast<size_t>(length) + 4);
+            GLenum format = 0;
+            GLsizei written = 0;
+            glGetProgramBinary(program, length, &written, &format, bytes.data() + 4);
+            if (written > 0 && glGetError() == GL_NO_ERROR) {
+                std::memcpy(bytes.data(), &format, 4);
+                hostcache::Write(file, bytes.data(), static_cast<size_t>(written) + 4);
+            }
+        }
+    }
+}
+
+// region_width / region_height が正のときは、左下からその大きさの範囲だけを消す
+// (領域を大きめに持っているレンダーバッファで、使う範囲だけを消すため)。
+// state を渡すと (レンダーバッファのとき)、いまの GL の状態を問い合わせずに state の控えを使い、
+// フレームバッファの状態の確認やエラーの読み捨てもしない (どれも、溜まった処理を待つことがある)。
+void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat,
+                           GLsizei region_width = 0, GLsizei region_height = 0,
+                           const GLState* state = nullptr)
+{
+    const bool shadowed = renderbuffer && state != nullptr;
+
+    GLint name = 0;
     GLint saved_fbo = 0;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
-    const GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean saved_scissor = GL_FALSE;
+    GLint saved_scissor_box[4] = {0, 0, 0, 0};
     GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
-    glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
     GLboolean saved_depth_mask = GL_TRUE;
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &saved_depth_mask);
     GLint saved_stencil_front = 0, saved_stencil_back = 0;
-    glGetIntegerv(GL_STENCIL_WRITEMASK, &saved_stencil_front);
-    glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &saved_stencil_back);
+    if (shadowed) {
+        name = static_cast<GLint>(state->bound_renderbuffer);
+        saved_fbo = static_cast<GLint>(state->draw_framebuffer
+            ? state->draw_framebuffer
+            : (state->gles ? state->gles->default_framebuffer() : 0));
+        saved_scissor = state->scissor_enabled ? GL_TRUE : GL_FALSE;
+        std::memcpy(saved_scissor_box, state->scissor_box, sizeof(saved_scissor_box));
+        std::memcpy(saved_color_mask, state->color_mask, sizeof(saved_color_mask));
+        saved_depth_mask = state->depth_mask;
+        saved_stencil_front = static_cast<GLint>(state->stencil_mask_front);
+        saved_stencil_back = static_cast<GLint>(state->stencil_mask_back);
+    } else {
+        glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
+        saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+        glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
+        glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &saved_depth_mask);
+        glGetIntegerv(GL_STENCIL_WRITEMASK, &saved_stencil_front);
+        glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &saved_stencil_back);
+    }
+    if (name == 0) {
+        return;
+    }
 
     const StorageClass kind = ClassifyStorage(internalformat);
     const GLenum attachment =
@@ -590,8 +925,13 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
                                static_cast<GLuint>(name), level);
     }
 
-    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        glDisable(GL_SCISSOR_TEST);
+    if (shadowed || glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        if (region_width > 0 && region_height > 0) {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, 0, region_width, region_height);
+        } else {
+            glDisable(GL_SCISSOR_TEST);
+        }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
         glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
@@ -612,7 +952,10 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
 
         if (saved_scissor) {
             glEnable(GL_SCISSOR_TEST);
+        } else {
+            glDisable(GL_SCISSOR_TEST);
         }
+        glScissor(saved_scissor_box[0], saved_scissor_box[1], saved_scissor_box[2], saved_scissor_box[3]);
         glColorMask(saved_color_mask[0], saved_color_mask[1], saved_color_mask[2], saved_color_mask[3]);
         glDepthMask(saved_depth_mask);
         glStencilMaskSeparate(GL_FRONT, static_cast<GLuint>(saved_stencil_front));
@@ -621,8 +964,10 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
 
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(saved_fbo));
     glDeleteFramebuffers(1, &fbo);
-    // 描画に使えない形式を取り付けたときなどのエラーは、アプリに見せない
-    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    if (!shadowed) {
+        // 描画に使えない形式を取り付けたときなどのエラーは、アプリに見せない
+        for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    }
 }
 
 void TexImage2D(const Args& a)
@@ -1186,17 +1531,32 @@ struct Method {
 
 const Method kMethods[] = {
     // --- 状態
-    {"enable", [](const Args& a) { glEnable(U(a, 0)); }},
-    {"disable", [](const Args& a) { glDisable(U(a, 0)); }},
+    {"enable", [](const Args& a) {
+        if (U(a, 0) == GL_SCISSOR_TEST) { S(a)->scissor_enabled = true; }
+        glEnable(U(a, 0));
+    }},
+    {"disable", [](const Args& a) {
+        if (U(a, 0) == GL_SCISSOR_TEST) { S(a)->scissor_enabled = false; }
+        glDisable(U(a, 0));
+    }},
     {"isEnabled", [](const Args& a) { a.GetReturnValue().Set(glIsEnabled(U(a, 0)) == GL_TRUE); }},
     {"viewport", [](const Args& a) { glViewport(I(a, 0), I(a, 1), I(a, 2), I(a, 3)); }},
-    {"scissor", [](const Args& a) { glScissor(I(a, 0), I(a, 1), I(a, 2), I(a, 3)); }},
+    {"scissor", [](const Args& a) {
+        GLState* s = S(a);
+        s->scissor_box[0] = I(a, 0); s->scissor_box[1] = I(a, 1);
+        s->scissor_box[2] = I(a, 2); s->scissor_box[3] = I(a, 3);
+        glScissor(I(a, 0), I(a, 1), I(a, 2), I(a, 3));
+    }},
     {"clearColor", [](const Args& a) { glClearColor(F(a, 0), F(a, 1), F(a, 2), F(a, 3)); }},
     {"clearDepth", [](const Args& a) { glClearDepthf(F(a, 0)); }},
     {"clearStencil", [](const Args& a) { glClearStencil(I(a, 0)); }},
     {"clear", [](const Args& a) { glClear(U(a, 0)); Touch(S(a)); }},
-    {"colorMask", [](const Args& a) { glColorMask(B(a, 0), B(a, 1), B(a, 2), B(a, 3)); }},
-    {"depthMask", [](const Args& a) { glDepthMask(B(a, 0)); }},
+    {"colorMask", [](const Args& a) {
+        GLState* s = S(a);
+        for (int i = 0; i < 4; ++i) { s->color_mask[i] = B(a, i); }
+        glColorMask(B(a, 0), B(a, 1), B(a, 2), B(a, 3));
+    }},
+    {"depthMask", [](const Args& a) { S(a)->depth_mask = B(a, 0); glDepthMask(B(a, 0)); }},
     {"depthFunc", [](const Args& a) { glDepthFunc(U(a, 0)); }},
     {"depthRange", [](const Args& a) { glDepthRangef(F(a, 0), F(a, 1)); }},
     {"cullFace", [](const Args& a) { glCullFace(U(a, 0)); }},
@@ -1212,8 +1572,17 @@ const Method kMethods[] = {
     {"blendFuncSeparate", [](const Args& a) { glBlendFuncSeparate(U(a, 0), U(a, 1), U(a, 2), U(a, 3)); }},
     {"stencilFunc", [](const Args& a) { glStencilFunc(U(a, 0), I(a, 1), U(a, 2)); }},
     {"stencilFuncSeparate", [](const Args& a) { glStencilFuncSeparate(U(a, 0), U(a, 1), I(a, 2), U(a, 3)); }},
-    {"stencilMask", [](const Args& a) { glStencilMask(U(a, 0)); }},
-    {"stencilMaskSeparate", [](const Args& a) { glStencilMaskSeparate(U(a, 0), U(a, 1)); }},
+    {"stencilMask", [](const Args& a) {
+        S(a)->stencil_mask_front = U(a, 0);
+        S(a)->stencil_mask_back = U(a, 0);
+        glStencilMask(U(a, 0));
+    }},
+    {"stencilMaskSeparate", [](const Args& a) {
+        const GLenum face = U(a, 0);
+        if (face == GL_FRONT || face == GL_FRONT_AND_BACK) { S(a)->stencil_mask_front = U(a, 1); }
+        if (face == GL_BACK || face == GL_FRONT_AND_BACK) { S(a)->stencil_mask_back = U(a, 1); }
+        glStencilMaskSeparate(face, U(a, 1));
+    }},
     {"stencilOp", [](const Args& a) { glStencilOp(U(a, 0), U(a, 1), U(a, 2)); }},
     {"stencilOpSeparate", [](const Args& a) { glStencilOpSeparate(U(a, 0), U(a, 1), U(a, 2), U(a, 3)); }},
     {"flush", [](const Args&) { glFlush(); }},
@@ -1430,7 +1799,20 @@ const Method kMethods[] = {
         glFramebufferTextureLayer(U(a, 0), U(a, 1), Name(a, 2, kTexture), I(a, 3), I(a, 4));
     }},
     {"framebufferRenderbuffer", [](const Args& a) {
-        glFramebufferRenderbuffer(U(a, 0), U(a, 1), U(a, 2), Name(a, 3, kRenderbuffer));
+        GLState* s = S(a);
+        const GLenum target = U(a, 0);
+        const GLenum attachment = U(a, 1);
+        const GLuint handle = Name(a, 3, kRenderbuffer);
+        glFramebufferRenderbuffer(target, attachment, U(a, 2), ActualRenderbuffer(s, handle));
+
+        // まだ消していないバッファを描画先に取り付けたら、ここで消す
+        const auto pending = s->renderbuffer_pending_clear.find(handle);
+        if (pending != s->renderbuffer_pending_clear.end()
+            && (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER)
+            && attachment == AttachmentForStorage(pending->second.format)) {
+            ClearAttachedStorage(s, pending->second);
+            s->renderbuffer_pending_clear.erase(pending);
+        }
     }},
     {"blitFramebuffer", [](const Args& a) {
         glBlitFramebuffer(I(a, 0), I(a, 1), I(a, 2), I(a, 3), I(a, 4), I(a, 5), I(a, 6), I(a, 7),
@@ -1441,22 +1823,160 @@ const Method kMethods[] = {
         const std::vector<GLenum> list = EnumList(a, 1);
         glInvalidateFramebuffer(U(a, 0), static_cast<GLsizei>(list.size()), list.data());
     }},
-    {"createRenderbuffer", N2D_GEN(kRenderbuffer, glGenRenderbuffers)},
-    {"deleteRenderbuffer", N2D_DELETE(kRenderbuffer, glDeleteRenderbuffers)},
-    {"bindRenderbuffer", [](const Args& a) { glBindRenderbuffer(U(a, 0), Name(a, 1, kRenderbuffer)); }},
+    {"createRenderbuffer", [](const Args& a) {
+        GLState* s = S(a);
+        GLuint name = 0;
+        glGenRenderbuffers(1, &name);
+        const GLuint handle = ++s->next_renderbuffer_handle;
+        s->renderbuffer_alias[handle] = name;
+        ReturnName(a, kRenderbuffer, handle);
+    }},
+    {"deleteRenderbuffer", [](const Args& a) {
+        GLState* s = S(a);
+        const GLuint handle = Name(a, 0, kRenderbuffer);
+        if (handle) {
+            const GLuint actual = ActualRenderbuffer(s, handle);
+            GLState::RenderbufferStorage storage;
+            const auto stored = s->renderbuffer_storage.find(handle);
+            if (stored != s->renderbuffer_storage.end()) {
+                storage = stored->second;
+                s->renderbuffer_storage.erase(stored);
+            }
+            s->renderbuffer_alias.erase(handle);
+            s->renderbuffer_pending_clear.erase(handle);
+            if (s->bound_renderbuffer_handle == handle) {
+                // 束縛中のものを消すと、GL 上の束縛も外れる。置き場へ入れる場合も同じ状態にする
+                s->bound_renderbuffer_handle = 0;
+                s->bound_renderbuffer = 0;
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+            }
+            // 使い回しの対象 (大きさを記録しているもの) は、解放せず置き場へ入れる
+            PoolRenderbuffer(s, actual, storage);
+            Invalidate(a, 0);
+        }
+    }},
+    {"bindRenderbuffer", [](const Args& a) {
+        GLState* s = S(a);
+        s->bound_renderbuffer_handle = Name(a, 1, kRenderbuffer);
+        s->bound_renderbuffer = ActualRenderbuffer(s, s->bound_renderbuffer_handle);
+        glBindRenderbuffer(U(a, 0), s->bound_renderbuffer);
+    }},
     {"renderbufferStorage", [](const Args& a) {
         // WebGL1 由来の DEPTH_STENCIL は ES3 のサイズ付き形式へ読み替える。
         const GLenum format = U(a, 1);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
-        glRenderbufferStorage(U(a, 0), sized, I(a, 2), I(a, 3));
-        ZeroInitializeStorage(true, 0, sized);
+        const GLsizei width = I(a, 2);
+        const GLsizei height = I(a, 3);
+
+        // 領域の確保は環境によって重い (開発機で 1 回 25〜75 ms、画面の切り替えで 9 回続けて
+        // 230〜700 ms かかるのを確認)。アプリはレンダーバッファを使い回しながら、必要な大きさが
+        // 変わるたびに確保し直す。そこで、確保した領域は捨てずに置き場
+        // (GLState::renderbuffer_pool) に置き、同じ形式・同じ大きさの要求にはそれを渡す。
+        // 大きさは 2 のべき乗へ切り上げる。フレームバッファに付けるバッファ同士の大きさは
+        // 違っていてよく (OpenGL ES 3)、描画できる範囲は小さい方で決まるので、大きめの領域を
+        // 渡しても描画結果は変わらない。中身は、アプリが描画先に取り付けたときに消す。
+        // 対象はステンシル / デプスだけ (色のバッファは blit の範囲に大きさが関わるのでそのまま)。
+        const GLuint bound = S(a)->bound_renderbuffer_handle;
+        const StorageClass kind = ClassifyStorage(sized);
+        const bool reusable = bound != 0 && width > 0 && height > 0
+            && (kind == StorageClass::Stencil || kind == StorageClass::Depth
+                || kind == StorageClass::DepthStencil);
+        if (!reusable) {
+            if (bound != 0) {
+                const bool had_storage = S(a)->renderbuffer_storage.erase(bound) > 0;
+                ReplaceBoundRenderbuffer(S(a), U(a, 0), had_storage);
+                S(a)->renderbuffer_storage[bound].format = sized;   // 領域を持っている印
+            }
+            glRenderbufferStorage(U(a, 0), sized, width, height);
+            ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
+            return;
+        }
+
+        GLState* s = S(a);
+        GLState::RenderbufferStorage& have = s->renderbuffer_storage[bound];
+        // 大きさは 2 のべき乗へ切り上げる。同じ形式・同じ大きさの領域をすでに持っていれば何もしない
+        const GLsizei bucket_width = PoolBucket(width);
+        const GLsizei bucket_height = PoolBucket(height);
+        const bool fits = have.format == sized && have.width == bucket_width && have.height == bucket_height;
+        // 計測用 (環境変数 NEXT2D_HOST_PERF_SYNC): 確保と初期化のそれぞれにかかった時間を分けて出す。
+        // glFinish で実行を待つので、通常の計測 (NEXT2D_HOST_PERF) とは分けてある
+        // (待ちを入れると、溜まった GPU の処理の分だけ描画が止まる)。
+        const bool perf = PerfSyncEnabled();
+        if (perf) {
+            glFinish();   // ここまでに積まれた命令の分を、確保の時間に含めない
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        bool pooled = false;
+        if (!fits) {
+            // いま持っている GL のレンダーバッファは置き場へ (領域が無ければ解放)
+            const GLuint old = s->bound_renderbuffer;
+            const GLState::RenderbufferStorage old_storage = have;
+            // 置き場に同じ形式・同じ大きさのものがあれば、それを使う。無ければ新しく確保する
+            GLuint fresh = TakePooledRenderbuffer(s, sized, bucket_width, bucket_height);
+            pooled = fresh != 0;
+            if (!pooled) {
+                glGenRenderbuffers(1, &fresh);
+            }
+            glBindRenderbuffer(U(a, 0), fresh);
+            if (!pooled) {
+                glRenderbufferStorage(U(a, 0), sized, bucket_width, bucket_height);
+            }
+            s->renderbuffer_alias[bound] = fresh;
+            s->bound_renderbuffer = fresh;
+            PoolRenderbuffer(s, old, old_storage);
+            have.format = sized;
+            have.width = bucket_width;
+            have.height = bucket_height;
+        }
+        if (perf) {
+            glFinish();
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        // 消すのは、アプリが使う範囲 (要求された大きさ) だけ。その場では消さず、アプリが描画先に
+        // 取り付けたときに消す (GLState::renderbuffer_pending_clear)。
+        {
+            GLState::PendingClear& pending = S(a)->renderbuffer_pending_clear[bound];
+            pending.format = sized;
+            pending.width = width;
+            pending.height = height;
+        }
+        if (perf) {
+            glFinish();
+            const auto t2 = std::chrono::steady_clock::now();
+            const auto ms = [](auto from, auto to) {
+                return std::chrono::duration_cast<std::chrono::microseconds>(to - from).count() / 1000.0;
+            };
+            if (ms(t0, t2) >= 5.0) {
+                std::cerr << "[HostCore] renderbufferStorage: " << width << "x" << height
+                          << " format 0x" << std::hex << sized << std::dec
+                          << (fits ? " (kept " : pooled ? " (from pool " : " (allocated ") << have.width << "x" << have.height
+                          << "): storage " << ms(t0, t1) << " ms, zero-init " << ms(t1, t2) << " ms" << std::endl;
+            }
+        }
     }},
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
-        if (!PerfEnabled()) {
+        if (const GLuint handle = S(a)->bound_renderbuffer_handle) {
+            GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[handle];
+            ReplaceBoundRenderbuffer(S(a), U(a, 0), have.format != 0);
+            // 大きさは記録しない (使い回しの対象外)。領域を持っている印として形式だけ入れる
+            have.format = sized;
+            have.width = 0;
+            have.height = 0;
+        }
+        if (!PerfSyncEnabled()) {
             glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
-            ZeroInitializeStorage(true, 0, sized);
+            const GLuint bound_handle = S(a)->bound_renderbuffer_handle;
+            if (bound_handle != 0 && AttachmentForStorage(sized) != 0) {
+                // ステンシル / デプスは、描画先に取り付けたときに消す
+                GLState::PendingClear& pending = S(a)->renderbuffer_pending_clear[bound_handle];
+                pending.format = sized;
+                pending.width = 0;
+                pending.height = 0;
+            } else {
+                ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
+            }
             return;
         }
         // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
@@ -1464,7 +1984,7 @@ const Method kMethods[] = {
         glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
         glFinish();
         const auto t1 = std::chrono::steady_clock::now();
-        ZeroInitializeStorage(true, 0, sized);
+        ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
         glFinish();
         const auto t2 = std::chrono::steady_clock::now();
         const auto ms = [](auto from, auto to) {
@@ -1481,17 +2001,34 @@ const Method kMethods[] = {
     {"createShader", [](const Args& a) { ReturnName(a, kShader, glCreateShader(U(a, 0))); }},
     {"deleteShader", [](const Args& a) {
         const GLuint n = Name(a, 0, kShader);
-        if (n) { glDeleteShader(n); Invalidate(a, 0); }
+        if (n) { S(a)->shaders.erase(n); glDeleteShader(n); Invalidate(a, 0); }
     }},
     {"shaderSource", [](const Args& a) {
         const std::string source = a.Length() > 1 ? v8util::ToStdString(a.GetIsolate(), a[1]) : std::string();
         const char* text = source.c_str();
         const GLint length = static_cast<GLint>(source.size());
-        glShaderSource(Name(a, 0, kShader), 1, &text, &length);
+        const GLuint shader = Name(a, 0, kShader);
+        glShaderSource(shader, 1, &text, &length);
+        if (shader) {
+            GLState::ShaderInfo& info = S(a)->shaders[shader];
+            info.source = source;
+            info.compiled = false;
+        }
     }},
-    {"compileShader", [](const Args& a) { glCompileShader(Name(a, 0, kShader)); }},
+    {"compileShader", [](const Args& a) {
+        // その場ではコンパイルしない (LinkProgramWithCache の説明を参照)
+        const GLuint shader = Name(a, 0, kShader);
+        if (shader) {
+            GLState::ShaderInfo& info = S(a)->shaders[shader];
+            info.compile_requested = true;
+            info.compiled = false;
+        }
+    }},
     {"getShaderParameter", [](const Args& a) {
         const GLenum pname = U(a, 1);
+        if (pname == GL_COMPILE_STATUS) {
+            EnsureShaderCompiled(S(a), Name(a, 0, kShader));
+        }
         GLint v = 0;
         glGetShaderiv(Name(a, 0, kShader), pname, &v);
         if (pname == GL_COMPILE_STATUS || pname == GL_DELETE_STATUS) {
@@ -1501,20 +2038,41 @@ const Method kMethods[] = {
         }
     }},
     {"getShaderInfoLog", [](const Args& a) {
+        EnsureShaderCompiled(S(a), Name(a, 0, kShader));
         a.GetReturnValue().Set(Str(a.GetIsolate(), InfoLog(Name(a, 0, kShader), false)));
     }},
     {"createProgram", [](const Args& a) { ReturnName(a, kProgram, glCreateProgram()); }},
     {"deleteProgram", [](const Args& a) {
         const GLuint n = Name(a, 0, kProgram);
-        if (n) { glDeleteProgram(n); Invalidate(a, 0); }
+        if (n) { S(a)->programs.erase(n); glDeleteProgram(n); Invalidate(a, 0); }
     }},
-    {"attachShader", [](const Args& a) { glAttachShader(Name(a, 0, kProgram), Name(a, 1, kShader)); }},
-    {"detachShader", [](const Args& a) { glDetachShader(Name(a, 0, kProgram), Name(a, 1, kShader)); }},
+    {"attachShader", [](const Args& a) {
+        const GLuint program = Name(a, 0, kProgram);
+        const GLuint shader = Name(a, 1, kShader);
+        glAttachShader(program, shader);
+        if (program && shader) {
+            S(a)->programs[program].shaders.push_back(shader);
+        }
+    }},
+    {"detachShader", [](const Args& a) {
+        const GLuint program = Name(a, 0, kProgram);
+        const GLuint shader = Name(a, 1, kShader);
+        glDetachShader(program, shader);
+        auto it = S(a)->programs.find(program);
+        if (it != S(a)->programs.end()) {
+            auto& list = it->second.shaders;
+            list.erase(std::remove(list.begin(), list.end(), shader), list.end());
+        }
+    }},
     {"bindAttribLocation", [](const Args& a) {
         const std::string name = a.Length() > 2 ? v8util::ToStdString(a.GetIsolate(), a[2]) : std::string();
-        glBindAttribLocation(Name(a, 0, kProgram), U(a, 1), name.c_str());
+        const GLuint program = Name(a, 0, kProgram);
+        glBindAttribLocation(program, U(a, 1), name.c_str());
+        if (program) {
+            S(a)->programs[program].attributes += std::to_string(U(a, 1)) + "=" + name + ";";
+        }
     }},
-    {"linkProgram", [](const Args& a) { glLinkProgram(Name(a, 0, kProgram)); }},
+    {"linkProgram", [](const Args& a) { LinkProgramWithCache(S(a), Name(a, 0, kProgram)); }},
     {"validateProgram", [](const Args& a) { glValidateProgram(Name(a, 0, kProgram)); }},
     {"useProgram", [](const Args& a) { glUseProgram(Name(a, 0, kProgram)); }},
     {"getProgramParameter", [](const Args& a) {
@@ -1721,6 +2279,100 @@ bool WebGL2CurrentOnThisThread()
     return t_gl_current;
 }
 
+// 開発用: 環境変数 NEXT2D_HOST_CAPTURE_DIR を設定すると、提示する直前のデフォルトフレームバッファを
+// そのディレクトリへ BMP で書き出す (既定は 1 秒に 1 枚まで。NEXT2D_HOST_CAPTURE_MS で間隔を変えられる)。
+// ファイル名は cap-<起動からのミリ秒>.bmp。画面を直接見られない環境で、描画結果と操作の自動再生の
+// 当たり具合を確かめるためのもの。
+void CaptureWebGL2Frame(GlesContext* gles)
+{
+    static const char* dir = std::getenv("NEXT2D_HOST_CAPTURE_DIR");
+    if (!dir || !*dir || !gles) {
+        return;
+    }
+    static const double interval_ms = [] {
+        const char* value = std::getenv("NEXT2D_HOST_CAPTURE_MS");
+        const double ms = value ? std::atof(value) : 0.0;
+        return ms > 0.0 ? ms : 1000.0;
+    }();
+    static const auto started = std::chrono::steady_clock::now();
+    static double last_ms = -1e9;
+    const double now_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (now_ms - last_ms < interval_ms) {
+        return;
+    }
+    last_ms = now_ms;
+
+    const int w = gles->width();
+    const int h = gles->height();
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+    GLint previous = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gles->default_framebuffer());
+    // アプリが設定した読み出しの状態 (読み出し先のバッファ、行の詰め方) を外してから読み、元に戻す。
+    // 読み出し先のバッファが束縛されたままだと、glReadPixels はメモリではなくそのバッファへ書く。
+    GLint pack_buffer = 0;
+    GLint pack_alignment = 4;
+    GLint pack_row_length = 0;
+    GLint pack_skip_rows = 0;
+    GLint pack_skip_pixels = 0;
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &pack_row_length);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &pack_skip_rows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &pack_skip_pixels);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
+    glPixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous));
+
+    // 24 bit の BMP (下の行から並ぶので、GL の原点 (左下) のまま書ける)
+    const uint32_t row = (static_cast<uint32_t>(w) * 3 + 3) & ~3u;
+    const uint32_t image_size = row * static_cast<uint32_t>(h);
+    uint8_t header[54] = {};
+    const auto put32 = [&header](int at, uint32_t v) {
+        header[at] = v & 0xFF; header[at + 1] = (v >> 8) & 0xFF;
+        header[at + 2] = (v >> 16) & 0xFF; header[at + 3] = (v >> 24) & 0xFF;
+    };
+    header[0] = 'B'; header[1] = 'M';
+    put32(2, 54 + image_size);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, static_cast<uint32_t>(w));
+    put32(22, static_cast<uint32_t>(h));
+    header[26] = 1;
+    header[28] = 24;
+    put32(34, image_size);
+
+    std::vector<uint8_t> out(image_size);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* src = rgba.data() + static_cast<size_t>(y) * w * 4;
+        uint8_t* dst = out.data() + static_cast<size_t>(y) * row;
+        for (int x = 0; x < w; ++x) {
+            dst[x * 3 + 0] = src[x * 4 + 2];
+            dst[x * 3 + 1] = src[x * 4 + 1];
+            dst[x * 3 + 2] = src[x * 4 + 0];
+        }
+    }
+    const std::string file = std::string(dir) + "/cap-" + std::to_string(static_cast<long long>(now_ms)) + ".bmp";
+    std::ofstream ofs(file, std::ios::binary);
+    if (ofs) {
+        ofs.write(reinterpret_cast<const char*>(header), sizeof(header));
+        ofs.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    }
+}
+
 void ReleaseWebGL2Thread(HostContext* host)
 {
     if (t_gl_current && host && host->gles) {
@@ -1739,6 +2391,16 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
     auto* state = new GLState();
     state->host = host;
     state->gles = host->gles;
+    // 状態の控えの初期値 (ここで 1 度だけ GL から読む)
+    state->scissor_enabled = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+    glGetIntegerv(GL_SCISSOR_BOX, state->scissor_box);
+    glGetBooleanv(GL_COLOR_WRITEMASK, state->color_mask);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &state->depth_mask);
+    GLint mask = 0;
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &mask);
+    state->stencil_mask_front = static_cast<GLuint>(mask);
+    glGetIntegerv(GL_STENCIL_BACK_WRITEMASK, &mask);
+    state->stencil_mask_back = static_cast<GLuint>(mask);
 
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> gl = v8::Object::New(isolate);

@@ -20,6 +20,7 @@
 #include "../../HostContext.h"
 #include "../ImageSource.h"
 #include "../../gpu/GlesContext.h"
+#include "../../platform/HostCache.h"
 #include "../../v8/V8Util.h"
 
 #include "GlApi.h"   // GLES3/gl3.h + (任意) 関数テーブル経由の呼び出し
@@ -27,11 +28,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -74,6 +77,28 @@ struct GLState {
     std::vector<uint8_t> scratch;
     std::vector<GLfloat> fscratch;
     std::vector<GLint>   iscratch;
+
+    // レンダーバッファが実際に持っている領域 (renderbufferStorage の使い回し用)
+    struct RenderbufferStorage {
+        GLenum format = 0;
+        GLsizei width = 0;
+        GLsizei height = 0;
+    };
+    std::unordered_map<GLuint, RenderbufferStorage> renderbuffer_storage;
+
+    // シェーダのリンク結果の保存と再利用 (linkProgram を参照)
+    struct ShaderInfo {
+        std::string source;
+        bool compile_requested = false;   // compileShader が呼ばれた
+        bool compiled = false;            // 実際にコンパイルした
+    };
+    struct ProgramInfo {
+        std::vector<GLuint> shaders;      // attachShader された順
+        std::string attributes;           // bindAttribLocation の内容
+        bool cacheable = true;
+    };
+    std::unordered_map<GLuint, ShaderInfo> shaders;
+    std::unordered_map<GLuint, ProgramInfo> programs;
 };
 
 inline GLState* S(const Args& a)
@@ -554,6 +579,107 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // ゼロで初期化する。描画に使えない形式 (フレームバッファが不完全になる) は何もしない。
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
 bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
+
+// ---- シェーダのリンク結果の保存と再利用 -------------------------------------
+// シェーダのコンパイルとリンクは環境によって重い (開発機で 1 つ 30〜190 ms)。アプリは新しい
+// 表現を初めて描くときにプログラムを作るので、その瞬間に画面が止まる。
+// リンクした結果 (プログラムバイナリ) を保存先 (platform/HostCache.h) へ書いておき、次に同じ
+// ソースのプログラムを作るときは、コンパイルもリンクもせずにそれを読み込む。
+//   - compileShader は、その場ではコンパイルしない (保存した結果が使えれば不要になるため)。
+//     リンクで保存が使えなかったとき、またはコンパイル結果を問い合わせられたときに行う。
+//   - 鍵は、GL の実装を表す文字列 (ドライバが変わればバイナリの互換性は無い) と、
+//     各シェーダのソース、属性の割り当て。
+//   - 保存した結果の読み込みに失敗したら (ドライバの更新など)、通常どおりコンパイルして
+//     リンクし、保存し直す。
+// 保存先が無い環境では、遅らせたコンパイルをリンクのときに行うだけで、動作は変わらない。
+
+uint64_t HashBytes(const void* data, size_t size, uint64_t hash)
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= p[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t HashString(const std::string& text, uint64_t hash)
+{
+    hash = HashBytes(text.data(), text.size(), hash);
+    const unsigned char separator = 0xFF;
+    return HashBytes(&separator, 1, hash);
+}
+
+void EnsureShaderCompiled(GLState* s, GLuint shader)
+{
+    auto it = s->shaders.find(shader);
+    if (it == s->shaders.end() || !it->second.compile_requested || it->second.compiled) {
+        return;
+    }
+    glCompileShader(shader);
+    it->second.compiled = true;
+}
+
+void LinkProgramWithCache(GLState* s, GLuint program)
+{
+    auto found = s->programs.find(program);
+    const bool tracked = found != s->programs.end() && found->second.cacheable
+        && !found->second.shaders.empty();
+    std::string file;
+    if (tracked && !hostcache::Directory().empty()) {
+        uint64_t hash = 1469598103934665603ull;
+        for (const GLenum name : { GL_VENDOR, GL_RENDERER, GL_VERSION }) {
+            const GLubyte* text = glGetString(name);
+            hash = HashString(text ? reinterpret_cast<const char*>(text) : "", hash);
+        }
+        for (const GLuint shader : found->second.shaders) {
+            const auto info = s->shaders.find(shader);
+            hash = HashString(info != s->shaders.end() ? info->second.source : std::string(), hash);
+        }
+        hash = HashString(found->second.attributes, hash);
+        char name[40];
+        std::snprintf(name, sizeof(name), "program-%016llx.bin", static_cast<unsigned long long>(hash));
+        file = name;
+
+        // 保存した結果: 先頭 4 バイトがバイナリの形式、残りが本体
+        std::vector<uint8_t> bytes;
+        if (hostcache::Read(file, &bytes) && bytes.size() > 4) {
+            GLenum format = 0;
+            std::memcpy(&format, bytes.data(), 4);
+            glProgramBinary(program, format, bytes.data() + 4, static_cast<GLsizei>(bytes.size() - 4));
+            GLint linked = 0;
+            glGetProgramiv(program, GL_LINK_STATUS, &linked);
+            if (linked) {
+                return;
+            }
+            for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}   // 読み込みの失敗はここで捨てる
+        }
+    }
+
+    if (found != s->programs.end()) {
+        for (const GLuint shader : found->second.shaders) {
+            EnsureShaderCompiled(s, shader);
+        }
+    }
+    glLinkProgram(program);
+
+    if (!file.empty()) {
+        GLint linked = 0;
+        GLint length = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+        if (linked && length > 0) {
+            std::vector<uint8_t> bytes(static_cast<size_t>(length) + 4);
+            GLenum format = 0;
+            GLsizei written = 0;
+            glGetProgramBinary(program, length, &written, &format, bytes.data() + 4);
+            if (written > 0 && glGetError() == GL_NO_ERROR) {
+                std::memcpy(bytes.data(), &format, 4);
+                hostcache::Write(file, bytes.data(), static_cast<size_t>(written) + 4);
+            }
+        }
+    }
+}
 
 void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat)
 {
@@ -1443,14 +1569,86 @@ const Method kMethods[] = {
         glInvalidateFramebuffer(U(a, 0), static_cast<GLsizei>(list.size()), list.data());
     }},
     {"createRenderbuffer", N2D_GEN(kRenderbuffer, glGenRenderbuffers)},
-    {"deleteRenderbuffer", N2D_DELETE(kRenderbuffer, glDeleteRenderbuffers)},
+    {"deleteRenderbuffer", [](const Args& a) {
+        GLuint n = Name(a, 0, kRenderbuffer);
+        if (n) {
+            S(a)->renderbuffer_storage.erase(n);
+            glDeleteRenderbuffers(1, &n);
+            Invalidate(a, 0);
+        }
+    }},
     {"bindRenderbuffer", [](const Args& a) { glBindRenderbuffer(U(a, 0), Name(a, 1, kRenderbuffer)); }},
     {"renderbufferStorage", [](const Args& a) {
         // WebGL1 由来の DEPTH_STENCIL は ES3 のサイズ付き形式へ読み替える。
         const GLenum format = U(a, 1);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
-        glRenderbufferStorage(U(a, 0), sized, I(a, 2), I(a, 3));
+        const GLsizei width = I(a, 2);
+        const GLsizei height = I(a, 3);
+
+        // 領域の確保は環境によって重い (開発機で 1 回 20〜70 ms、画面の切り替えで 9 回続けて
+        // 650 ms かかるのを確認)。アプリはレンダーバッファを使い回しながら、必要な大きさが変わる
+        // たびに確保し直す。そこで、
+        //   - 確保するときは 256 の倍数へ切り上げる
+        //   - すでに同じ形式で十分な大きさの領域を持っていれば、確保し直さず中身を消すだけにする
+        // フレームバッファに付けるバッファ同士の大きさは違っていてよく (OpenGL ES 3)、描画できる
+        // 範囲は小さい方で決まるので、大きめの領域を持っていても描画結果は変わらない。
+        // 対象はステンシル / デプスだけ (色のバッファは blit の範囲に大きさが関わるのでそのまま)。
+        GLint bound = 0;
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &bound);
+        const StorageClass kind = ClassifyStorage(sized);
+        const bool reusable = bound != 0 && width > 0 && height > 0
+            && (kind == StorageClass::Stencil || kind == StorageClass::Depth
+                || kind == StorageClass::DepthStencil);
+        if (!reusable) {
+            if (bound != 0) {
+                S(a)->renderbuffer_storage.erase(static_cast<GLuint>(bound));
+            }
+            glRenderbufferStorage(U(a, 0), sized, width, height);
+            ZeroInitializeStorage(true, 0, sized);
+            return;
+        }
+
+        GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[static_cast<GLuint>(bound)];
+        // 持っている領域が要求の 4 倍を超えるほど大きいときは、使い回さず作り直す (メモリの無駄を抑える)
+        const bool fits = have.format == sized && have.width >= width && have.height >= height
+            && static_cast<int64_t>(have.width) * have.height <= static_cast<int64_t>(width) * height * 4 + 65536;
+        if (fits) {
+            ZeroInitializeStorage(true, 0, sized);
+            return;
+        }
+        // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
+        const bool perf = PerfEnabled();
+        if (perf) {
+            glFinish();   // ここまでに積まれた命令の分を、確保の時間に含めない
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        {
+            const auto round_up = [](GLsizei v) { return (v + 255) & ~255; };
+            const GLsizei w = round_up(width);
+            const GLsizei h = round_up(height);
+            glRenderbufferStorage(U(a, 0), sized, w, h);
+            have.format = sized;
+            have.width = w;
+            have.height = h;
+        }
+        if (perf) {
+            glFinish();
+        }
+        const auto t1 = std::chrono::steady_clock::now();
         ZeroInitializeStorage(true, 0, sized);
+        if (perf) {
+            glFinish();
+            const auto t2 = std::chrono::steady_clock::now();
+            const auto ms = [](auto from, auto to) {
+                return std::chrono::duration_cast<std::chrono::microseconds>(to - from).count() / 1000.0;
+            };
+            if (ms(t0, t2) >= 5.0) {
+                std::cerr << "[HostCore] renderbufferStorage: " << width << "x" << height
+                          << " format 0x" << std::hex << sized << std::dec
+                          << " (allocated " << have.width << "x" << have.height
+                          << "): storage " << ms(t0, t1) << " ms, zero-init " << ms(t1, t2) << " ms" << std::endl;
+            }
+        }
     }},
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
@@ -1482,17 +1680,34 @@ const Method kMethods[] = {
     {"createShader", [](const Args& a) { ReturnName(a, kShader, glCreateShader(U(a, 0))); }},
     {"deleteShader", [](const Args& a) {
         const GLuint n = Name(a, 0, kShader);
-        if (n) { glDeleteShader(n); Invalidate(a, 0); }
+        if (n) { S(a)->shaders.erase(n); glDeleteShader(n); Invalidate(a, 0); }
     }},
     {"shaderSource", [](const Args& a) {
         const std::string source = a.Length() > 1 ? v8util::ToStdString(a.GetIsolate(), a[1]) : std::string();
         const char* text = source.c_str();
         const GLint length = static_cast<GLint>(source.size());
-        glShaderSource(Name(a, 0, kShader), 1, &text, &length);
+        const GLuint shader = Name(a, 0, kShader);
+        glShaderSource(shader, 1, &text, &length);
+        if (shader) {
+            GLState::ShaderInfo& info = S(a)->shaders[shader];
+            info.source = source;
+            info.compiled = false;
+        }
     }},
-    {"compileShader", [](const Args& a) { glCompileShader(Name(a, 0, kShader)); }},
+    {"compileShader", [](const Args& a) {
+        // その場ではコンパイルしない (LinkProgramWithCache の説明を参照)
+        const GLuint shader = Name(a, 0, kShader);
+        if (shader) {
+            GLState::ShaderInfo& info = S(a)->shaders[shader];
+            info.compile_requested = true;
+            info.compiled = false;
+        }
+    }},
     {"getShaderParameter", [](const Args& a) {
         const GLenum pname = U(a, 1);
+        if (pname == GL_COMPILE_STATUS) {
+            EnsureShaderCompiled(S(a), Name(a, 0, kShader));
+        }
         GLint v = 0;
         glGetShaderiv(Name(a, 0, kShader), pname, &v);
         if (pname == GL_COMPILE_STATUS || pname == GL_DELETE_STATUS) {
@@ -1502,20 +1717,41 @@ const Method kMethods[] = {
         }
     }},
     {"getShaderInfoLog", [](const Args& a) {
+        EnsureShaderCompiled(S(a), Name(a, 0, kShader));
         a.GetReturnValue().Set(Str(a.GetIsolate(), InfoLog(Name(a, 0, kShader), false)));
     }},
     {"createProgram", [](const Args& a) { ReturnName(a, kProgram, glCreateProgram()); }},
     {"deleteProgram", [](const Args& a) {
         const GLuint n = Name(a, 0, kProgram);
-        if (n) { glDeleteProgram(n); Invalidate(a, 0); }
+        if (n) { S(a)->programs.erase(n); glDeleteProgram(n); Invalidate(a, 0); }
     }},
-    {"attachShader", [](const Args& a) { glAttachShader(Name(a, 0, kProgram), Name(a, 1, kShader)); }},
-    {"detachShader", [](const Args& a) { glDetachShader(Name(a, 0, kProgram), Name(a, 1, kShader)); }},
+    {"attachShader", [](const Args& a) {
+        const GLuint program = Name(a, 0, kProgram);
+        const GLuint shader = Name(a, 1, kShader);
+        glAttachShader(program, shader);
+        if (program && shader) {
+            S(a)->programs[program].shaders.push_back(shader);
+        }
+    }},
+    {"detachShader", [](const Args& a) {
+        const GLuint program = Name(a, 0, kProgram);
+        const GLuint shader = Name(a, 1, kShader);
+        glDetachShader(program, shader);
+        auto it = S(a)->programs.find(program);
+        if (it != S(a)->programs.end()) {
+            auto& list = it->second.shaders;
+            list.erase(std::remove(list.begin(), list.end(), shader), list.end());
+        }
+    }},
     {"bindAttribLocation", [](const Args& a) {
         const std::string name = a.Length() > 2 ? v8util::ToStdString(a.GetIsolate(), a[2]) : std::string();
-        glBindAttribLocation(Name(a, 0, kProgram), U(a, 1), name.c_str());
+        const GLuint program = Name(a, 0, kProgram);
+        glBindAttribLocation(program, U(a, 1), name.c_str());
+        if (program) {
+            S(a)->programs[program].attributes += std::to_string(U(a, 1)) + "=" + name + ";";
+        }
     }},
-    {"linkProgram", [](const Args& a) { glLinkProgram(Name(a, 0, kProgram)); }},
+    {"linkProgram", [](const Args& a) { LinkProgramWithCache(S(a), Name(a, 0, kProgram)); }},
     {"validateProgram", [](const Args& a) { glValidateProgram(Name(a, 0, kProgram)); }},
     {"useProgram", [](const Args& a) { glUseProgram(Name(a, 0, kProgram)); }},
     {"getProgramParameter", [](const Args& a) {

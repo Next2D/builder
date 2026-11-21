@@ -11,6 +11,7 @@
 #include "../EventLoop.h"
 #include "../gpu/GlesContext.h"
 #include "../platform/DecodeQueue.h"
+#include "../platform/HostCache.h"
 #include "../platform/GamepadManager.h"
 #include "../platform/AudioEngine.h"
 #include "../platform/StbTextRasterizer.h"
@@ -493,6 +494,12 @@ int32_t next2d_host_frame(Next2DHost* h)
         v8::Local<v8::Context> ctx = runtime.context();
         v8::Context::Scope context_scope(ctx);
 
+        // 作り直せるデータ (シェーダのリンク結果など) を保存先へ書いたら、埋め込み側へ知らせる
+        // (書いた内容を確定する操作が必要な保存先のため)。名前は "cache"。
+        if (hostcache::TakeWritten() && h->host.storage_saved) {
+            h->host.storage_saved("cache", h->host.storage_saved_user);
+        }
+
         h->gamepad->Poll(now);
         PumpAudioEvents(runtime.isolate());
         decodequeue::Pump();
@@ -785,6 +792,11 @@ void next2d_host_set_render_thread(int32_t (*make_current)(void* user),
     g_render_make_current = make_current;
     g_render_release_current = release_current;
     g_render_user = user;
+}
+
+void next2d_host_set_cache_dir(const char* directory)
+{
+    hostcache::SetDirectory(directory ? directory : "");
 }
 
 void next2d_host_destroy(Next2DHost* h)

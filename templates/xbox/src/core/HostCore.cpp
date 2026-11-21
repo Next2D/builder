@@ -148,7 +148,7 @@ constexpr int kQuietFramesToSettle = 20;
 // self 時間上位を標準エラー出力へ出す。jitless でも動く。画面遷移の引っかかりの原因調査用。
 constexpr unsigned kProfileIntervalUs = 500;
 
-void CollectProfileNode(const v8::CpuProfileNode* node, std::map<std::string, unsigned>& self_hits)
+std::string ProfileNodeKey(const v8::CpuProfileNode* node)
 {
     const char* name = node->GetFunctionNameStr();
     const char* script = node->GetScriptResourceNameStr();
@@ -167,43 +167,70 @@ void CollectProfileNode(const v8::CpuProfileNode* node, std::map<std::string, un
         key += " (" + s + ":" + std::to_string(node->GetLineNumber())
              + ":" + std::to_string(node->GetColumnNumber()) + ")";
     }
-    self_hits[key] += node->GetHitCount();
-    for (int i = 0; i < node->GetChildrenCount(); ++i) {
-        CollectProfileNode(node->GetChild(i), self_hits);
+    return key;
+}
+
+void PrintProfileTop(const char* title, const std::map<std::string, unsigned>& hits, unsigned total, int limit)
+{
+    std::vector<std::pair<std::string, unsigned>> sorted(hits.begin(), hits.end());
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& l, const auto& r) { return l.second > r.second; });
+    std::cerr << "[cpuprofile]  " << title << ":" << std::endl;
+    int rank = 0;
+    for (const auto& [key, count] : sorted) {
+        if (count == 0 || ++rank > limit) {
+            break;
+        }
+        char line[512];
+        std::snprintf(line, sizeof(line), "  %5.1f%%  %7.1fms  %s",
+            total ? 100.0 * count / total : 0.0,
+            count * (kProfileIntervalUs / 1000.0), key.c_str());
+        std::cerr << line << std::endl;
     }
 }
 
-void DumpAndRestartProfile(v8::CpuProfiler* profiler, v8::Isolate* isolate, const char* reason)
+// 直近 window_ms の間に採ったサンプルだけを集計して出す (時間のかかったフレームの中身だけを見るため)。
+//   self      … その関数自身で使った時間
+//   inclusive … その関数と、そこから呼ばれた関数で使った時間 (どの処理の配下が重いかを見る)
+void DumpAndRestartProfile(v8::CpuProfiler* profiler, v8::Isolate* isolate, const char* reason,
+                           double window_ms)
 {
     v8::HandleScope hs(isolate);
     v8::CpuProfile* profile = profiler->StopProfiling(
         v8::String::NewFromUtf8Literal(isolate, "next2d"));
     if (profile) {
+        const int64_t from = profile->GetEndTime() - static_cast<int64_t>(window_ms * 1000.0);
         std::map<std::string, unsigned> self_hits;
-        CollectProfileNode(profile->GetTopDownRoot(), self_hits);
+        std::map<std::string, unsigned> inclusive_hits;
         unsigned total = 0;
-        for (const auto& [key, hits] : self_hits) {
-            total += hits;
-        }
-        std::vector<std::pair<std::string, unsigned>> sorted(self_hits.begin(), self_hits.end());
-        std::sort(sorted.begin(), sorted.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
-        std::cerr << "[cpuprofile] " << reason << ": " << total << " samples (interval "
-                  << kProfileIntervalUs << "us), top self-time:" << std::endl;
-        int rank = 0;
-        for (const auto& [key, hits] : sorted) {
-            if (hits == 0 || ++rank > 30) {
-                break;
+        std::vector<std::string> seen;
+        for (int i = 0; i < profile->GetSamplesCount(); ++i) {
+            if (profile->GetSampleTimestamp(i) < from) {
+                continue;
             }
-            char line[512];
-            std::snprintf(line, sizeof(line), "  %5.1f%%  %7.1fms  %s",
-                total ? 100.0 * hits / total : 0.0,
-                hits * (kProfileIntervalUs / 1000.0), key.c_str());
-            std::cerr << line << std::endl;
+            const v8::CpuProfileNode* node = profile->GetSample(i);
+            if (!node) {
+                continue;
+            }
+            ++total;
+            ++self_hits[ProfileNodeKey(node)];
+            // 再帰で同じ関数が何度も積まれていても、1 サンプルにつき 1 回だけ数える
+            seen.clear();
+            for (const v8::CpuProfileNode* n = node; n; n = n->GetParent()) {
+                std::string key = ProfileNodeKey(n);
+                if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
+                    ++inclusive_hits[key];
+                    seen.push_back(std::move(key));
+                }
+            }
         }
+        std::cerr << "[cpuprofile] " << reason << ": " << total << " samples in the last "
+                  << static_cast<int>(window_ms) << " ms (interval " << kProfileIntervalUs << "us)" << std::endl;
+        PrintProfileTop("self", self_hits, total, 25);
+        PrintProfileTop("inclusive", inclusive_hits, total, 45);
         profile->Delete();
     }
-    profiler->StartProfiling(v8::String::NewFromUtf8Literal(isolate, "next2d"));
+    profiler->StartProfiling(v8::String::NewFromUtf8Literal(isolate, "next2d"), true);
 }
 
 } // namespace
@@ -427,7 +454,7 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
         h->cpu_profiler = v8::CpuProfiler::New(h->runtime->isolate());
         h->cpu_profiler->SetSamplingInterval(kProfileIntervalUs);
         h->cpu_profiler->StartProfiling(
-            v8::String::NewFromUtf8Literal(h->runtime->isolate(), "next2d"));
+            v8::String::NewFromUtf8Literal(h->runtime->isolate(), "next2d"), true);
         std::cerr << "[cpuprofile] profiling started" << std::endl;
     }
 
@@ -506,7 +533,7 @@ int32_t next2d_host_frame(Next2DHost* h)
             char reason[96];
             std::snprintf(reason, sizeof(reason), "spike (tasks %.0f ms, js %.0f ms, worker %.0f ms)",
                           t_tasks - now, t_js - t_tasks, t_worker - t_js);
-            DumpAndRestartProfile(h->cpu_profiler, runtime.isolate(), reason);
+            DumpAndRestartProfile(h->cpu_profiler, runtime.isolate(), reason, t_worker - now + 1.0);
         }
 
         // 環境変数 NEXT2D_HOST_PERF を設定すると、時間のかかったフレームの内訳を出す

@@ -681,7 +681,10 @@ void LinkProgramWithCache(GLState* s, GLuint program)
     }
 }
 
-void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat)
+// region_width / region_height が正のときは、左下からその大きさの範囲だけを消す
+// (領域を大きめに持っているレンダーバッファで、使う範囲だけを消すため)。
+void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat,
+                           GLsizei region_width = 0, GLsizei region_height = 0)
 {
     GLint name = 0;
     glGetIntegerv(renderbuffer ? GL_RENDERBUFFER_BINDING : GL_TEXTURE_BINDING_2D, &name);
@@ -692,6 +695,8 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
     GLint saved_fbo = 0;
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_fbo);
     const GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    GLint saved_scissor_box[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_SCISSOR_BOX, saved_scissor_box);
     GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
     glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
     GLboolean saved_depth_mask = GL_TRUE;
@@ -718,7 +723,12 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
     }
 
     if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-        glDisable(GL_SCISSOR_TEST);
+        if (region_width > 0 && region_height > 0) {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(0, 0, region_width, region_height);
+        } else {
+            glDisable(GL_SCISSOR_TEST);
+        }
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glDepthMask(GL_TRUE);
         glStencilMaskSeparate(GL_FRONT, 0xFFFFFFFFu);
@@ -739,7 +749,10 @@ void ZeroInitializeStorage(bool renderbuffer, GLint level, GLenum internalformat
 
         if (saved_scissor) {
             glEnable(GL_SCISSOR_TEST);
+        } else {
+            glDisable(GL_SCISSOR_TEST);
         }
+        glScissor(saved_scissor_box[0], saved_scissor_box[1], saved_scissor_box[2], saved_scissor_box[3]);
         glColorMask(saved_color_mask[0], saved_color_mask[1], saved_color_mask[2], saved_color_mask[3]);
         glDepthMask(saved_depth_mask);
         glStencilMaskSeparate(GL_FRONT, static_cast<GLuint>(saved_stencil_front));
@@ -1612,17 +1625,13 @@ const Method kMethods[] = {
         // 持っている領域が要求の 4 倍を超えるほど大きいときは、使い回さず作り直す (メモリの無駄を抑える)
         const bool fits = have.format == sized && have.width >= width && have.height >= height
             && static_cast<int64_t>(have.width) * have.height <= static_cast<int64_t>(width) * height * 4 + 65536;
-        if (fits) {
-            ZeroInitializeStorage(true, 0, sized);
-            return;
-        }
         // 計測時: 確保と初期化のそれぞれにかかった時間を分けて出す (glFinish で実行を待つ)
         const bool perf = PerfEnabled();
         if (perf) {
             glFinish();   // ここまでに積まれた命令の分を、確保の時間に含めない
         }
         const auto t0 = std::chrono::steady_clock::now();
-        {
+        if (!fits) {
             const auto round_up = [](GLsizei v) { return (v + 255) & ~255; };
             const GLsizei w = round_up(width);
             const GLsizei h = round_up(height);
@@ -1635,7 +1644,8 @@ const Method kMethods[] = {
             glFinish();
         }
         const auto t1 = std::chrono::steady_clock::now();
-        ZeroInitializeStorage(true, 0, sized);
+        // 消すのは、アプリが使う範囲 (要求された大きさ) だけ
+        ZeroInitializeStorage(true, 0, sized, width, height);
         if (perf) {
             glFinish();
             const auto t2 = std::chrono::steady_clock::now();
@@ -1645,7 +1655,7 @@ const Method kMethods[] = {
             if (ms(t0, t2) >= 5.0) {
                 std::cerr << "[HostCore] renderbufferStorage: " << width << "x" << height
                           << " format 0x" << std::hex << sized << std::dec
-                          << " (allocated " << have.width << "x" << have.height
+                          << (fits ? " (reused " : " (allocated ") << have.width << "x" << have.height
                           << "): storage " << ms(t0, t1) << " ms, zero-init " << ms(t1, t2) << " ms" << std::endl;
             }
         }

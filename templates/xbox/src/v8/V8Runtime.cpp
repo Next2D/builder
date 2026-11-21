@@ -7,6 +7,7 @@
 #include "EmbeddedAssets.h"
 #include "bindings/Bindings.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -61,6 +62,15 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     // すべて無視される。--wasm-jitless は最後に渡す。
     v8::V8::SetFlagsFromString("--jitless");
     v8::V8::SetFlagsFromString("--no-flush-bytecode");
+    // 開発用: 環境変数 NEXT2D_V8_FLAGS で追加のフラグを渡せる (空白区切り。調整の効果を測るため)。
+    // --jitless より後に渡すので、JIT を有効にするフラグを書いても実行可能メモリが要る環境では動かない。
+    if (const char* extra = std::getenv("NEXT2D_V8_FLAGS")) {
+        std::istringstream flags(extra);
+        std::string flag;
+        while (flags >> flag) {
+            v8::V8::SetFlagsFromString(flag.c_str());
+        }
+    }
     v8::V8::SetFlagsFromString("--wasm-jitless");
 
     v8::V8::InitializeICUDefaultLocation(exec_path);

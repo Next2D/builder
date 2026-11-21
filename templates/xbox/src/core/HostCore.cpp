@@ -120,6 +120,11 @@ void RegisterFontsFrom(const fs::path& dir)
 
 bool g_process_initialized = false;
 
+// 負荷の判定 (next2d_host_set_load_callback): 1 フレームの処理がこの時間を超えたら「重い」とし、
+// 重くないフレームがこの回数続いたら「落ち着いた」とする。
+constexpr double kHeavyFrameMs = 40.0;
+constexpr int kQuietFramesToSettle = 20;
+
 // ---- CPU プロファイル (環境変数 NEXT2D_HOST_PROFILE) ------------------------
 // V8 の sampling CPU プロファイラで、メインの JS が長くかかったフレームを含む区間の
 // self 時間上位を標準エラー出力へ出す。jitless でも動く。画面遷移の引っかかりの原因調査用。
@@ -196,6 +201,12 @@ struct Next2DHost {
     std::unique_ptr<WorkerRuntime> workers;
     v8::CpuProfiler* cpu_profiler = nullptr;   // NEXT2D_HOST_PROFILE 指定時のみ
     bool running = true;
+
+    // 負荷の状態 (next2d_host_set_load_callback)。起動直後は負荷が高い状態から始める。
+    bool loading = true;
+    int quiet_frames = 0;
+    void (*load_callback)(int32_t loading, void* user) = nullptr;
+    void* load_callback_user = nullptr;
 
     // window(global) / document / 主要 canvas へイベントを配送する (main.cpp と同じ規則)。
     void FireEvent(const char* type,
@@ -454,6 +465,26 @@ int32_t next2d_host_frame(Next2DHost* h)
                           << std::endl;
             }
         }
+
+        // 負荷の状態を埋め込み側へ知らせる (next2d_host_set_load_callback)。
+        // 区間は、画面の資材 (画像) の読み込みが始まったときに入る。読み込みの開始は画面の切り替えの
+        // 前触れなので、その後に来る重いフレーム (画面の組み立て、初回の描画) も同じ区間に入る。
+        // 区間の中では、重いフレームが出ている間は延長し、軽いフレームが続いたら抜ける。
+        // 重いフレームだけでは区間に入らない (通常の進行中に、性能の切り替えを繰り返さないため)。
+        const bool scene_loading = decodequeue::SceneLoads() > 0;
+        const bool heavy_frame = t_worker - now > kHeavyFrameMs;
+        if (scene_loading || (h->loading && heavy_frame)) {
+            h->quiet_frames = 0;
+        } else if (h->quiet_frames < kQuietFramesToSettle) {
+            ++h->quiet_frames;
+        }
+        const bool loading = h->quiet_frames < kQuietFramesToSettle;
+        if (loading != h->loading) {
+            h->loading = loading;
+            if (h->load_callback) {
+                h->load_callback(loading ? 1 : 0, h->load_callback_user);
+            }
+        }
     }
 
     // デフォルトフレームバッファへ描いたフレームだけ提示する
@@ -464,8 +495,13 @@ int32_t next2d_host_frame(Next2DHost* h)
 
     // フレームペーシング: ブラウザの rAF 同様 ~60Hz に揃える
     // (提示しないフレームや VSync 無しの環境で空回りしないように)。
+    // 環境変数 NEXT2D_HOST_NO_PACING を設定すると、ここでは待たない。埋め込み側が画面の更新
+    // (垂直同期) に合わせて next2d_host_frame を呼ぶ場合に使う。ここでの待ちは画面の更新とは
+    // 無関係な一定間隔なので、垂直同期のある環境で併用すると、フレームの間隔が画面の更新と
+    // 少しずつずれて、動きが周期的に引っかかって見える。
+    static const bool pacing = std::getenv("NEXT2D_HOST_NO_PACING") == nullptr;
     const double frame_ms = event_loop.Now() - now;
-    if (frame_ms < 15.0) {
+    if (pacing && frame_ms < 15.0) {
         std::this_thread::sleep_for(
             std::chrono::microseconds(static_cast<long long>((15.0 - frame_ms) * 1000.0)));
     }
@@ -586,6 +622,18 @@ int32_t next2d_host_register_font(const char* name, const uint8_t* data, size_t 
         return 0;
     }
     return stbtext::RegisterFont(name, std::vector<uint8_t>(data, data + size)) ? 1 : 0;
+}
+
+void next2d_host_set_load_callback(Next2DHost* h, void (*callback)(int32_t loading, void* user), void* user)
+{
+    if (!h) {
+        return;
+    }
+    h->load_callback = callback;
+    h->load_callback_user = user;
+    if (callback) {
+        callback(h->loading ? 1 : 0, user);   // 現在の状態を最初に知らせる
+    }
 }
 
 void next2d_host_destroy(Next2DHost* h)

@@ -135,6 +135,15 @@ NEXT2D_HOST_CORE_API int32_t next2d_host_render_audio(
 NEXT2D_HOST_CORE_API int32_t next2d_host_register_font(
     const char* name, const uint8_t* data, size_t size);
 
+/* 負荷の状態が変わったときに呼ばれる関数を登録する (不要なら呼ばなくてよい)。
+ *   loading = 1 … 資材を読み込んでいる、または処理の重いフレームが出ている (起動直後、画面の切り替えなど)
+ *   loading = 0 … 軽いフレームが続いて落ち着いた
+ * 一時的に CPU の性能を上げる仕組みを持つ環境で、その切り替えの合図に使える。登録した時点の状態で
+ * すぐ 1 回呼ばれ、以後は状態が変わるたびに next2d_host_frame を呼んだスレッドから呼ばれる。
+ * 起動直後は loading = 1 から始まる。 */
+NEXT2D_HOST_CORE_API void next2d_host_set_load_callback(
+    Next2DHost* host, void (*callback)(int32_t loading, void* user), void* user);
+
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);
 

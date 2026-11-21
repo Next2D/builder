@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -14,6 +15,8 @@
 namespace next2d::decodequeue {
 
 namespace {
+
+std::atomic<int> g_scene_loads{0};   // AddSceneLoad / SceneLoads
 
 struct Job {
     std::function<void()> work;
@@ -131,6 +134,17 @@ void Shutdown()
     std::lock_guard<std::mutex> lock(q.mutex);
     q.pending.clear();
     q.done.clear();
+    g_scene_loads.store(0);   // 破棄した complete の分は減らされないので、ここで 0 に戻す
+}
+
+void AddSceneLoad(int delta)
+{
+    g_scene_loads.fetch_add(delta);
+}
+
+int SceneLoads()
+{
+    return std::max(0, g_scene_loads.load());
 }
 
 } // namespace next2d::decodequeue

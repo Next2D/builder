@@ -75,7 +75,8 @@ struct GLState {
     // 問い合わせずに済ませるためのもの。状態の問い合わせ (glGet* / glIsEnabled) は、それまでに
     // 依頼した処理が終わるのを待つことがあり、GPU の処理が溜まっている場面で長い停止になる
     // (開発機で、1 回 50〜90 ms の待ちを確認)。
-    GLuint  bound_renderbuffer = 0;
+    GLuint  bound_renderbuffer = 0;         // GL 上の名前 (下の renderbuffer_alias を引いたあと)
+    GLuint  bound_renderbuffer_handle = 0;  // アプリが持っている名前
     bool    scissor_enabled    = false;
     GLint   scissor_box[4]     = {0, 0, 0, 0};
     GLboolean color_mask[4]    = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
@@ -97,6 +98,15 @@ struct GLState {
         GLsizei height = 0;
     };
     std::unordered_map<GLuint, RenderbufferStorage> renderbuffer_storage;
+
+    // アプリが持っているレンダーバッファの名前 → いま GL 上で使っている名前。
+    // 領域を確保し直すとき、同じ GL オブジェクトで確保し直すと、そのオブジェクトを使う処理が
+    // GPU に残っている間は終わるのを待たされる。そこで、確保し直すときは新しい GL オブジェクトを
+    // 作って差し替える (古い方は GPU が使い終わったあとで解放される)。
+    // アプリに見せる名前は GL の名前とは別の連番にする (GL は解放した名前を再利用するので、
+    // GL の名前をそのまま見せると、差し替えたあとで別のオブジェクトと番号が重なる)。
+    std::unordered_map<GLuint, GLuint> renderbuffer_alias;
+    GLuint next_renderbuffer_handle = 0;
 
     // シェーダのリンク結果の保存と再利用 (linkProgram を参照)
     struct ShaderInfo {
@@ -591,6 +601,32 @@ StorageClass ClassifyStorage(GLenum internalformat)
 // ゼロで初期化する。描画に使えない形式 (フレームバッファが不完全になる) は何もしない。
 // 描画先の束縛・マスク・シザーは呼び出し前の状態へ戻す。
 bool PerfEnabled();   // 環境変数 NEXT2D_HOST_PERF (定義は下)
+
+// アプリが持っているレンダーバッファの名前を、GL 上の名前へ読み替える
+GLuint ActualRenderbuffer(const GLState* s, GLuint handle)
+{
+    const auto it = s->renderbuffer_alias.find(handle);
+    return it == s->renderbuffer_alias.end() ? 0 : it->second;
+}
+
+// いま束縛しているレンダーバッファが領域を持っていたら、新しい GL オブジェクトへ差し替えて束縛する。
+// このあと呼び出し側が領域を確保する (GLState::renderbuffer_alias の説明を参照)。
+void ReplaceBoundRenderbuffer(GLState* s, GLenum target, bool had_storage)
+{
+    if (!had_storage || s->bound_renderbuffer_handle == 0) {
+        return;
+    }
+    GLuint fresh = 0;
+    glGenRenderbuffers(1, &fresh);
+    if (fresh == 0) {
+        return;
+    }
+    const GLuint old = s->bound_renderbuffer;
+    glBindRenderbuffer(target, fresh);
+    glDeleteRenderbuffers(1, &old);
+    s->renderbuffer_alias[s->bound_renderbuffer_handle] = fresh;
+    s->bound_renderbuffer = fresh;
+}
 
 // 環境変数 NEXT2D_HOST_PERF_SYNC: glFinish で実行を待って、個々の処理の時間を測る
 bool PerfSyncEnabled()
@@ -1633,7 +1669,8 @@ const Method kMethods[] = {
         glFramebufferTextureLayer(U(a, 0), U(a, 1), Name(a, 2, kTexture), I(a, 3), I(a, 4));
     }},
     {"framebufferRenderbuffer", [](const Args& a) {
-        glFramebufferRenderbuffer(U(a, 0), U(a, 1), U(a, 2), Name(a, 3, kRenderbuffer));
+        glFramebufferRenderbuffer(U(a, 0), U(a, 1), U(a, 2),
+                                  ActualRenderbuffer(S(a), Name(a, 3, kRenderbuffer)));
     }},
     {"blitFramebuffer", [](const Args& a) {
         glBlitFramebuffer(I(a, 0), I(a, 1), I(a, 2), I(a, 3), I(a, 4), I(a, 5), I(a, 6), I(a, 7),
@@ -1644,18 +1681,34 @@ const Method kMethods[] = {
         const std::vector<GLenum> list = EnumList(a, 1);
         glInvalidateFramebuffer(U(a, 0), static_cast<GLsizei>(list.size()), list.data());
     }},
-    {"createRenderbuffer", N2D_GEN(kRenderbuffer, glGenRenderbuffers)},
+    {"createRenderbuffer", [](const Args& a) {
+        GLState* s = S(a);
+        GLuint name = 0;
+        glGenRenderbuffers(1, &name);
+        const GLuint handle = ++s->next_renderbuffer_handle;
+        s->renderbuffer_alias[handle] = name;
+        ReturnName(a, kRenderbuffer, handle);
+    }},
     {"deleteRenderbuffer", [](const Args& a) {
-        GLuint n = Name(a, 0, kRenderbuffer);
-        if (n) {
-            S(a)->renderbuffer_storage.erase(n);
-            glDeleteRenderbuffers(1, &n);
+        GLState* s = S(a);
+        const GLuint handle = Name(a, 0, kRenderbuffer);
+        if (handle) {
+            const GLuint actual = ActualRenderbuffer(s, handle);
+            s->renderbuffer_storage.erase(handle);
+            s->renderbuffer_alias.erase(handle);
+            if (s->bound_renderbuffer_handle == handle) {
+                s->bound_renderbuffer_handle = 0;
+                s->bound_renderbuffer = 0;
+            }
+            glDeleteRenderbuffers(1, &actual);
             Invalidate(a, 0);
         }
     }},
     {"bindRenderbuffer", [](const Args& a) {
-        S(a)->bound_renderbuffer = Name(a, 1, kRenderbuffer);
-        glBindRenderbuffer(U(a, 0), S(a)->bound_renderbuffer);
+        GLState* s = S(a);
+        s->bound_renderbuffer_handle = Name(a, 1, kRenderbuffer);
+        s->bound_renderbuffer = ActualRenderbuffer(s, s->bound_renderbuffer_handle);
+        glBindRenderbuffer(U(a, 0), s->bound_renderbuffer);
     }},
     {"renderbufferStorage", [](const Args& a) {
         // WebGL1 由来の DEPTH_STENCIL は ES3 のサイズ付き形式へ読み替える。
@@ -1672,14 +1725,16 @@ const Method kMethods[] = {
         // フレームバッファに付けるバッファ同士の大きさは違っていてよく (OpenGL ES 3)、描画できる
         // 範囲は小さい方で決まるので、大きめの領域を持っていても描画結果は変わらない。
         // 対象はステンシル / デプスだけ (色のバッファは blit の範囲に大きさが関わるのでそのまま)。
-        const GLuint bound = S(a)->bound_renderbuffer;
+        const GLuint bound = S(a)->bound_renderbuffer_handle;
         const StorageClass kind = ClassifyStorage(sized);
         const bool reusable = bound != 0 && width > 0 && height > 0
             && (kind == StorageClass::Stencil || kind == StorageClass::Depth
                 || kind == StorageClass::DepthStencil);
         if (!reusable) {
             if (bound != 0) {
-                S(a)->renderbuffer_storage.erase(bound);
+                const bool had_storage = S(a)->renderbuffer_storage.erase(bound) > 0;
+                ReplaceBoundRenderbuffer(S(a), U(a, 0), had_storage);
+                S(a)->renderbuffer_storage[bound].format = sized;   // 領域を持っている印
             }
             glRenderbufferStorage(U(a, 0), sized, width, height);
             ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));
@@ -1702,6 +1757,7 @@ const Method kMethods[] = {
             const auto round_up = [](GLsizei v) { return (v + 255) & ~255; };
             const GLsizei w = round_up(width);
             const GLsizei h = round_up(height);
+            ReplaceBoundRenderbuffer(S(a), U(a, 0), have.format != 0);
             glRenderbufferStorage(U(a, 0), sized, w, h);
             have.format = sized;
             have.width = w;
@@ -1730,6 +1786,14 @@ const Method kMethods[] = {
     {"renderbufferStorageMultisample", [](const Args& a) {
         const GLenum format = U(a, 2);
         const GLenum sized = format == kDepthStencil ? GL_DEPTH24_STENCIL8 : format;
+        if (const GLuint handle = S(a)->bound_renderbuffer_handle) {
+            GLState::RenderbufferStorage& have = S(a)->renderbuffer_storage[handle];
+            ReplaceBoundRenderbuffer(S(a), U(a, 0), have.format != 0);
+            // 大きさは記録しない (使い回しの対象外)。領域を持っている印として形式だけ入れる
+            have.format = sized;
+            have.width = 0;
+            have.height = 0;
+        }
         if (!PerfSyncEnabled()) {
             glRenderbufferStorageMultisample(U(a, 0), I(a, 1), sized, I(a, 3), I(a, 4));
             ZeroInitializeStorage(true, 0, sized, 0, 0, S(a));

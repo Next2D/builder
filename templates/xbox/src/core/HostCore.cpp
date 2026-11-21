@@ -522,6 +522,50 @@ int32_t next2d_host_frame(Next2DHost* h)
                           << " ms, worker " << static_cast<int>(t_worker - t_js) << " ms (" << gl << ")"
                           << std::endl;
             }
+
+            // 2 秒ごとに、フレームの開始時刻 (rAF に渡す時刻) の間隔を出す。
+            // アプリ側は「前回の進行から 16 ms を超えたら 1 コマ進める」という作りが多いので、間隔が
+            // 揃っていない (短い間隔と長い間隔が交互に来る) と、フレームの数は足りていてもコマが抜ける。
+            // ticks は、その規則 (16 ms を超えたら進め、余りを次へ持ち越す) で進むコマの数。
+            static double stat_started = now;
+            static double previous = now;
+            static double tick_start = now;
+            static int frames = 0;
+            static int ticks = 0;
+            static int shorter = 0;
+            static int longer = 0;
+            static double min_ms = 1e9;
+            static double max_ms = 0.0;
+            const double interval = now - previous;
+            previous = now;
+            ++frames;
+            min_ms = std::min(min_ms, interval);
+            max_ms = std::max(max_ms, interval);
+            if (interval < 14.0) {
+                ++shorter;
+            } else if (interval > 19.5) {
+                ++longer;
+            }
+            const double since_tick = now - tick_start;
+            if (since_tick > 16.0) {
+                tick_start = now - std::fmod(since_tick, 16.0);
+                ++ticks;
+            }
+            if (now - stat_started >= 2000.0) {
+                char line[200];
+                std::snprintf(line, sizeof(line),
+                    "[HostCore] %d frames / 2 s: interval min %.1f ms, max %.1f ms, under 14 ms: %d, "
+                    "over 19.5 ms: %d; ticks %d",
+                    frames, min_ms, max_ms, shorter, longer, ticks);
+                std::cerr << line << std::endl;
+                stat_started = now;
+                frames = 0;
+                ticks = 0;
+                shorter = 0;
+                longer = 0;
+                min_ms = 1e9;
+                max_ms = 0.0;
+            }
         }
 
         // 負荷の状態を埋め込み側へ知らせる (next2d_host_set_load_callback)。

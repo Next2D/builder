@@ -21,13 +21,19 @@ std::atomic<int> g_scene_loads{0};   // AddSceneLoad / SceneLoads
 struct Job {
     std::function<void()> work;
     std::function<void()> complete;
+    std::thread::id owner;   // Submit を呼んだスレッド。complete はこのスレッドの Pump で実行する
+};
+
+struct Done {
+    std::function<void()> complete;
+    std::thread::id owner;
 };
 
 struct Queue {
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<Job> pending;                       // 未処理 (プールスレッドが取る)
-    std::deque<std::function<void()>> done;        // work 完了済み (Pump が実行)
+    std::deque<Done> done;                         // work 完了済み (Pump が実行)
     std::vector<std::thread> threads;
     bool stop = false;
 
@@ -54,7 +60,7 @@ struct Queue {
             }
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                done.push_back(std::move(job.complete));
+                done.push_back({std::move(job.complete), job.owner});
             }
         }
 #ifdef _WIN32
@@ -95,7 +101,7 @@ void Submit(std::function<void()> work, std::function<void()> complete)
             return;   // Shutdown 後の Submit は破棄 (終了処理中のロード要求)
         }
         q.EnsureThreads();
-        q.pending.push_back({std::move(work), std::move(complete)});
+        q.pending.push_back({std::move(work), std::move(complete), std::this_thread::get_id()});
     }
     q.cv.notify_one();
 }
@@ -103,16 +109,53 @@ void Submit(std::function<void()> work, std::function<void()> complete)
 void Pump()
 {
     Queue& q = Q();
+    // complete は V8 に触れるので、依頼したスレッド (その isolate を動かしているスレッド) の分だけ実行する
+    const std::thread::id self = std::this_thread::get_id();
     std::deque<std::function<void()>> ready;
     {
         std::lock_guard<std::mutex> lock(q.mutex);
-        ready.swap(q.done);
+        for (auto it = q.done.begin(); it != q.done.end();) {
+            if (it->owner == self) {
+                ready.push_back(std::move(it->complete));
+                it = q.done.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     for (auto& complete : ready) {
         if (complete) {
             complete();
         }
     }
+}
+
+void DropForThisThread()
+{
+    Queue& q = Q();
+    const std::thread::id self = std::this_thread::get_id();
+    std::deque<Job> dropped_pending;
+    std::deque<Done> dropped_done;
+    {
+        std::lock_guard<std::mutex> lock(q.mutex);
+        for (auto it = q.pending.begin(); it != q.pending.end();) {
+            if (it->owner == self) {
+                dropped_pending.push_back(std::move(*it));
+                it = q.pending.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = q.done.begin(); it != q.done.end();) {
+            if (it->owner == self) {
+                dropped_done.push_back(std::move(*it));
+                it = q.done.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    // dropped_* は、ロックを放したあとにここ (呼び出したスレッド) で破棄される
 }
 
 void Shutdown()

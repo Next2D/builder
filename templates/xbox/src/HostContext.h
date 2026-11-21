@@ -7,6 +7,7 @@
 
 #include <v8.h>
 
+#include <atomic>
 #include <string>
 
 namespace next2d {
@@ -62,6 +63,19 @@ public:
     // 必要のある保存先を使う場合のための通知)。name は保存したストレージの名前。不要なら nullptr。
     void (*storage_saved)(const char* name, void* user) = nullptr;
     void* storage_saved_user = nullptr;
+
+    // true のとき、Worker を専用スレッドの別 isolate で動かす (worker/WorkerRuntime.h)。
+    // false のときは、同じ isolate の別 Context をメインのスレッドで順番に動かす。
+    bool threaded_workers = false;
+
+    // worker のスレッドが 1 回の処理 (メッセージの配送から提示まで) にかかった時間の最大値
+    // (ミリ秒)。メインのスレッドが読み取って 0 に戻す。threaded_workers のときだけ使う。
+    std::atomic<int>* worker_turn_ms = nullptr;
+
+    // レンダラのスレッドが描画を始めた時刻 (std::chrono::steady_clock のミリ秒)。描画していない
+    // ときは 0。長い描画の途中でも、メインのスレッドから「いま描画に何ミリ秒かかっているか」が
+    // 分かるようにするためのもの。threaded_workers のときだけ使う。
+    std::atomic<long long>* worker_turn_started_ms = nullptr;
 
     static HostContext* From(v8::Isolate* isolate)
     {

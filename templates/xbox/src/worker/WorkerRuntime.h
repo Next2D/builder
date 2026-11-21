@@ -1,22 +1,36 @@
-// WorkerRuntime: Web Worker を「同一 Isolate 内の別 Context を協調スケジューリング」する
-// 単一スレッドモデルで実装する。
+// WorkerRuntime: Web Worker の実装。動かし方は 2 通りある (HostContext::threaded_workers)。
 //
-// player はレンダラを Worker + transferControlToOffscreen(OffscreenCanvas) で動かし、
-// メインスレッドから postMessage で描画コマンドを送る。真のマルチスレッド化は
-// Dawn/GPU のスレッド安全性を要するため、まず GPU を 1 スレッドに保てる協調モデルを採る。
+// 協調 (既定): 同じ Isolate の別 Context を、メインのスレッドで順番に動かす。
+//   GPU を 1 スレッドに保てるので、Dawn (WebGPU) の構成で使う。
 //
-// - new Worker(url)         : 別 Context を生成しワーカースクリプトを評価
-// - worker.postMessage(m,t) : main→worker のメッセージキューへ (ValueSerializer)
-// - self.postMessage(m,t)   : worker→main のメッセージキューへ
-// - Pump()                  : 双方向のメッセージ配送 + 各 worker の EventLoop 前進
+// 専用スレッド: worker ごとに Isolate とスレッドを作って並行に動かす。
+//   player はレンダラを Worker + transferControlToOffscreen(OffscreenCanvas) で動かし、
+//   メインから postMessage で描画コマンドを送る。レンダラを別のスレッドへ出すと、ゲームの
+//   処理 (メイン) と描画 (レンダラ) が別々のコアで同時に進む。GL のコンテキストは、WebGL2 の
+//   コンテキストを作ったスレッド (レンダラ) が持ち、提示もそのスレッドで行う。
+//
+// - new Worker(url)         : ワーカースクリプトを評価 (専用スレッドではそのスレッドで)
+// - worker.postMessage(m,t) : 親→worker のメッセージキューへ (ValueSerializer)
+// - self.postMessage(m,t)   : worker→親 のメッセージキューへ
+// - Pump()                  : 親のスレッドで、worker→親 のメッセージを配送する
+//                             (協調では、親→worker の配送と worker の EventLoop の前進も行う)
+//
+// メッセージ (WorkerMessage) は isolate に依存しないバイト列と ArrayBuffer の実体なので、
+// どちらの動かし方でも同じ形で受け渡す。
 #pragma once
 
 #include <v8.h>
 
+#include "../platform/NativeThread.h"
+
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -40,33 +54,43 @@ struct WorkerMessage {
 
 class WorkerInstance {
 public:
-    WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url,
+    // parent_isolate: new Worker を呼んだ側の isolate (親のスレッドで動いている)
+    WorkerInstance(WorkerRuntime* runtime, v8::Isolate* parent_isolate, std::string url,
                    bool is_module = false);
+    // 親のスレッドから呼ぶ。専用スレッドの worker は、スレッドの終了を待つ。
     ~WorkerInstance();
 
-    bool Start();                 // Context 生成 + ワーカースクリプト評価
+    // ワーカースクリプトを読み込んで起動する (親のスレッドから呼ぶ)。
+    // 協調ではその場で評価し、専用スレッドではスレッドを作ってそちらで評価する。
+    bool Launch();
     void Terminate();
 
-    // main→worker / worker→main の投函
+    // 親→worker / worker→親 の投函 (どのスレッドからでも呼べる)
     void PostToWorker(WorkerMessage message);
     void PostToMain(WorkerMessage message);
 
-    // 配送 + タイマー/rAF 前進 (WorkerRuntime::Pump から呼ぶ)
+    // 親のスレッドで、worker→親 のメッセージを配送する (WorkerRuntime::Pump から呼ぶ)。
+    // 協調では、その前に 親→worker の配送とタイマー/rAF の前進も行う。
     void Deliver(double now_ms);
 
     v8::Local<v8::Context> context() const;
     EventLoop* event_loop() const { return loop_.get(); }
 
-    // main 側の Worker オブジェクト (onmessage を保持)
+    // 親側の Worker オブジェクト (onmessage を保持)。親の isolate に属する。
     v8::Global<v8::Object> main_worker_object;
-    // worker 側 self.onmessage
-    v8::Global<v8::Function> worker_onmessage;
-    // main 側 worker.onmessage
-    v8::Global<v8::Function> main_onmessage;
 
 private:
-    void DeliverToWorker(double now_ms);
+    bool LoadSource();            // スクリプトの本文を source_ へ読み込む (親のスレッド)
+    bool Start();                 // Context 生成 + ワーカースクリプト評価 (worker を動かすスレッド)
+
+    // worker 側の 1 回分の処理: メッセージの配送、タイマー、(run_raf なら) rAF
+    void RunWorkerTurn(std::deque<WorkerMessage>& batch, double now_ms, bool run_raf);
     void DeliverToMain();
+
+    // 専用スレッド
+    void ThreadMain();
+    void ThreadLoop();
+    void Wake();
 
     // ESM worker (type: "module")。分類スクリプトは Script、モジュールは Module として評価。
     bool EvaluateModule(v8::Local<v8::Context> context, const std::string& source);
@@ -77,15 +101,28 @@ private:
         v8::Local<v8::FixedArray> import_attributes,
         v8::Local<v8::Module> referrer);
 
-    WorkerRuntime* runtime_;
-    v8::Isolate* isolate_;
+    WorkerRuntime* runtime_;            // 親の runtime
+    v8::Isolate* parent_isolate_;
+    v8::Isolate* isolate_;              // worker の isolate (協調では parent_isolate_ と同じ)
+    const bool threaded_;
     std::string url_;
     bool module_ = false;
+    std::string source_;
     v8::Global<v8::Context> context_;
     std::unique_ptr<EventLoop> loop_;
+
+    // メッセージキューと起床の合図。mutex_ で守る。
+    std::mutex mutex_;
+    std::condition_variable cv_;
     std::deque<WorkerMessage> to_worker_;
     std::deque<WorkerMessage> to_main_;
-    bool terminated_ = false;
+    bool wake_ = false;
+    std::atomic<bool> terminated_{false};
+
+    // 専用スレッドの worker だけが持つもの (スレッドの中で作り、スレッドの中で破棄する)
+    std::unique_ptr<HostContext> thread_host_;
+    std::unique_ptr<WorkerRuntime> thread_workers_;   // 入れ子の Worker 用
+    NativeThread thread_;
 
     // ESM 解決: url -> Module、Module identity hash -> url (referrer 特定用)。
     std::map<std::string, v8::Global<v8::Module>> modules_;
@@ -106,20 +143,27 @@ public:
     // new Worker(url, { type }) の実体
     v8::Local<v8::Object> CreateWorker(const std::string& url, bool is_module = false);
 
-    // 全 worker のメッセージ配送とイベントループ前進
+    // 全 worker のメッセージ配送 (協調ではイベントループの前進も)
     void Pump(double now_ms);
 
     bool HasWorkers() const { return !workers_.empty(); }
 
-    // 全 WorkerInstance を破棄する。WorkerInstance は v8::Global (context_ /
-    // main_worker_object 等) を保持するため、Isolate::Dispose より前に必ず呼ぶこと
-    // (呼ばずにスタック巻き戻しで破棄されると Isolate 破棄後の Global::Reset で fail-fast)。
+    // 専用スレッドの worker から親へメッセージが届いたときに呼ぶ関数 (親がスレッドで待って
+    // いる場合に起こすため)。メインは毎フレーム Pump するので設定しない。
+    void SetChildMessageNotifier(std::function<void()> notifier) { notifier_ = std::move(notifier); }
+    void NotifyChildMessage() { if (notifier_) notifier_(); }
+
+    // 全 WorkerInstance を破棄する (専用スレッドの worker は終了を待つ)。WorkerInstance は
+    // v8::Global (context_ / main_worker_object 等) を保持するため、Isolate::Dispose より前に
+    // 必ず呼ぶこと (呼ばずにスタック巻き戻しで破棄されると Isolate 破棄後の Global::Reset で
+    // fail-fast)。
     void Shutdown() { workers_.clear(); }
 
 private:
     v8::Isolate* isolate_;
     HostContext* host_;
     std::vector<std::unique_ptr<WorkerInstance>> workers_;
+    std::function<void()> notifier_;
 };
 
 // ValueSerializer/Deserializer による structured clone

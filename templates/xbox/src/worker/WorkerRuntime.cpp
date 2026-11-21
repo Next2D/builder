@@ -6,9 +6,14 @@
 #include "bindings/Bindings.h"
 #include "bindings/ImageSource.h"
 #include "platform/ImageTypes.h"
+#include "gpu/GlesContext.h"
+#include "platform/DecodeQueue.h"
+#include "v8/V8Runtime.h"
 #include "v8/V8Util.h"
 #include "v8/CodeCache.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -354,9 +359,14 @@ void AddEventListener(const v8::FunctionCallbackInfo<v8::Value>& args)
 // ===========================================================================
 // WorkerInstance
 // ===========================================================================
-WorkerInstance::WorkerInstance(WorkerRuntime* runtime, v8::Isolate* isolate, std::string url,
+WorkerInstance::WorkerInstance(WorkerRuntime* runtime, v8::Isolate* parent_isolate, std::string url,
                                bool is_module)
-    : runtime_(runtime), isolate_(isolate), url_(std::move(url)), module_(is_module)
+    : runtime_(runtime)
+    , parent_isolate_(parent_isolate)
+    , isolate_(parent_isolate)
+    , threaded_(runtime->host() && runtime->host()->threaded_workers)
+    , url_(std::move(url))
+    , module_(is_module)
 {
 }
 
@@ -383,7 +393,12 @@ std::string ResolveModulePath(const std::string& referrer_url, const std::string
 
 } // namespace
 
-WorkerInstance::~WorkerInstance() = default;
+WorkerInstance::~WorkerInstance()
+{
+    // 専用スレッドの worker は、スレッドが context_ などを破棄して終わるのを待つ
+    Terminate();
+    thread_.Join();
+}
 
 v8::Local<v8::Context> WorkerInstance::context() const
 {
@@ -440,6 +455,62 @@ void MainWorkerPostMessage(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 } // namespace
 
+// ワーカースクリプトの本文を読み込む。blob: URL の登録先など親の側にしか無いものを
+// 参照するので、専用スレッドの worker でも親のスレッドで行う。
+bool WorkerInstance::LoadSource()
+{
+    // ワーカースクリプトを読み込む (クラシック / ESM は module_ で分岐)。
+    // Vite の `?worker&inline` は data:application/javascript;base64,... を渡す
+    // (バージョンによっては blob: URL)。data: / blob: / assets の順で解決する。
+    if (url_.rfind("data:", 0) == 0) {
+        const auto comma = url_.find(',');
+        if (comma == std::string::npos) {
+            std::cerr << "[Worker] malformed data url: " << ShortUrl(url_) << std::endl;
+            return false;
+        }
+        const std::string meta = url_.substr(5, comma - 5);   // 例: application/javascript;base64
+        const std::string payload = url_.substr(comma + 1);
+        if (meta.find(";base64") != std::string::npos) {
+            if (!DecodeBase64(payload, &source_)) {
+                std::cerr << "[Worker] base64 decode failed: " << ShortUrl(url_) << std::endl;
+                return false;
+            }
+        } else {
+            source_ = PercentDecode(payload);
+        }
+    } else if (url_.rfind("blob:", 0) == 0) {
+        if (!ResolveObjectURL(url_, &source_)) {
+            std::cerr << "[Worker] blob url not found: " << ShortUrl(url_) << std::endl;
+            return false;
+        }
+    } else {
+        auto src = runtime_->host()->assets->ReadText(url_);
+        if (!src) {
+            std::cerr << "[Worker] script not found: " << ShortUrl(url_) << std::endl;
+            return false;
+        }
+        source_ = std::move(*src);
+    }
+    return true;
+}
+
+bool WorkerInstance::Launch()
+{
+    if (!LoadSource()) {
+        return false;
+    }
+    if (!threaded_) {
+        return Start();
+    }
+    // V8 を動かすので、スタックは大きめに取る (platform/NativeThread.h)
+    constexpr size_t kStackBytes = 4 * 1024 * 1024;
+    if (!thread_.Start([this] { ThreadMain(); }, kStackBytes)) {
+        std::cerr << "[Worker] thread could not be created: " << ShortUrl(url_) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool WorkerInstance::Start()
 {
     v8::HandleScope handle_scope(isolate_);
@@ -450,6 +521,9 @@ bool WorkerInstance::Start()
     // worker 専用 EventLoop を Context の embedder slot に登録
     loop_ = std::make_unique<EventLoop>(isolate_);
     context->SetAlignedPointerInEmbedderData(kEventLoopEmbedderSlot, loop_.get());
+    if (threaded_) {
+        thread_host_->event_loop = loop_.get();   // この isolate の既定の EventLoop
+    }
     // ESM の ResolveModule コールバックが context から自身を引けるように登録
     context->SetAlignedPointerInEmbedderData(kWorkerInstanceEmbedderSlot, this);
 
@@ -472,43 +546,13 @@ bool WorkerInstance::Start()
     SetMethod(isolate_, global, "addEventListener", AddEventListener);
     SetMethod(isolate_, global, "close", [](const v8::FunctionCallbackInfo<v8::Value>&) {});
 
-    // 入れ子 Worker を許可 (ZlibInflate 等)。
-    runtime_->InstallOnGlobal(global);
+    // 入れ子 Worker を許可 (ZlibInflate 等)。専用スレッドの worker は、自分の isolate 用の
+    // runtime を持つ (入れ子の worker から見た親は、このスレッド)。
+    (threaded_ ? thread_workers_.get() : runtime_)->InstallOnGlobal(global);
 
-    // ワーカースクリプトを読み込む (クラシック / ESM は module_ で分岐)。
-    // Vite の `?worker&inline` は data:application/javascript;base64,... を渡す
-    // (バージョンによっては blob: URL)。data: / blob: / assets の順で解決する。
-    HostContext* host = HostContext::From(isolate_);
-    std::string source;
-    if (url_.rfind("data:", 0) == 0) {
-        const auto comma = url_.find(',');
-        if (comma == std::string::npos) {
-            std::cerr << "[Worker] malformed data url: " << ShortUrl(url_) << std::endl;
-            return false;
-        }
-        const std::string meta = url_.substr(5, comma - 5);   // 例: application/javascript;base64
-        const std::string payload = url_.substr(comma + 1);
-        if (meta.find(";base64") != std::string::npos) {
-            if (!DecodeBase64(payload, &source)) {
-                std::cerr << "[Worker] base64 decode failed: " << ShortUrl(url_) << std::endl;
-                return false;
-            }
-        } else {
-            source = PercentDecode(payload);
-        }
-    } else if (url_.rfind("blob:", 0) == 0) {
-        if (!ResolveObjectURL(url_, &source)) {
-            std::cerr << "[Worker] blob url not found: " << ShortUrl(url_) << std::endl;
-            return false;
-        }
-    } else {
-        auto src = host->assets->ReadText(url_);
-        if (!src) {
-            std::cerr << "[Worker] script not found: " << ShortUrl(url_) << std::endl;
-            return false;
-        }
-        source = std::move(*src);
-    }
+    // スクリプトの本文は LoadSource (親のスレッド) が読み込んである
+    std::string source = std::move(source_);
+    source_.clear();
 
     // ESM worker (new Worker(url, { type: "module" }))。モジュールとして評価する。
     if (module_) {
@@ -668,27 +712,50 @@ bool WorkerInstance::EvaluateModule(v8::Local<v8::Context> context, const std::s
     return true;
 }
 
-void WorkerInstance::Terminate() { terminated_ = true; }
+void WorkerInstance::Terminate()
+{
+    terminated_ = true;
+    Wake();
+}
+
+void WorkerInstance::Wake()
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        wake_ = true;
+    }
+    cv_.notify_one();
+}
 
 void WorkerInstance::PostToWorker(WorkerMessage message)
 {
-    to_worker_.push_back(std::move(message));
+    if (terminated_) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        to_worker_.push_back(std::move(message));
+    }
+    cv_.notify_one();
 }
 
 void WorkerInstance::PostToMain(WorkerMessage message)
 {
-    to_main_.push_back(std::move(message));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        to_main_.push_back(std::move(message));
+    }
+    // 親が (入れ子の worker の親として) スレッドで待っているなら起こす
+    runtime_->NotifyChildMessage();
 }
 
-void WorkerInstance::DeliverToWorker(double now_ms)
+void WorkerInstance::RunWorkerTurn(std::deque<WorkerMessage>& batch, double now_ms, bool run_raf)
 {
-    if (terminated_) { to_worker_.clear(); return; }
     v8::HandleScope hs(isolate_);
     v8::Local<v8::Context> ctx = context();
+    v8::Context::Scope cs(ctx);
 
-    while (!to_worker_.empty()) {
-        WorkerMessage m = std::move(to_worker_.front());
-        to_worker_.pop_front();
+    for (WorkerMessage& m : batch) {
         v8::Local<v8::Value> data;
         if (DeserializeMessage(isolate_, ctx, m).ToLocal(&data)) {
             DispatchMessage(isolate_, ctx, ctx->Global(), data);
@@ -696,29 +763,40 @@ void WorkerInstance::DeliverToWorker(double now_ms)
             std::cerr << "[Worker] main->worker deserialize failed ("
                       << m.data.size() << " bytes)" << std::endl;
         }
+        if (threaded_) {
+            // ブラウザと同じく、メッセージ 1 件ごとにマイクロタスクを処理する
+            isolate_->PerformMicrotaskCheckpoint();
+        }
     }
+    batch.clear();
 
     // worker のタイマー / rAF (レンダラ worker はここで描画コマンドを積む)
-    v8::Context::Scope cs(ctx);
     loop_->PumpTimers();
     isolate_->PerformMicrotaskCheckpoint();
-    loop_->RunAnimationFrame(now_ms);
-    isolate_->PerformMicrotaskCheckpoint();
+    if (run_raf) {
+        loop_->RunAnimationFrame(now_ms);
+        isolate_->PerformMicrotaskCheckpoint();
+    }
 }
 
 void WorkerInstance::DeliverToMain()
 {
-    if (main_worker_object.IsEmpty()) { to_main_.clear(); return; }
-    v8::HandleScope hs(isolate_);
-    v8::Local<v8::Object> worker_obj = main_worker_object.Get(isolate_);
+    std::deque<WorkerMessage> batch;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        batch.swap(to_main_);
+    }
+    if (batch.empty() || main_worker_object.IsEmpty()) {
+        return;
+    }
+    v8::HandleScope hs(parent_isolate_);
+    v8::Local<v8::Object> worker_obj = main_worker_object.Get(parent_isolate_);
     v8::Local<v8::Context> main_ctx = worker_obj->GetCreationContextChecked();
 
-    while (!to_main_.empty()) {
-        WorkerMessage m = std::move(to_main_.front());
-        to_main_.pop_front();
+    for (WorkerMessage& m : batch) {
         v8::Local<v8::Value> data;
-        if (DeserializeMessage(isolate_, main_ctx, m).ToLocal(&data)) {
-            DispatchMessage(isolate_, main_ctx, worker_obj, data);
+        if (DeserializeMessage(parent_isolate_, main_ctx, m).ToLocal(&data)) {
+            DispatchMessage(parent_isolate_, main_ctx, worker_obj, data);
         } else {
             std::cerr << "[Worker] worker->main deserialize failed ("
                       << m.data.size() << " bytes)" << std::endl;
@@ -728,8 +806,183 @@ void WorkerInstance::DeliverToMain()
 
 void WorkerInstance::Deliver(double now_ms)
 {
-    DeliverToWorker(now_ms);
+    if (!threaded_) {
+        // 協調: 親のスレッドで worker 側の処理も進める
+        std::deque<WorkerMessage> batch;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            batch.swap(to_worker_);
+        }
+        if (!terminated_ && !context_.IsEmpty() && loop_) {
+            RunWorkerTurn(batch, now_ms, true);
+        }
+    }
     DeliverToMain();
+}
+
+// ---------------------------------------------------------------------------
+// 専用スレッド
+// ---------------------------------------------------------------------------
+void WorkerInstance::ThreadMain()
+{
+    // この worker 用の HostContext。資材や GL のコンテキストなどは親と同じものを指し、
+    // EventLoop と入れ子の Worker の runtime は自分のものを持つ。
+    const HostContext* parent_host = runtime_->host();
+    thread_host_ = std::make_unique<HostContext>();
+    thread_host_->gpu = parent_host->gpu;
+    thread_host_->gles = parent_host->gles;
+    thread_host_->assets = parent_host->assets;
+    thread_host_->gamepad = parent_host->gamepad;
+    thread_host_->audio = parent_host->audio;
+    thread_host_->backend = parent_host->backend;
+    thread_host_->viewport_width = parent_host->viewport_width;
+    thread_host_->viewport_height = parent_host->viewport_height;
+    thread_host_->device_pixel_ratio = parent_host->device_pixel_ratio;
+    thread_host_->storage_dir = parent_host->storage_dir;
+    thread_host_->storage_saved = parent_host->storage_saved;
+    thread_host_->storage_saved_user = parent_host->storage_saved_user;
+    thread_host_->threaded_workers = true;
+    thread_host_->worker_turn_ms = parent_host->worker_turn_ms;
+    thread_host_->worker_turn_started_ms = parent_host->worker_turn_started_ms;
+
+    v8::Isolate* isolate = V8Runtime::NewWorkerIsolate(thread_host_.get());
+    isolate_ = isolate;
+    {
+        v8::Isolate::Scope isolate_scope(isolate);
+
+        thread_workers_ = std::make_unique<WorkerRuntime>(isolate, thread_host_.get());
+        thread_workers_->SetChildMessageNotifier([this] { Wake(); });
+        thread_host_->workers = thread_workers_.get();
+
+        bool started = false;
+        {
+            v8::HandleScope hs(isolate);
+            started = Start();
+            if (started) {
+                v8::Context::Scope cs(context());
+                isolate->PerformMicrotaskCheckpoint();
+            }
+        }
+        if (started) {
+            ThreadLoop();
+        } else {
+            terminated_ = true;
+        }
+
+        // 後始末: この isolate の v8::Global を持つものを、isolate の破棄より前に手放す
+        decodequeue::DropForThisThread();
+        thread_workers_->Shutdown();
+        if (loop_) {
+            loop_->Shutdown();
+        }
+        modules_.clear();
+        context_.Reset();
+        thread_host_->main_canvas.Reset();
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        ReleaseWebGL2Thread(thread_host_.get());
+#endif
+    }
+    loop_.reset();
+    thread_workers_.reset();
+    isolate->Dispose();
+}
+
+void WorkerInstance::ThreadLoop()
+{
+    static const bool perf = std::getenv("NEXT2D_HOST_PERF") != nullptr;
+    // rAF の間隔 (ブラウザと同じく画面の更新 1 回分)
+    constexpr double kFrameMs = 1000.0 / 60.0;
+    // 何も予定が無いときに起きる間隔 (デコードの完了などを拾うため)
+    constexpr double kIdleWaitMs = 8.0;
+
+    double next_raf_ms = loop_->Now();
+    while (!terminated_) {
+        // 次に起きるまでの時間: タイマーの期限、rAF の予定、上限
+        double wait_ms = kIdleWaitMs;
+        const double timer_ms = loop_->NextTimerDelayMs();
+        if (timer_ms >= 0.0) {
+            wait_ms = std::min(wait_ms, timer_ms);
+        }
+        if (loop_->PendingAnimationFrameCount() > 0) {
+            wait_ms = std::min(wait_ms, std::max(0.0, next_raf_ms - loop_->Now()));
+        }
+
+        std::deque<WorkerMessage> batch;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            if (wait_ms > 0.0 && to_worker_.empty() && !wake_ && !terminated_) {
+                cv_.wait_for(lock, std::chrono::microseconds(static_cast<long long>(wait_ms * 1000.0)),
+                             [this] { return !to_worker_.empty() || wake_ || terminated_.load(); });
+            }
+            wake_ = false;
+            batch.swap(to_worker_);
+        }
+        if (terminated_) {
+            break;
+        }
+
+        const double started_ms = loop_->Now();
+        const bool had_messages = !batch.empty();
+        const bool run_raf = started_ms >= next_raf_ms && loop_->PendingAnimationFrameCount() > 0;
+        if (run_raf) {
+            next_raf_ms = started_ms + kFrameMs;
+        }
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        // レンダラが描画を始めたことを知らせる (長い描画の途中でも、メインから重さが分かるように)
+        const bool announce = had_messages && WebGL2CurrentOnThisThread()
+            && thread_host_->worker_turn_started_ms;
+        if (announce) {
+            thread_host_->worker_turn_started_ms->store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+#endif
+        RunWorkerTurn(batch, started_ms, run_raf);
+
+        // デコードの完了 (この worker が依頼した分)、入れ子の worker、V8 のタスク
+        decodequeue::Pump();
+        {
+            v8::HandleScope hs(isolate_);
+            v8::Context::Scope cs(context());
+            thread_workers_->Pump(started_ms);
+            isolate_->PerformMicrotaskCheckpoint();
+        }
+        V8Runtime::PumpPlatformTasksFor(isolate_);
+
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        // このスレッドが GL のコンテキストを持っている (レンダラ) なら、描いたフレームを提示する
+        const bool renderer = WebGL2CurrentOnThisThread();
+        if (renderer && thread_host_->gles && thread_host_->gles->needs_present) {
+            thread_host_->gles->SwapBuffers();
+        }
+#else
+        const bool renderer = false;
+#endif
+
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        if (announce) {
+            thread_host_->worker_turn_started_ms->store(0);
+        }
+#endif
+        const int turn_ms = static_cast<int>(loop_->Now() - started_ms);
+        if (renderer && had_messages && thread_host_->worker_turn_ms) {
+            std::atomic<int>& slot = *thread_host_->worker_turn_ms;
+            int seen = slot.load();
+            while (turn_ms > seen && !slot.compare_exchange_weak(seen, turn_ms)) {
+            }
+        }
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        if (perf && renderer) {
+            // 時間のかかった回の内訳 (GL の呼び出しにかかった分。残りはレンダラの JS と提示)
+            const std::string gl = TakeWebGL2PerfSummary();
+            if (turn_ms > 50) {
+                std::cerr << "[Worker] slow render turn: " << turn_ms << " ms (" << gl << ")" << std::endl;
+            }
+        }
+#else
+        (void) perf;
+#endif
+    }
 }
 
 // ===========================================================================
@@ -769,7 +1022,7 @@ v8::Local<v8::Object> WorkerRuntime::CreateWorker(const std::string& url, bool i
 
     ptr->main_worker_object.Reset(isolate_, worker);
 
-    if (!ptr->Start()) {
+    if (!ptr->Launch()) {
         // 起動失敗でも Worker オブジェクトは返す (エラーは配送されない)
     }
     workers_.push_back(std::move(instance));

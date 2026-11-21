@@ -914,9 +914,38 @@ void WorkerInstance::ThreadMain()
     isolate->Dispose();
 }
 
+// NEXT2D_HOST_PERF の指定時: このスレッドの isolate で GC にかかった時間を、描画 1 回ごとに集計する。
+// GL を 1 回も呼ばないのに時間のかかる回が、GC なのかメッセージの処理なのかを見分けるためのもの。
+namespace {
+    thread_local double g_gc_started_ms = 0.0;
+    thread_local double g_gc_total_ms = 0.0;
+    thread_local int g_gc_count = 0;
+
+    double SteadyNowMs()
+    {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void OnGcStart(v8::Isolate*, v8::GCType, v8::GCCallbackFlags, void*)
+    {
+        g_gc_started_ms = SteadyNowMs();
+    }
+
+    void OnGcEnd(v8::Isolate*, v8::GCType, v8::GCCallbackFlags, void*)
+    {
+        g_gc_total_ms += SteadyNowMs() - g_gc_started_ms;
+        ++g_gc_count;
+    }
+}
+
 void WorkerInstance::ThreadLoop()
 {
     static const bool perf = std::getenv("NEXT2D_HOST_PERF") != nullptr;
+    if (perf) {
+        isolate_->AddGCPrologueCallback(OnGcStart, nullptr);
+        isolate_->AddGCEpilogueCallback(OnGcEnd, nullptr);
+    }
     // rAF の間隔 (ブラウザと同じく画面の更新 1 回分)
     constexpr double kFrameMs = 1000.0 / 60.0;
     // 何も予定が無いときに起きる間隔 (デコードの完了などを拾うため)
@@ -964,17 +993,22 @@ void WorkerInstance::ThreadLoop()
                     std::chrono::steady_clock::now().time_since_epoch()).count());
         }
 #endif
+        const size_t batch_size = batch.size();
         RunWorkerTurn(batch, started_ms, run_raf);
+        const double after_run_ms = loop_->Now();
 
         // デコードの完了 (この worker が依頼した分)、入れ子の worker、V8 のタスク
         decodequeue::Pump();
+        const double after_decode_ms = loop_->Now();
         {
             v8::HandleScope hs(isolate_);
             v8::Context::Scope cs(context());
             thread_workers_->Pump(started_ms);
             isolate_->PerformMicrotaskCheckpoint();
         }
+        const double after_workers_ms = loop_->Now();
         V8Runtime::PumpPlatformTasksFor(isolate_);
+        const double after_tasks_ms = loop_->Now();
 
 #if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
         // このスレッドが GL のコンテキストを持っている (レンダラ) なら、描いたフレームを提示する
@@ -1006,9 +1040,26 @@ void WorkerInstance::ThreadLoop()
         if (perf && renderer) {
             // 時間のかかった回の内訳 (GL の呼び出しにかかった分。残りはレンダラの JS と提示)
             const std::string gl = TakeWebGL2PerfSummary();
-            if (turn_ms > 50) {
-                std::cerr << "[Worker] slow render turn: " << turn_ms << " ms (" << gl << ")" << std::endl;
+            // 既定は 50 ms を超えた回だけ出す。NEXT2D_HOST_SLOW_TURN_MS で変えられる
+            static const int slow_turn_ms = [] {
+                const char* value = std::getenv("NEXT2D_HOST_SLOW_TURN_MS");
+                const int ms = value ? std::atoi(value) : 0;
+                return ms > 0 ? ms : 50;
+            }();
+            if (turn_ms > slow_turn_ms) {
+                // 内訳: メッセージと rAF の処理 / デコードの完了 / 入れ子の worker とマイクロタスク /
+                // V8 のタスク / 提示。gc はこの回のうち GC にかかった時間 (上のどれかに含まれる)。
+                char parts[200];
+                std::snprintf(parts, sizeof(parts),
+                    "; %zu msgs%s, run %.0f, decode %.0f, workers %.0f, v8 tasks %.0f, present %.0f, gc %.0f ms x%d",
+                    batch_size, run_raf ? " + raf" : "",
+                    after_run_ms - started_ms, after_decode_ms - after_run_ms,
+                    after_workers_ms - after_decode_ms, after_tasks_ms - after_workers_ms,
+                    present_ms, g_gc_total_ms, g_gc_count);
+                std::cerr << "[Worker] slow render turn: " << turn_ms << " ms (" << gl << parts << ")" << std::endl;
             }
+            g_gc_total_ms = 0.0;
+            g_gc_count = 0;
             // 2 秒ごとに、描画の回数と 1 回の時間 (平均 / 最大)、画面の更新 1 回分 (16 ms) を超えた回数を出す。
             // 時間は提示 (垂直同期の待ち) を除いた、描画の処理そのものの時間。
             static double stat_started_ms = started_ms;

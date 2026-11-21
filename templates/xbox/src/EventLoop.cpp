@@ -171,4 +171,18 @@ bool EventLoop::HasPendingWork() const
     return !timers_.empty() || !raf_callbacks_.empty();
 }
 
+double EventLoop::NextTimerDelayMs() const
+{
+    double due = -1.0;
+    for (const auto& [id, entry] : timers_) {
+        if (!entry.cancelled && (due < 0.0 || entry.due_ms < due)) {
+            due = entry.due_ms;
+        }
+    }
+    if (due < 0.0) {
+        return -1.0;
+    }
+    return std::max(0.0, due - Now());
+}
+
 } // namespace next2d

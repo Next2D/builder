@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,8 @@ std::map<std::string, std::vector<uint8_t>>& ObjectURLs()
     return registry;
 }
 int g_object_url_seq = 0;
+// worker が別スレッドで動く構成では、レジストリを複数のスレッドが触る
+std::mutex g_object_url_mutex;
 
 std::vector<uint8_t> ValueToBytes(v8::Isolate* isolate, v8::Local<v8::Value> v)
 {
@@ -104,15 +107,23 @@ void CreateObjectURL(const v8::FunctionCallbackInfo<v8::Value>& args)
             bytes = ValueToBytes(isolate, d);
         }
     }
-    const std::string url = "blob:next2d/" + std::to_string(++g_object_url_seq);
-    ObjectURLs()[url] = std::move(bytes);
+    std::string url;
+    {
+        std::lock_guard<std::mutex> lock(g_object_url_mutex);
+        url = "blob:next2d/" + std::to_string(++g_object_url_seq);
+        ObjectURLs()[url] = std::move(bytes);
+    }
     args.GetReturnValue().Set(Str(isolate, url));
 }
 
 void RevokeObjectURL(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     v8::Isolate* isolate = args.GetIsolate();
-    if (args.Length() > 0) ObjectURLs().erase(ToStdString(isolate, args[0]));
+    if (args.Length() > 0) {
+        const std::string url = ToStdString(isolate, args[0]);
+        std::lock_guard<std::mutex> lock(g_object_url_mutex);
+        ObjectURLs().erase(url);
+    }
 }
 
 // --- ImageData -----------------------------------------------------------
@@ -196,9 +207,12 @@ void XHRConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
 
         std::vector<uint8_t> bytes;
         bool ok = false;
-        auto it = ObjectURLs().find(url);
-        if (it != ObjectURLs().end()) { bytes = it->second; ok = true; }
-        else if (host->assets) {
+        {
+            std::lock_guard<std::mutex> lock(g_object_url_mutex);
+            auto it = ObjectURLs().find(url);
+            if (it != ObjectURLs().end()) { bytes = it->second; ok = true; }
+        }
+        if (!ok && host->assets) {
             auto b = host->assets->ReadBinary(url);
             if (b) { bytes = std::move(*b); ok = true; }
         }
@@ -273,6 +287,7 @@ void InstallCtor(v8::Isolate* isolate, v8::Local<v8::Object> global,
 // blob: URL のバイト列を取得する (WorkerRuntime が inline worker の起動に使用)。
 bool ResolveObjectURL(const std::string& url, std::string* out_text)
 {
+    std::lock_guard<std::mutex> lock(g_object_url_mutex);
     auto it = ObjectURLs().find(url);
     if (it == ObjectURLs().end()) return false;
     out_text->assign(it->second.begin(), it->second.end());

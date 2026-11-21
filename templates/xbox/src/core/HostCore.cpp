@@ -23,6 +23,7 @@
 #include <v8-profiler.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,13 +46,19 @@ using namespace next2d;
 
 namespace {
 
+// レンダラを専用スレッドで動かすための、GL コンテキストの受け渡し (next2d_host_set_render_thread)。
+int32_t (*g_render_make_current)(void* user) = nullptr;
+void (*g_render_release_current)(void* user) = nullptr;
+void* g_render_user = nullptr;
+
 // 埋め込み側のコールバックで提示する GlesContext。
 class CallbackGlesContext final : public GlesContext {
 public:
-    explicit CallbackGlesContext(const Next2DHostConfig& c)
+    CallbackGlesContext(const Next2DHostConfig& c, bool render_thread)
         : user_(c.user)
         , swap_(c.gl_swap_buffers)
         , make_current_(c.gl_make_current)
+        , render_thread_(render_thread)
         , width_(c.width)
         , height_(c.height)
         , default_framebuffer_(c.default_framebuffer)
@@ -59,7 +66,17 @@ public:
 
     bool MakeCurrent() override
     {
+        if (render_thread_) {
+            return g_render_make_current(g_render_user) != 0;
+        }
         return make_current_ ? make_current_(user_) != 0 : true;
+    }
+
+    void ReleaseCurrent() override
+    {
+        if (render_thread_) {
+            g_render_release_current(g_render_user);
+        }
     }
 
     void SwapBuffers() override
@@ -84,6 +101,7 @@ private:
     void* user_;
     void (*swap_)(void*);
     int32_t (*make_current_)(void*);
+    bool render_thread_;
     int width_;
     int height_;
     uint32_t default_framebuffer_;
@@ -208,6 +226,11 @@ struct Next2DHost {
     void (*load_callback)(int32_t loading, void* user) = nullptr;
     void* load_callback_user = nullptr;
 
+    // レンダラ (worker) を専用スレッドで動かしているか (next2d_host_set_render_thread)
+    bool render_thread = false;
+    // レンダラのスレッドが 1 回の描画にかかった時間の最大値 (HostContext::worker_turn_ms)
+    std::atomic<int> worker_turn_ms{0};
+
     // window(global) / document / 主要 canvas へイベントを配送する (main.cpp と同じ規則)。
     void FireEvent(const char* type,
                    const std::function<void(v8::Isolate*, v8::Local<v8::Object>)>& fill)
@@ -267,11 +290,13 @@ void DestroyHost(Next2DHost* h)
         h->cpu_profiler->Dispose();
         h->cpu_profiler = nullptr;
     }
-    // v8::Global を保持するものは Isolate 破棄前に明示解放する (main.cpp と同じ順序)。
-    decodequeue::Shutdown();
+    // v8::Global を保持するものは Isolate 破棄前に明示解放する。
+    // worker を先に止める: 専用スレッドの worker は、自分の isolate に属するものを自分のスレッドで
+    // 手放してから終わる (レンダラのスレッドは GL のコンテキストも手放す)。
     if (h->workers) {
         h->workers->Shutdown();
     }
+    decodequeue::Shutdown();
     if (h->event_loop) {
         h->event_loop->Shutdown();
     }
@@ -333,10 +358,30 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
     }
     h->host.storage_saved = config->storage_saved;
     h->host.storage_saved_user = config->user;
-    h->gles = std::make_unique<CallbackGlesContext>(*config);
+    // レンダラを専用スレッドで動かす構成 (next2d_host_set_render_thread)。
+    // 環境変数 NEXT2D_HOST_NO_RENDER_THREAD を設定すると使わない (比較と切り分けのため)。
+    h->render_thread = g_render_make_current && g_render_release_current
+        && std::getenv("NEXT2D_HOST_NO_RENDER_THREAD") == nullptr;
+    h->host.threaded_workers = h->render_thread;
+    h->host.worker_turn_ms = &h->worker_turn_ms;
+    h->gles = std::make_unique<CallbackGlesContext>(*config, h->render_thread);
     h->host.gles = h->gles.get();
+    if (h->render_thread) {
+        // GL の関数は解決し終えた。以後メインのスレッドは GL を呼ばないので、コンテキストを
+        // 手放す。レンダラのスレッドが、WebGL2 のコンテキストを作るときに自分のものにする。
+        g_render_release_current(g_render_user);
+        std::cerr << "[HostCore] render thread: on" << std::endl;
+    }
 
     if (!g_process_initialized) {
+        if (h->render_thread) {
+            // isolate を複数持つ構成では、若い世代の GC を並列に行う機能 (parallel scavenge) を止める。
+            // 有効のままだと、worker の isolate で GC の管理情報 (WeakMap の書き込み記録) が壊れて
+            // 異常終了することがある (PC 環境で 6〜7 回に 1 回ほど再現し、止めると再現しなくなった。
+            // GC の他の並列処理だけを止めても再現した)。若い世代の GC は生き残ったオブジェクトの量に
+            // 比例する短い処理なので、1 スレッドで行っても停止時間への影響は小さい。
+            v8::V8::SetFlagsFromString("--no-parallel-scavenge");
+        }
         V8Runtime::InitializeProcess(nullptr);
         g_process_initialized = true;
     }
@@ -422,6 +467,14 @@ int32_t next2d_host_frame(Next2DHost* h)
         PumpAudioEvents(runtime.isolate());
         decodequeue::Pump();
 
+        // レンダラが別のスレッドで動いているときは、その返事 (描画の完了など) をフレームの最初に
+        // 受け取る。メインは返事を受けてから次の描画を送るので、rAF より後で受け取ると、
+        // レンダラが間に合っていても 1 フレームおきにしか描画を送れない。
+        if (h->render_thread) {
+            h->workers->Pump(now);
+            runtime.PumpMicrotasks();
+        }
+
         event_loop.PumpTimers();
         runtime.PumpMicrotasks();
         const double t_tasks = event_loop.Now();
@@ -431,6 +484,7 @@ int32_t next2d_host_frame(Next2DHost* h)
         const double t_js = event_loop.Now();
 
         // レンダラ worker がここで WebGL2 コマンドを発行する
+        // (専用スレッドの構成では、worker からのメッセージを受け取るだけ)
         h->workers->Pump(now);
         const double t_worker = event_loop.Now();
 
@@ -457,7 +511,8 @@ int32_t next2d_host_frame(Next2DHost* h)
         static const bool perf = std::getenv("NEXT2D_HOST_PERF") != nullptr;
         if (perf) {
             // worker の時間のうち、WebGL2 のメソッド (GL の呼び出し) にかかった分。残りはレンダラの JS
-            const std::string gl = TakeWebGL2PerfSummary();
+            // (専用スレッドの構成では、レンダラのスレッドが自分で内訳を出す)
+            const std::string gl = h->render_thread ? std::string("render thread") : TakeWebGL2PerfSummary();
             if (t_worker - now > 50.0) {
                 std::cerr << "[HostCore] slow frame: tasks " << static_cast<int>(t_tasks - now)
                           << " ms, js " << static_cast<int>(t_js - t_tasks)
@@ -472,7 +527,9 @@ int32_t next2d_host_frame(Next2DHost* h)
         // 区間の中では、重いフレームが出ている間は延長し、軽いフレームが続いたら抜ける。
         // 重いフレームだけでは区間に入らない (通常の進行中に、性能の切り替えを繰り返さないため)。
         const bool scene_loading = decodequeue::SceneLoads() > 0;
-        const bool heavy_frame = t_worker - now > kHeavyFrameMs;
+        // レンダラが別のスレッドのときは、そちらの 1 回の描画にかかった時間も見る
+        const double render_ms = h->render_thread ? h->worker_turn_ms.exchange(0) : 0.0;
+        const bool heavy_frame = std::max(t_worker - now, render_ms) > kHeavyFrameMs;
         if (scene_loading || (h->loading && heavy_frame)) {
             h->quiet_frames = 0;
         } else if (h->quiet_frames < kQuietFramesToSettle) {
@@ -489,7 +546,8 @@ int32_t next2d_host_frame(Next2DHost* h)
 
     // デフォルトフレームバッファへ描いたフレームだけ提示する
     // (描いていないフレームで swap すると未定義内容が提示される)。
-    if (h->gles->needs_present) {
+    // (専用スレッドの構成では、レンダラのスレッドが描いた直後に提示する)
+    if (!h->render_thread && h->gles->needs_present) {
         h->gles->SwapBuffers();
     }
 
@@ -634,6 +692,14 @@ void next2d_host_set_load_callback(Next2DHost* h, void (*callback)(int32_t loadi
     if (callback) {
         callback(h->loading ? 1 : 0, user);   // 現在の状態を最初に知らせる
     }
+}
+
+void next2d_host_set_render_thread(int32_t (*make_current)(void* user),
+                                   void (*release_current)(void* user), void* user)
+{
+    g_render_make_current = make_current;
+    g_render_release_current = release_current;
+    g_render_user = user;
 }
 
 void next2d_host_destroy(Next2DHost* h)

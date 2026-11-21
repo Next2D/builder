@@ -11,6 +11,8 @@
  *                         アプリ (Next2D) の読み込みとフレーム進行。
  *
  * スレッド: すべての関数を、GL コンテキストを current にした同一スレッドから呼ぶこと。
+ * next2d_host_set_render_thread を使う構成では、GL のコンテキストはコアが作る描画用の
+ * スレッドへ移る (その関数の説明を参照)。
  */
 #ifndef NEXT2D_HOST_CORE_H_
 #define NEXT2D_HOST_CORE_H_
@@ -143,6 +145,23 @@ NEXT2D_HOST_CORE_API int32_t next2d_host_register_font(
  * 起動直後は loading = 1 から始まる。 */
 NEXT2D_HOST_CORE_API void next2d_host_set_load_callback(
     Next2DHost* host, void (*callback)(int32_t loading, void* user), void* user);
+
+/* 描画 (アプリのレンダラ) を、コアが作る専用のスレッドで動かす (不要なら呼ばなくてよい)。
+ * アプリの処理と描画が別々のスレッドで同時に進むので、CPU のコアが複数ある環境で 1 フレームに
+ * 使える時間が増える。next2d_host_create の前に呼ぶこと。
+ *
+ * この構成では GL のコンテキストを 1 つのスレッドから別のスレッドへ移すので、そのための
+ * 関数を渡す:
+ *   make_current    … 呼び出したスレッドでコンテキストを current にする。成功時に 0 以外を返す
+ *   release_current … 呼び出したスレッドでの current を外す
+ * next2d_host_create は、GL の関数を解決したあと release_current を呼ぶ (呼び出したスレッドから)。
+ * 以後、描画用のスレッドが make_current を呼び、GL の呼び出しと提示 (gl_swap_buffers) は
+ * すべてそのスレッドから行う。next2d_host_destroy は描画用のスレッドの終了を待ち、その
+ * スレッドは終了時に release_current を呼ぶ。next2d_host_create を呼ぶスレッドは、create の
+ * 後は GL を呼ばないこと。
+ * NULL を渡すと元に戻る (描画も next2d_host_frame を呼んだスレッドで行う)。 */
+NEXT2D_HOST_CORE_API void next2d_host_set_render_thread(
+    int32_t (*make_current)(void* user), void (*release_current)(void* user), void* user);
 
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);

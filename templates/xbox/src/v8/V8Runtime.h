@@ -41,6 +41,15 @@ public:
     // 保留中のフォアグラウンドタスク(V8 プラットフォーム)を処理する
     void PumpPlatformTasks();
 
+    // --- worker を専用スレッドの別 isolate で動かす構成のための窓口 ---
+    // すべての isolate で共有する ArrayBuffer の allocator (プロセスの最後まで残す)。
+    static v8::ArrayBuffer::Allocator* SharedArrayBufferAllocator();
+    // worker 用の isolate を作る (メインと同じ設定。Context は呼び出し側が作る)。
+    // 作ったスレッドで使い、同じスレッドで Dispose すること。
+    static v8::Isolate* NewWorkerIsolate(HostContext* host);
+    // isolate のフォアグラウンドタスクを処理する (その isolate を動かしているスレッドから呼ぶ)。
+    static void PumpPlatformTasksFor(v8::Isolate* isolate);
+
 private:
     // ESM 解決
     v8::MaybeLocal<v8::Module> LoadModule(const std::string& path, const std::string& referrer_dir);

@@ -50,6 +50,9 @@ public:
     // 保留タスクが残っているか (終了判定用)
     bool HasPendingWork() const;
 
+    // 次に期限の来るタイマーまでの時間 (ミリ秒、期限を過ぎていれば 0)。タイマーが無ければ負の値。
+    double NextTimerDelayMs() const;
+
     // 診断用: 登録中の rAF コールバック数 / タイマー数
     size_t PendingAnimationFrameCount() const { return raf_callbacks_.size(); }
     size_t PendingTimerCount() const { return timers_.size(); }

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -390,14 +391,31 @@ inline void FlattenArc(std::vector<Point>& out, const Mat& m,
 }
 
 // clearRect: 矩形を透明で塗りつぶす (クリップ非適用、Canvas 仕様どおり全消去)。
+// 範囲を surface の中に切り詰めてから、行ごとにまとめて消す。1 ピクセルごとに範囲を判定して
+// 4 バイトずつ書くと、キャンバス全体を消す呼び出し (player がキャンバスを使い回すたびに行う) で
+// 画像 1 枚分の時間がかかる。消える範囲は、切り詰める前と同じ
+// (x, y を 0 方向へ丸めた位置から、x + w, y + h 未満の整数まで)。
 inline void ClearRect(Surface& s, double x, double y, double w, double h)
 {
-    for (int yy = static_cast<int>(y); yy < y + h; ++yy)
-        for (int xx = static_cast<int>(x); xx < x + w; ++xx)
-            if (xx >= 0 && yy >= 0 && xx < s.width && yy < s.height) {
-                size_t i = (static_cast<size_t>(yy) * s.width + xx) * 4;
-                s.pixels[i] = s.pixels[i+1] = s.pixels[i+2] = s.pixels[i+3] = 0;
-            }
+    // 有限でない値は何もしない (HTML の仕様どおり)
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h) ||
+        s.width <= 0 || s.height <= 0) {
+        return;
+    }
+    // 開始位置は 0 方向への丸め、終了位置は x + w (y + h) 以上の最小の整数
+    const double x_begin = std::trunc(x), y_begin = std::trunc(y);
+    const double x_end = std::ceil(x + w), y_end = std::ceil(y + h);
+    const int x0 = static_cast<int>(std::clamp(x_begin, 0.0, static_cast<double>(s.width)));
+    const int y0 = static_cast<int>(std::clamp(y_begin, 0.0, static_cast<double>(s.height)));
+    const int x1 = static_cast<int>(std::clamp(x_end, 0.0, static_cast<double>(s.width)));
+    const int y1 = static_cast<int>(std::clamp(y_end, 0.0, static_cast<double>(s.height)));
+    if (x1 <= x0 || y1 <= y0) {
+        return;
+    }
+    const size_t row_bytes = static_cast<size_t>(x1 - x0) * 4;
+    for (int yy = y0; yy < y1; ++yy) {
+        std::memset(&s.pixels[(static_cast<size_t>(yy) * s.width + x0) * 4], 0, row_bytes);
+    }
 }
 
 } // namespace next2d::raster

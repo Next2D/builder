@@ -952,8 +952,12 @@ void WorkerInstance::ThreadLoop()
 #if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
         // このスレッドが GL のコンテキストを持っている (レンダラ) なら、描いたフレームを提示する
         const bool renderer = WebGL2CurrentOnThisThread();
+        double present_ms = 0.0;   // 提示にかかった時間 (垂直同期の待ちを含む)
         if (renderer && thread_host_->gles && thread_host_->gles->needs_present) {
+            CaptureWebGL2Frame(thread_host_->gles);
+            const double present_started_ms = loop_->Now();
             thread_host_->gles->SwapBuffers();
+            present_ms = loop_->Now() - present_started_ms;
         }
 #else
         const bool renderer = false;
@@ -977,6 +981,36 @@ void WorkerInstance::ThreadLoop()
             const std::string gl = TakeWebGL2PerfSummary();
             if (turn_ms > 50) {
                 std::cerr << "[Worker] slow render turn: " << turn_ms << " ms (" << gl << ")" << std::endl;
+            }
+            // 2 秒ごとに、描画の回数と 1 回の時間 (平均 / 最大)、画面の更新 1 回分 (16 ms) を超えた回数を出す。
+            // 時間は提示 (垂直同期の待ち) を除いた、描画の処理そのものの時間。
+            static double stat_started_ms = started_ms;
+            static int stat_turns = 0;
+            static int stat_over = 0;
+            static double stat_total_ms = 0.0;
+            static double stat_max_ms = 0.0;
+            if (had_messages) {
+                const double exact_ms = loop_->Now() - started_ms - present_ms;
+                ++stat_turns;
+                stat_total_ms += exact_ms;
+                stat_max_ms = std::max(stat_max_ms, exact_ms);
+                if (exact_ms > 16.0) {
+                    ++stat_over;
+                }
+            }
+            if (loop_->Now() - stat_started_ms >= 2000.0) {
+                if (stat_turns > 0) {
+                    char line[160];
+                    std::snprintf(line, sizeof(line),
+                        "[Worker] %d render turns / 2 s: work avg %.1f ms, max %.0f ms, over 16 ms: %d",
+                        stat_turns, stat_total_ms / stat_turns, stat_max_ms, stat_over);
+                    std::cerr << line << std::endl;
+                }
+                stat_started_ms = loop_->Now();
+                stat_turns = 0;
+                stat_over = 0;
+                stat_total_ms = 0.0;
+                stat_max_ms = 0.0;
             }
         }
 #else

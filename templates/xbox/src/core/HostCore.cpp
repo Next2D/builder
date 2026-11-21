@@ -561,6 +561,7 @@ int32_t next2d_host_frame(Next2DHost* h)
     // (描いていないフレームで swap すると未定義内容が提示される)。
     // (専用スレッドの構成では、レンダラのスレッドが描いた直後に提示する)
     if (!h->render_thread && h->gles->needs_present) {
+        CaptureWebGL2Frame(h->gles.get());
         h->gles->SwapBuffers();
     }
 

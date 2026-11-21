@@ -37,6 +37,11 @@ v8::Local<v8::Object> CreateWebGL2Context(v8::Isolate* isolate, HostContext* hos
 // (GL のコンテキストを current にした) かどうか。
 bool WebGL2CurrentOnThisThread();
 
+// 開発用: 環境変数 NEXT2D_HOST_CAPTURE_DIR の指定時、提示する直前の画面を BMP で書き出す。
+// GL のコンテキストを持つスレッドから、提示 (SwapBuffers) の直前に呼ぶ。
+class GlesContext;
+void CaptureWebGL2Frame(GlesContext* gles);
+
 // 呼び出したスレッドが GL のコンテキストを current にしていれば外す (スレッドの終了時に呼ぶ)。
 void ReleaseWebGL2Thread(HostContext* host);
 

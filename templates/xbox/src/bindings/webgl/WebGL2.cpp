@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -1719,6 +1720,100 @@ thread_local bool t_gl_current = false;
 bool WebGL2CurrentOnThisThread()
 {
     return t_gl_current;
+}
+
+// 開発用: 環境変数 NEXT2D_HOST_CAPTURE_DIR を設定すると、提示する直前のデフォルトフレームバッファを
+// そのディレクトリへ BMP で書き出す (既定は 1 秒に 1 枚まで。NEXT2D_HOST_CAPTURE_MS で間隔を変えられる)。
+// ファイル名は cap-<起動からのミリ秒>.bmp。画面を直接見られない環境で、描画結果と操作の自動再生の
+// 当たり具合を確かめるためのもの。
+void CaptureWebGL2Frame(GlesContext* gles)
+{
+    static const char* dir = std::getenv("NEXT2D_HOST_CAPTURE_DIR");
+    if (!dir || !*dir || !gles) {
+        return;
+    }
+    static const double interval_ms = [] {
+        const char* value = std::getenv("NEXT2D_HOST_CAPTURE_MS");
+        const double ms = value ? std::atof(value) : 0.0;
+        return ms > 0.0 ? ms : 1000.0;
+    }();
+    static const auto started = std::chrono::steady_clock::now();
+    static double last_ms = -1e9;
+    const double now_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (now_ms - last_ms < interval_ms) {
+        return;
+    }
+    last_ms = now_ms;
+
+    const int w = gles->width();
+    const int h = gles->height();
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+    GLint previous = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, gles->default_framebuffer());
+    // アプリが設定した読み出しの状態 (読み出し先のバッファ、行の詰め方) を外してから読み、元に戻す。
+    // 読み出し先のバッファが束縛されたままだと、glReadPixels はメモリではなくそのバッファへ書く。
+    GLint pack_buffer = 0;
+    GLint pack_alignment = 4;
+    GLint pack_row_length = 0;
+    GLint pack_skip_rows = 0;
+    GLint pack_skip_pixels = 0;
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &pack_row_length);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &pack_skip_rows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &pack_skip_pixels);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
+    glPixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous));
+
+    // 24 bit の BMP (下の行から並ぶので、GL の原点 (左下) のまま書ける)
+    const uint32_t row = (static_cast<uint32_t>(w) * 3 + 3) & ~3u;
+    const uint32_t image_size = row * static_cast<uint32_t>(h);
+    uint8_t header[54] = {};
+    const auto put32 = [&header](int at, uint32_t v) {
+        header[at] = v & 0xFF; header[at + 1] = (v >> 8) & 0xFF;
+        header[at + 2] = (v >> 16) & 0xFF; header[at + 3] = (v >> 24) & 0xFF;
+    };
+    header[0] = 'B'; header[1] = 'M';
+    put32(2, 54 + image_size);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, static_cast<uint32_t>(w));
+    put32(22, static_cast<uint32_t>(h));
+    header[26] = 1;
+    header[28] = 24;
+    put32(34, image_size);
+
+    std::vector<uint8_t> out(image_size);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* src = rgba.data() + static_cast<size_t>(y) * w * 4;
+        uint8_t* dst = out.data() + static_cast<size_t>(y) * row;
+        for (int x = 0; x < w; ++x) {
+            dst[x * 3 + 0] = src[x * 4 + 2];
+            dst[x * 3 + 1] = src[x * 4 + 1];
+            dst[x * 3 + 2] = src[x * 4 + 0];
+        }
+    }
+    const std::string file = std::string(dir) + "/cap-" + std::to_string(static_cast<long long>(now_ms)) + ".bmp";
+    std::ofstream ofs(file, std::ios::binary);
+    if (ofs) {
+        ofs.write(reinterpret_cast<const char*>(header), sizeof(header));
+        ofs.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    }
 }
 
 void ReleaseWebGL2Thread(HostContext* host)

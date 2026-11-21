@@ -1,32 +1,34 @@
 {
-    "compilerOptions": {
-      "target": "ES2020",
-      "useDefineForClassFields": true,
-      "module": "ESNext",
-      "lib": ["ES2020", "DOM", "DOM.Iterable"],
-      "skipLibCheck": true,
-  
-      /* Bundler mode */
-      "moduleResolution": "Bundler",
-      "resolveJsonModule": true,
-      "strictFunctionTypes": false,
-      "esModuleInterop": true,
-      "declaration": true,
-      "isolatedModules": true,
-  
-      /* Linting */
-      "strict": true,
-      "noUnusedLocals": true,
-      "noUnusedParameters": true,
-      "noFallthroughCasesInSwitch": true,
-  
-      "rootDir": "./src",
-      "outDir": "./dist"
-    },
-    "include": [
-      "src/**/*.ts"
-    ],
-    "exclude": [
-      "node_modules/**"
-    ]
-  }
+  "compilerOptions": {
+    /* Node 22 以上で動く CLI なので ES2023 を出力する (constants.ts の RECOMMENDED_NODE_VERSION) */
+    "target": "ES2023",
+    "lib": ["ES2023"],
+
+    /* Node の ESM として解決する (package.json の "type": "module" に従い、相対 import は .js 拡張子必須) */
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "declaration": true,
+
+    /* Linting */
+    "strict": true,
+    "strictFunctionTypes": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    /* TS7 では types の既定値が [] のため、Node の型を明示する */
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}

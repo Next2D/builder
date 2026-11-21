@@ -230,6 +230,8 @@ struct Next2DHost {
     bool render_thread = false;
     // レンダラのスレッドが 1 回の描画にかかった時間の最大値 (HostContext::worker_turn_ms)
     std::atomic<int> worker_turn_ms{0};
+    // レンダラのスレッドが描画を始めた時刻 (HostContext::worker_turn_started_ms)
+    std::atomic<long long> worker_turn_started_ms{0};
 
     // window(global) / document / 主要 canvas へイベントを配送する (main.cpp と同じ規則)。
     void FireEvent(const char* type,
@@ -364,6 +366,7 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
         && std::getenv("NEXT2D_HOST_NO_RENDER_THREAD") == nullptr;
     h->host.threaded_workers = h->render_thread;
     h->host.worker_turn_ms = &h->worker_turn_ms;
+    h->host.worker_turn_started_ms = &h->worker_turn_started_ms;
     h->gles = std::make_unique<CallbackGlesContext>(*config, h->render_thread);
     h->host.gles = h->gles.get();
     if (h->render_thread) {
@@ -528,7 +531,17 @@ int32_t next2d_host_frame(Next2DHost* h)
         // 重いフレームだけでは区間に入らない (通常の進行中に、性能の切り替えを繰り返さないため)。
         const bool scene_loading = decodequeue::SceneLoads() > 0;
         // レンダラが別のスレッドのときは、そちらの 1 回の描画にかかった時間も見る
-        const double render_ms = h->render_thread ? h->worker_turn_ms.exchange(0) : 0.0;
+        // (終わった描画の時間と、いま進行中の描画が始まってからの時間の長い方)
+        double render_ms = 0.0;
+        if (h->render_thread) {
+            render_ms = h->worker_turn_ms.exchange(0);
+            const long long started = h->worker_turn_started_ms.load();
+            if (started != 0) {
+                const long long current = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                render_ms = std::max(render_ms, static_cast<double>(current - started));
+            }
+        }
         const bool heavy_frame = std::max(t_worker - now, render_ms) > kHeavyFrameMs;
         if (scene_loading || (h->loading && heavy_frame)) {
             h->quiet_frames = 0;

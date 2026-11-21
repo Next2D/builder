@@ -72,6 +72,11 @@ public:
     // (ミリ秒)。メインのスレッドが読み取って 0 に戻す。threaded_workers のときだけ使う。
     std::atomic<int>* worker_turn_ms = nullptr;
 
+    // レンダラのスレッドが描画を始めた時刻 (std::chrono::steady_clock のミリ秒)。描画していない
+    // ときは 0。長い描画の途中でも、メインのスレッドから「いま描画に何ミリ秒かかっているか」が
+    // 分かるようにするためのもの。threaded_workers のときだけ使う。
+    std::atomic<long long>* worker_turn_started_ms = nullptr;
+
     static HostContext* From(v8::Isolate* isolate)
     {
         return static_cast<HostContext*>(isolate->GetData(kHostContextSlot));

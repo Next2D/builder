@@ -843,6 +843,7 @@ void WorkerInstance::ThreadMain()
     thread_host_->storage_saved_user = parent_host->storage_saved_user;
     thread_host_->threaded_workers = true;
     thread_host_->worker_turn_ms = parent_host->worker_turn_ms;
+    thread_host_->worker_turn_started_ms = parent_host->worker_turn_started_ms;
 
     v8::Isolate* isolate = V8Runtime::NewWorkerIsolate(thread_host_.get());
     isolate_ = isolate;
@@ -926,6 +927,16 @@ void WorkerInstance::ThreadLoop()
         if (run_raf) {
             next_raf_ms = started_ms + kFrameMs;
         }
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        // レンダラが描画を始めたことを知らせる (長い描画の途中でも、メインから重さが分かるように)
+        const bool announce = had_messages && WebGL2CurrentOnThisThread()
+            && thread_host_->worker_turn_started_ms;
+        if (announce) {
+            thread_host_->worker_turn_started_ms->store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count());
+        }
+#endif
         RunWorkerTurn(batch, started_ms, run_raf);
 
         // デコードの完了 (この worker が依頼した分)、入れ子の worker、V8 のタスク
@@ -948,6 +959,11 @@ void WorkerInstance::ThreadLoop()
         const bool renderer = false;
 #endif
 
+#if defined(NEXT2D_ENABLE_WEBGL2) && NEXT2D_ENABLE_WEBGL2
+        if (announce) {
+            thread_host_->worker_turn_started_ms->store(0);
+        }
+#endif
         const int turn_ms = static_cast<int>(loop_->Now() - started_ms);
         if (renderer && had_messages && thread_host_->worker_turn_ms) {
             std::atomic<int>& slot = *thread_host_->worker_turn_ms;

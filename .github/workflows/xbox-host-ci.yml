@@ -152,6 +152,17 @@ jobs:
           if errorlevel 1 exit /b 1
           audio_mixer_test.exe
 
+      - name: Build & run shape accelerator tests
+        shell: cmd
+        working-directory: templates/xbox
+        run: |
+          rem 経路と塗りのメッシュの計算が、Player の JavaScript と同じ結果になることを確かめる。
+          cl /nologo /utf-8 /std:c++17 /EHsc /O2 /W3 /Isrc ^
+             testsshape_accelerator_test.cpp ^
+             /Fe:shape_accelerator_test.exe
+          if errorlevel 1 exit /b 1
+          shape_accelerator_test.exe
+
   gamecore-api-audit:
     name: Game Core API partition audit (WINAPI_FAMILY_GAMES)
     runs-on: windows-2022

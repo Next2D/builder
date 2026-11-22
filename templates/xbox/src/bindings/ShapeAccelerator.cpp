@@ -19,6 +19,14 @@
 //       経路は空になる。
 //   reset()
 //       経路を空にする。
+//
+// __next2dShape.webgpu には、WebGPU 版の player と同じ規則の実装を置く (経路の規則とメッシュの
+// 形式が WebGL 版と違う)。塗りは経路を消さず、reset() を呼ぶまで何度でも取り出せる:
+//   path(commands, index, pixelScale) -> number
+//   fillSize() -> number            メッシュの要素数。経路が 1 本も無ければ -1
+//   fill(target) -> number          メッシュ (頂点あたり 4 要素) を target の先頭から書き、頂点数を返す
+//   exportPath(stroke) -> Float64Array
+//   reset()
 #include "Bindings.h"
 
 #include "ShapeAcceleratorCore.h"
@@ -121,6 +129,81 @@ void Reset(const v8::FunctionCallbackInfo<v8::Value>&)
     t_path.vertices.clear();
 }
 
+// ---- WebGPU 版 ----------------------------------------------------------------
+thread_local shape::gpu::PathState t_gpu_path;
+
+void GpuPath(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    float* commands = nullptr;
+    size_t length = 0;
+    if (args.Length() < 3 || !GetFloat32(args[0], &commands, &length)) {
+        args.GetReturnValue().Set(-1);
+        return;
+    }
+    const size_t index = static_cast<size_t>(NumberArg(args, 1));
+    const double pixel_scale = NumberArg(args, 2);
+    args.GetReturnValue().Set(static_cast<double>(
+        shape::gpu::FeedPath(t_gpu_path, commands, length, index, pixel_scale)));
+}
+
+void GpuFillSize(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    if (!shape::gpu::HasFillPath(t_gpu_path)) {
+        args.GetReturnValue().Set(-1);
+        return;
+    }
+    args.GetReturnValue().Set(static_cast<double>(shape::gpu::FillSize(t_gpu_path)));
+}
+
+void GpuFill(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    float* target = nullptr;
+    size_t target_length = 0;
+    if (args.Length() < 1 || !GetFloat32(args[0], &target, &target_length)) {
+        args.GetReturnValue().Set(0);
+        return;
+    }
+    args.GetReturnValue().Set(static_cast<double>(
+        shape::gpu::FillMesh(t_gpu_path, target, target_length)));
+}
+
+void GpuExportPath(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    v8::Isolate* isolate = args.GetIsolate();
+    const shape::gpu::PathState& s = t_gpu_path;
+    const bool stroke = args.Length() > 0 && args[0]->BooleanValue(isolate);
+    const bool uses_current = shape::gpu::UsesCurrent(s, stroke);
+
+    size_t total = 1;
+    for (const std::vector<double>& path : s.vertices) {
+        total += 1 + path.size();
+    }
+    if (uses_current) {
+        total += 1 + s.current.size();
+    }
+    v8::Local<v8::ArrayBuffer> buffer = v8::ArrayBuffer::New(isolate, total * sizeof(double));
+    double* out = static_cast<double*>(buffer->Data());
+    size_t at = 0;
+    out[at++] = static_cast<double>(s.vertices.size() + (uses_current ? 1 : 0));
+    auto write = [&](const std::vector<double>& path) {
+        out[at++] = static_cast<double>(path.size());
+        std::memcpy(out + at, path.data(), path.size() * sizeof(double));
+        at += path.size();
+    };
+    for (const std::vector<double>& path : s.vertices) {
+        write(path);
+    }
+    if (uses_current) {
+        write(s.current);
+    }
+    args.GetReturnValue().Set(v8::Float64Array::New(buffer, 0, total));
+}
+
+void GpuReset(const v8::FunctionCallbackInfo<v8::Value>&)
+{
+    shape::gpu::Reset(t_gpu_path);
+}
+
 } // namespace
 
 void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global)
@@ -132,6 +215,15 @@ void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global)
     v8util::SetMethod(isolate, object, "fill", Fill);
     v8util::SetMethod(isolate, object, "exportPath", ExportPath);
     v8util::SetMethod(isolate, object, "reset", Reset);
+
+    v8::Local<v8::Object> gpu = v8::Object::New(isolate);
+    v8util::SetMethod(isolate, gpu, "path", GpuPath);
+    v8util::SetMethod(isolate, gpu, "fillSize", GpuFillSize);
+    v8util::SetMethod(isolate, gpu, "fill", GpuFill);
+    v8util::SetMethod(isolate, gpu, "exportPath", GpuExportPath);
+    v8util::SetMethod(isolate, gpu, "reset", GpuReset);
+    object->Set(context, v8util::Str(isolate, "webgpu"), gpu).Check();
+
     global->Set(context, v8util::Str(isolate, "__next2dShape"), object).Check();
 }
 

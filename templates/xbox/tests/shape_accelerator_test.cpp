@@ -1,13 +1,16 @@
 // 図形の計算 (src/bindings/ShapeAcceleratorCore.h) のテスト。
-// 「経路の組み立て」と「塗りのメッシュの生成」が、Next2D Player (WebGL) の JavaScript と
-// 1 ビットも違わない結果を返すことを確かめる。V8 にも OS にも依存しない。
+// 「経路の組み立て」と「塗りのメッシュの生成」が、Next2D Player の JavaScript と 1 ビットも
+// 違わない結果を返すことを確かめる (WebGL 版の規則と WebGPU 版の規則の両方)。
+// V8 にも OS にも依存しない。
 //
 // ビルド (templates/xbox で):
 //   cl /nologo /utf-8 /std:c++17 /EHsc /W3 /Isrc tests\shape_accelerator_test.cpp /Fe:shape_accelerator_test.exe
 //   c++ -std=c++17 -Wall -Wextra -O1 -Isrc -o shape_accelerator_test tests/shape_accelerator_test.cpp
 #include "../src/bindings/ShapeAcceleratorCore.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 using namespace next2d::shape;
@@ -221,14 +224,19 @@ static const Reference kReferences[] = {
     { 179u, 0x5dcd5634u, 29427u, 1731u, 0x37291631u },
 };
 
-static uint32_t Fnv(const float* data, size_t length)
+static uint32_t FnvBytes(const void* data, size_t size)
 {
-    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data);
+    const unsigned char* bytes = static_cast<const unsigned char*>(data);
     uint32_t hash = 0x811c9dc5u;
-    for (size_t i = 0; i < length * sizeof(float); ++i) {
+    for (size_t i = 0; i < size; ++i) {
         hash = (hash ^ bytes[i]) * 0x01000193u;
     }
     return hash;
+}
+
+static uint32_t Fnv(const float* data, size_t length)
+{
+    return FnvBytes(data, length * sizeof(float));
 }
 
 struct Random {
@@ -249,48 +257,62 @@ static float Coord(Random& random, int mode)
     return static_cast<float>((static_cast<double>(random.Next() % 64001u) - 32000) / 32);
 }
 
-static void TestAgainstJavaScript()
+// i 番目の入力 (描画命令の並び)
+static std::vector<float> MakeCommands(size_t i)
+{
+    Random random { (0x9e3779b9u ^ (static_cast<uint32_t>(i) * 0x85ebca6bu)) | 1u };
+    const int mode = static_cast<int>(i % 3);
+
+    // C++ は引数を評価する順序を決めていないので、乱数は 1 つずつ取り出して並べる
+    std::vector<float> commands;
+    auto coords = [&](int count) {
+        for (int n = 0; n < count; ++n) commands.push_back(Coord(random, mode));
+    };
+    commands.push_back(0);
+    coords(2);
+    const uint32_t count = 4 + random.Next() % 40u;
+    for (uint32_t n = 0; n < count; ++n) {
+        const uint32_t op = random.Next() % 10u;
+        if (op == 0) { commands.push_back(0); coords(2); }
+        else if (op <= 3) { commands.push_back(2); coords(2); }
+        else if (op <= 5) { commands.push_back(1); coords(4); }
+        else if (op <= 7) { commands.push_back(3); coords(6); }
+        else if (op == 8) {
+            commands.push_back(4);
+            coords(2);
+            commands.push_back(static_cast<float>((random.Next() % 1600u + 1) / 16.0));
+        }
+        else { commands.push_back(12); }
+    }
+    return commands;
+}
+
+// i 番目の描画行列 (JavaScript では 32 ビットの配列に入っている)
+static void MakeMatrix(size_t i, float* m)
 {
     const double scales[] = { 0.03125, 0.25, 1, 2.5, 8, 40 };
+    const double s = scales[i % 6];
+    const float matrix[9] = { static_cast<float>(s), 0, 0, 0, static_cast<float>(s * 0.75), 0, 100.5f, -20.25f, 1 };
+    std::memcpy(m, matrix, sizeof(matrix));
+    if (i % 4 == 3) {
+        m[0] = static_cast<float>(s * 0.8);
+        m[1] = static_cast<float>(s * 0.6);
+        m[3] = static_cast<float>(-s * 0.6);
+        m[4] = static_cast<float>(s * 0.8);
+    }
+}
+
+static void TestAgainstJavaScript()
+{
     const size_t cases = sizeof(kReferences) / sizeof(kReferences[0]);
     for (size_t i = 0; i < cases; ++i) {
         const Reference& reference = kReferences[i];
-        Random random { (0x9e3779b9u ^ (static_cast<uint32_t>(i) * 0x85ebca6bu)) | 1u };
-        const int mode = static_cast<int>(i % 3);
-
-        // C++ は引数を評価する順序を決めていないので、乱数は 1 つずつ変数に受けてから並べる
-        std::vector<float> commands;
-        auto coords = [&](int count) {
-            for (int n = 0; n < count; ++n) commands.push_back(Coord(random, mode));
-        };
-        commands.push_back(0);
-        coords(2);
-        const uint32_t count = 4 + random.Next() % 40u;
-        for (uint32_t n = 0; n < count; ++n) {
-            const uint32_t op = random.Next() % 10u;
-            if (op == 0) { commands.push_back(0); coords(2); }
-            else if (op <= 3) { commands.push_back(2); coords(2); }
-            else if (op <= 5) { commands.push_back(1); coords(4); }
-            else if (op <= 7) { commands.push_back(3); coords(6); }
-            else if (op == 8) {
-                commands.push_back(4);
-                coords(2);
-                commands.push_back(static_cast<float>((random.Next() % 1600u + 1) / 16.0));
-            }
-            else { commands.push_back(12); }
-        }
+        const std::vector<float> commands = MakeCommands(i);
         CHECK(commands.size() == reference.command_length);
         CHECK(Fnv(commands.data(), commands.size()) == reference.command_hash);
 
-        // 描画行列と色 (JavaScript では 32 ビットの配列に入っている)
-        const double s = scales[i % 6];
-        float m[9] = { static_cast<float>(s), 0, 0, 0, static_cast<float>(s * 0.75), 0, 100.5f, -20.25f, 1 };
-        if (i % 4 == 3) {
-            m[0] = static_cast<float>(s * 0.8);
-            m[1] = static_cast<float>(s * 0.6);
-            m[3] = static_cast<float>(-s * 0.6);
-            m[4] = static_cast<float>(s * 0.8);
-        }
+        float m[9];
+        MakeMatrix(i, m);
         const float color[4] = {
             static_cast<float>(static_cast<double>(i % 5) / 4), 0.5f, 1.0f,
             static_cast<float>(static_cast<double>(i % 3 + 1) / 3)
@@ -322,6 +344,201 @@ static void TestAgainstJavaScript()
     }
 }
 
+// ---- WebGPU 版の規則 ---------------------------------------------------------------
+
+// 経路: moveTo は常に新しい経路を始め、塗りは経路を消さない
+static void TestGpuPath()
+{
+    gpu::PathState state;
+    CHECK(!gpu::HasFillPath(state));
+    CHECK(gpu::FillSize(state) == 0);
+
+    const float commands[] = {
+        0, 0, 0,  2, 10, 0,               // 2 点だけの経路 (塗りでは三角形にならない)
+        0, 50, 50,  2, 50, 50,  2, 60, 50,  2, 60, 60,  12,   // 同じ点への直線は足さない。閉じると始点が加わる
+        9
+    };
+    const size_t length = sizeof(commands) / sizeof(commands[0]);
+    CHECK(gpu::FeedPath(state, commands, length, 0, 1.0) == length - 1);
+    CHECK(state.vertices.size() == 1);
+    const std::vector<double> expected = { 50, 50, 0,  60, 50, 0,  60, 60, 0,  50, 50, 0 };
+    CHECK(state.current == expected);
+    CHECK(gpu::HasFillPath(state));
+    CHECK(gpu::UsesCurrent(state, true));
+
+    // 4 点の経路から三角形 2 つ。頂点は 4 要素
+    CHECK(gpu::FillSize(state) == 2 * gpu::kTriangleSize);
+    std::vector<float> mesh(2 * gpu::kTriangleSize, -1.0f);
+    CHECK(gpu::FillMesh(state, mesh.data(), mesh.size()) == 6);
+    const float first[] = { 50, 50, 0.5f, 0.5f,  60, 50, 0.5f, 0.5f,  60, 60, 0.5f, 0.5f };
+    CHECK(std::memcmp(mesh.data(), first, sizeof(first)) == 0);
+    CHECK(mesh[12] == 50 && mesh[16] == 60 && mesh[17] == 60 && mesh[20] == 50 && mesh[21] == 50);
+
+    // 経路は残っている
+    CHECK(gpu::FillSize(state) == 2 * gpu::kTriangleSize);
+
+    // 書き込み先が足りないときは、領域の外へ書かない
+    std::vector<float> narrow(gpu::kTriangleSize + 1, -1.0f);
+    CHECK(gpu::FillMesh(state, narrow.data(), narrow.size()) == 3);
+    CHECK(narrow[gpu::kTriangleSize] == -1.0f);
+
+    gpu::Reset(state);
+    CHECK(!gpu::HasFillPath(state));
+    CHECK(state.current.empty() && state.vertices.empty());
+
+    // 2 点だけの経路が確定済みなら「経路はあるが三角形は無い」
+    gpu::PathState thin;
+    const float two[] = { 0, 0, 0,  2, 10, 0,  0, 5, 5 };
+    gpu::FeedPath(thin, two, 9, 0, 1.0);
+    CHECK(gpu::HasFillPath(thin));
+    CHECK(gpu::FillSize(thin) == 0);
+}
+
+// 曲線の三角形 (係数 0,0 / 0.5,0 / 1,1) と、制御点を飛ばした扇形の三角形
+static void TestGpuCurveMesh()
+{
+    gpu::PathState state;
+    const float commands[] = { 0, 0, 0,  2, 10, 0,  1, 20, 10, 10, 20,  2, 0, 20 };
+    gpu::FeedPath(state, commands, 14, 0, 1.0);
+    CHECK(gpu::FillSize(state) == 3 * gpu::kTriangleSize);
+    std::vector<float> mesh(3 * gpu::kTriangleSize);
+    CHECK(gpu::FillMesh(state, mesh.data(), mesh.size()) == 9);
+    const float expected[] = {
+        0, 0, 0.5f, 0.5f,   10, 0, 0.5f, 0.5f,   10, 20, 0.5f, 0.5f,   // 扇形: 次の点が制御点なので、その先を使う
+        10, 0, 0, 0,        20, 10, 0.5f, 0,     10, 20, 1, 1,          // 曲線
+        0, 0, 0.5f, 0.5f,   10, 20, 0.5f, 0.5f,  0, 20, 0.5f, 0.5f     // 扇形
+    };
+    CHECK(std::memcmp(mesh.data(), expected, sizeof(expected)) == 0);
+}
+
+// 円弧は画面上の大きさによらず分割し、終点を経路の始点に合わせる
+static void TestGpuArc()
+{
+    gpu::PathState state;
+    const float commands[] = { 0, 110, 50,  4, 50, 50, 60 };
+    gpu::FeedPath(state, commands, 7, 0, 1.0);
+    CHECK(state.current.size() > 3 + 4 * 6);
+    CHECK((state.current.size() - 3) % 6 == 0);
+    CHECK(state.current[state.current.size() - 3] == 110.0);
+    CHECK(state.current[state.current.size() - 2] == 50.0);
+    CHECK(state.current_x == 110.0 && state.current_y == 50.0);
+
+    // 拡大率を変えても、円弧の分割は変わらない
+    gpu::PathState scaled;
+    gpu::FeedPath(scaled, commands, 7, 0, 100.0);
+    CHECK(scaled.current == state.current);
+}
+
+// 期待値は、WebGPU 版の player の PathCommand と MeshFillGenerate* に同じ入力を通した結果。
+// 線に使う経路 ([本数, 要素数, x, y, 制御点か, ...] を 64 ビットで並べたもの) も比べる。
+struct GpuReference {
+    int mesh_size;          // 経路が 1 本も無ければ -1
+    uint32_t index_count;
+    uint32_t mesh_hash;
+    uint32_t stroke_length;
+    uint32_t stroke_hash;
+};
+
+static const GpuReference kGpuReferences[] = {
+    { 7776, 1944u, 0x80d1252eu, 1966u, 0x105cdf05u },
+    { 180, 45u, 0x62238325u, 60u, 0xbf3eb1c7u },
+    { 7656, 1914u, 0x967e5bdcu, 1929u, 0x4358450bu },
+    { 4968, 1242u, 0x91f8cbefu, 1271u, 0xc63b6823u },
+    { 2292, 573u, 0xb92f0e1eu, 588u, 0xe9f3bcc0u },
+    { 240, 60u, 0xce63a512u, 68u, 0x656096dbu },
+    { 1776, 444u, 0xf9055052u, 459u, 0x6f532fa6u },
+    { 5760, 1440u, 0xee7f0820u, 1469u, 0x0d7a0618u },
+    { 2556, 639u, 0x2aea01d3u, 668u, 0x6028c11du },
+    { 5184, 1296u, 0x931d6702u, 1325u, 0x685c0c04u },
+    { 600, 150u, 0x1bd2a529u, 158u, 0xebc506c7u },
+    { 2916, 729u, 0xa1ae4c02u, 744u, 0x62d97006u },
+    { 2412, 603u, 0xbbfa9d4du, 618u, 0x6cc5ead7u },
+    { 2508, 627u, 0x64b5c757u, 642u, 0x5d11b44bu },
+    { 1272, 318u, 0xd26b0be6u, 326u, 0xf4a57183u },
+    { 4524, 1131u, 0xb6b2e67eu, 1153u, 0xa1b3520au },
+    { 1464, 366u, 0x757b6bc4u, 395u, 0xbf02094fu },
+    { 3336, 834u, 0xb26b84ffu, 870u, 0x24675790u },
+    { 228, 57u, 0x01ca5c15u, 72u, 0xabf18453u },
+    { 2136, 534u, 0x6f7a1d2au, 556u, 0x4e7488a4u },
+    { 564, 141u, 0x43a25418u, 156u, 0x725f3f1bu },
+    { 1128, 282u, 0xa32445adu, 304u, 0xff59047du },
+    { 1212, 303u, 0xa9030a2bu, 332u, 0xe8741a73u },
+    { 6084, 1521u, 0x23cc09feu, 1550u, 0x6dc45debu },
+    { 7116, 1779u, 0x557ebacfu, 1808u, 0xbfdd0576u },
+    { 324, 81u, 0xc5191b5eu, 96u, 0xca709cd6u },
+    { 4860, 1215u, 0xed685be7u, 1230u, 0x57a050c5u },
+    { 2328, 582u, 0x5a18981au, 604u, 0xabb7e6aau },
+    { 1836, 459u, 0x631c2289u, 488u, 0xebfde078u },
+    { 948, 237u, 0x6f74e435u, 266u, 0xcbeaace8u },
+    { 48, 12u, 0x88097f39u, 20u, 0x03c69785u },
+    { 2928, 732u, 0xe85838adu, 754u, 0xa3d54661u },
+    { 2064, 516u, 0xa59e0492u, 531u, 0x1f6f1291u },
+    { 408, 102u, 0xd306a3fau, 117u, 0x14bd85ccu },
+    { 2016, 504u, 0xaaa97fedu, 519u, 0x5326a08au },
+    { 4992, 1248u, 0x9faca888u, 1270u, 0xcc3bb783u },
+    { 1932, 483u, 0x1f23c10eu, 505u, 0x984247c0u },
+    { 1980, 495u, 0x268df79bu, 531u, 0xcc75fab1u },
+    { 2568, 642u, 0x31763bd9u, 650u, 0xafed8984u },
+    { 5460, 1365u, 0xcefd172eu, 1387u, 0x5b0b434eu },
+    { 1740, 435u, 0x10a3fcf3u, 450u, 0x17110b28u },
+    { 684, 171u, 0xbfc8818fu, 207u, 0x5cf77008u },
+    { 1200, 300u, 0x3ccf6cf9u, 322u, 0x0afa725au },
+    { 120, 30u, 0xbbf83430u, 38u, 0xf755519fu },
+    { 2496, 624u, 0xf4163c2bu, 632u, 0x78ebbdbdu },
+    { 3252, 813u, 0x05fab496u, 842u, 0x58a55ba7u },
+    { 2460, 615u, 0x3e77903bu, 623u, 0xa1a17c17u },
+    { 8292, 2073u, 0x0453c1ddu, 2123u, 0x8873fc45u },
+};
+
+static void TestGpuAgainstJavaScript()
+{
+    const size_t cases = sizeof(kGpuReferences) / sizeof(kGpuReferences[0]);
+    for (size_t i = 0; i < cases; ++i) {
+        const GpuReference& reference = kGpuReferences[i];
+        const std::vector<float> commands = MakeCommands(i);
+        float m[9];
+        MakeMatrix(i, m);
+        const double scale_x = static_cast<double>(m[0]) * m[0] + static_cast<double>(m[1]) * m[1];
+        const double scale_y = static_cast<double>(m[3]) * m[3] + static_cast<double>(m[4]) * m[4];
+
+        gpu::PathState state;
+        CHECK(gpu::FeedPath(state, commands.data(), commands.size(), 0,
+            std::sqrt(scale_x > scale_y ? scale_x : scale_y)) == commands.size());
+
+        const int size = gpu::HasFillPath(state) ? static_cast<int>(gpu::FillSize(state)) : -1;
+        CHECK(size == reference.mesh_size);
+        if (size != reference.mesh_size) {
+            std::printf("  webgpu case %zu: mesh size %d, expected %d\n", i, size, reference.mesh_size);
+        } else if (size >= 0) {
+            std::vector<float> mesh(static_cast<size_t>(size));
+            CHECK(gpu::FillMesh(state, mesh.data(), mesh.size()) == reference.index_count);
+            const uint32_t hash = Fnv(mesh.data(), mesh.size());
+            CHECK(hash == reference.mesh_hash);
+            if (hash != reference.mesh_hash) {
+                std::printf("  webgpu case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+            }
+        }
+
+        std::vector<double> stroke;
+        const bool uses_current = gpu::UsesCurrent(state, true);
+        stroke.push_back(static_cast<double>(state.vertices.size() + (uses_current ? 1 : 0)));
+        for (const std::vector<double>& path : state.vertices) {
+            stroke.push_back(static_cast<double>(path.size()));
+            stroke.insert(stroke.end(), path.begin(), path.end());
+        }
+        if (uses_current) {
+            stroke.push_back(static_cast<double>(state.current.size()));
+            stroke.insert(stroke.end(), state.current.begin(), state.current.end());
+        }
+        CHECK(stroke.size() == reference.stroke_length);
+        const uint32_t stroke_hash = FnvBytes(stroke.data(), stroke.size() * sizeof(double));
+        CHECK(stroke_hash == reference.stroke_hash);
+        if (stroke_hash != reference.stroke_hash) {
+            std::printf("  webgpu case %zu: path hash %08x, expected %08x\n", i, stroke_hash, reference.stroke_hash);
+        }
+    }
+}
+
 int main()
 {
     TestFeedPath();
@@ -330,6 +547,10 @@ int main()
     TestCurveMesh();
     TestCubicSubdivision();
     TestAgainstJavaScript();
+    TestGpuPath();
+    TestGpuCurveMesh();
+    TestGpuArc();
+    TestGpuAgainstJavaScript();
     if (g_failed) {
         std::printf("%d check(s) failed\n", g_failed);
         return 1;

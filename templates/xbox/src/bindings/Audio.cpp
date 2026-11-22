@@ -3,6 +3,7 @@
 #include "HostContext.h"
 #include "AssetLoader.h"
 #include "EventTarget.h"
+#include "platform/AudioDecoder.h"
 #include "platform/AudioEngine.h"
 #include "platform/DecodeQueue.h"
 #include "v8/V8Util.h"
@@ -26,7 +27,8 @@ namespace {
 // HTMLAudioElement (new Audio()) の状態。JS オブジェクトの内部フィールドに保持する。
 struct AudioElementState {
     std::string src;                    // 現在の src (空 = 未設定)
-    std::shared_ptr<AudioVoice> voice;  // デコード完了後に生成
+    std::shared_ptr<AudioVoice> voice;  // 再生できる状態になったら生成
+    std::shared_ptr<PcmBuffer> pcm;     // voice が再生する音源 (duration の計算用)
     uint64_t generation = 0;            // src 変更 / load のたびに増やし、古いデコード結果を捨てる
     bool loading = false;
     bool ready = false;                 // デコード済みで再生可能
@@ -36,7 +38,22 @@ struct AudioElementState {
     bool tracked = false;               // PlayingElements に登録済み
     float volume = 1.0f;                // element.volume
     float gain = 1.0f;                  // createMediaElementSource 経由で接続した GainNode の値
-    double duration = 0.0;
+
+    // 音源の長さ (秒)。少しずつデコードしている途中は、ファイルに記録された長さがあればそれを、
+    // 無ければデコードできた分までの長さを返す (最後までデコードすると確定する)。
+    double Duration() const
+    {
+        if (!pcm || !pcm->channels || !pcm->sample_rate) {
+            return 0.0;
+        }
+        uint64_t frames = pcm->samples.size() / pcm->channels;
+        if (pcm->stream) {
+            std::lock_guard<std::mutex> lock(pcm->stream->mutex);
+            frames = pcm->stream->complete || !pcm->stream->expected_frames
+                ? pcm->stream->frames : pcm->stream->expected_frames;
+        }
+        return static_cast<double>(frames) / pcm->sample_rate;
+    }
 
     void ApplyVolume() const
     {
@@ -309,6 +326,13 @@ static void PumpAudioElements(v8::Isolate* isolate)
 
 void PumpAudioEvents(v8::Isolate* isolate)
 {
+    // 少しずつデコードしている音源の、新しくできた分を出力へ回す
+    if (HostContext* host = HostContext::From(isolate)) {
+        if (host->audio) {
+            host->audio->Pump();
+        }
+    }
+
     PumpAudioElements(isolate);
 
     auto& sources = PlayingSources();
@@ -422,8 +446,9 @@ void DecodeAudioData(const v8::FunctionCallbackInfo<v8::Value>& args)
 // 対応: src / load() / play() / pause() / paused / ended / loop / volume / duration /
 //       getAttribute・setAttribute・hasAttribute・removeAttribute("src") /
 //       loadstart・loadedmetadata・canplaythrough・ended・error イベント。
-// 近似: ファイル全体をデコードしてから再生する (逐次ストリーミングではない)。
-//       pause→play と currentTime への代入は先頭からの再生になる。
+// MP3 は少しずつ読んでデコードし、先頭ができた時点で再生できる状態にする (LoadSharedAudio)。
+// デコード済みのデータはメモリに持つ (再生位置の周りだけを持つストリーミングではない)。
+// 近似: pause→play と currentTime への代入は先頭からの再生になる。
 
 void FireElementEvent(v8::Isolate* isolate, v8::Local<v8::Object> el, const char* type)
 {
@@ -468,14 +493,18 @@ void ResetElement(const std::shared_ptr<AudioElementState>& state)
         state->voice->Stop();
     }
     state->voice.reset();
+    state->pcm.reset();
     state->loading = false;
     state->ready = false;
     state->ended = false;
-    state->duration = 0.0;
 }
 
 // ---- 音声ファイルの読み込み (Audio 要素用) ---------------------------------
 // ファイルの読み込みとデコードをバックグラウンドで行い、結果をメインスレッドで渡す。
+//   - MP3 は少しずつ読んでデコードする: 先頭 (約 1.5 秒ぶん) ができた時点で結果を渡し、
+//     続きは再生と並行してデコードする。全体を読んでデコードし終えるのを待つと、数 MB の BGM は
+//     鳴り始めるまでに数秒かかる (実機で、読み込みだけで 1.6〜3.3 秒を計測)。
+//     それ以外の形式は、これまでどおり全体をデコードしてから渡す。
 //   - メインスレッドでは読まない: 数 MB の BGM を同期で読むと、ストレージが遅い環境では
 //     その間フレームが止まる (実機で 1 回 1.6 秒を計測)。
 //   - 同じ src は 1 回だけ読む: 読み込み中に同じ src の要求が来たら結果を待ち合わせ、
@@ -487,7 +516,31 @@ struct SharedAudioLoad {
     std::shared_ptr<PcmBuffer> pcm = std::make_shared<PcmBuffer>();
     bool found = false;
     std::vector<SharedAudioCallback> waiters;
+    // 少しずつデコードしている間だけ持つ。バックグラウンドの処理 1 つだけが触る。
+    std::unique_ptr<AudioStreamDecoder> decoder;
 };
+
+// 結果を渡す前にデコードしておく量と、続きを 1 回の処理でデコードする量 (フレーム数)
+const uint64_t kStreamFirstFrames = PcmStream::kBlockFrames * 2;
+const uint64_t kStreamSliceFrames = PcmStream::kBlockFrames * 8;
+
+// 少しずつデコードしている音源の続きをデコードする。1 回の処理で一定量だけ進め、メインスレッドへ
+// 戻ってから次を依頼する (終了処理を長く待たせないため。使う側がいなくなったらそこで止める)。
+void ContinueStreamDecode(const std::shared_ptr<SharedAudioLoad>& load)
+{
+    decodequeue::Submit(
+        [load]() {
+            if (!load->decoder->DecodeSome(kStreamSliceFrames)) {
+                load->decoder.reset();
+            }
+        },
+        [load]() {
+            // 参照が load だけになった = 再生する側がもういない (メインスレッドだけが参照を増やす)
+            if (load->decoder && load->pcm.use_count() > 1) {
+                ContinueStreamDecode(load);
+            }
+        });
+}
 
 // どちらもメインスレッドからだけ触る。終了時に v8::Global を持つ callback を静的破棄の順序に
 // 巻き込まないよう、意図的に解放しない。
@@ -526,6 +579,16 @@ void LoadSharedAudio(HostContext* host, const std::string& src, SharedAudioCallb
     AssetLoader* assets = host->assets;
     decodequeue::Submit(
         [load, assets, src]() {
+            // 少しずつデコードできる形式なら、先頭だけデコードして結果を渡す
+            load->decoder = AudioStreamDecoder::Open(assets->OpenStream(src), *load->pcm);
+            if (load->decoder) {
+                load->found = true;
+                if (!load->decoder->DecodeSome(kStreamFirstFrames)) {
+                    load->decoder.reset();   // 短い音源: もう最後までデコードできた
+                }
+                return;
+            }
+
             auto bytes = assets->ReadBinary(src);
             load->found = static_cast<bool>(bytes);
             if (bytes && !AudioEngine::Decode(*bytes, *load->pcm)) {
@@ -543,6 +606,9 @@ void LoadSharedAudio(HostContext* host, const std::string& src, SharedAudioCallb
             std::vector<SharedAudioCallback> waiters = std::move(load->waiters);
             for (SharedAudioCallback& waiter : waiters) {
                 waiter(load->pcm, load->found);
+            }
+            if (load->decoder) {
+                ContinueStreamDecode(load);
             }
         });
 }
@@ -593,10 +659,8 @@ void StartElementLoad(v8::Isolate* isolate, v8::Local<v8::Object> el,
             }
 
             state->voice = host->audio->CreateVoice(pcm);
+            state->pcm = pcm;
             state->ready = true;
-            state->duration = (pcm->channels && pcm->sample_rate)
-                ? static_cast<double>(pcm->samples.size()) / pcm->channels / pcm->sample_rate
-                : 0.0;
 
             FireElementEvent(isolate, element, "loadedmetadata");
             if (generation != state->generation) {
@@ -833,7 +897,7 @@ void AudioElementConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
     self->SetNativeDataProperty(ctx, Str(isolate, "duration"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
             auto s = Get<AudioElementState>(info.This());
-            info.GetReturnValue().Set(v8::Number::New(info.GetIsolate(), s ? s->duration : 0.0));
+            info.GetReturnValue().Set(v8::Number::New(info.GetIsolate(), s ? s->Duration() : 0.0));
         }).Check();
     // currentTime: 位置の取得/シークは未対応。代入は受け付けるだけ (再生は常に先頭から)。
     self->SetNativeDataProperty(ctx, Str(isolate, "currentTime"),

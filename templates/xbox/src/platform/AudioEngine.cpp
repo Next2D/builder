@@ -62,6 +62,13 @@ void AudioVoice::Start(bool loop)
     if (!voice_) {
         return;
     }
+    if (buffer_->stream) {
+        // 少しずつ増える音源: できているブロックから順に渡す (続きは Pump で渡す)
+        next_block_ = 0;
+        voice_->Start(0);
+        Pump();
+        return;
+    }
     XAUDIO2_BUFFER buf = {};
     buf.AudioBytes = static_cast<UINT32>(buffer_->samples.size() * sizeof(float));
     buf.pAudioData = reinterpret_cast<const BYTE*>(buffer_->samples.data());
@@ -78,6 +85,59 @@ void AudioVoice::Stop()
         voice_->FlushSourceBuffers();
     }
     started_ = false;
+    next_block_ = 0;
+}
+
+// 少しずつ増える音源のブロックを、出力の待ち行列へ渡す。
+//   - 渡すのは中身が確定したブロックだけ: いっぱいになったブロックと、デコードが終わった後の
+//     最後のブロック (デコードする側が続きを書いている途中のブロックは渡さない)。
+//   - 待ち行列には数秒ぶんだけ入れておく (XAudio2 の待ち行列は 64 個まで)。
+//   - ループ再生は、最後まで渡し終えたら先頭のブロックへ戻る。
+void AudioVoice::Pump()
+{
+    if (!voice_ || !started_ || !buffer_ || !buffer_->stream) {
+        return;
+    }
+    const size_t kQueuedBlocks = 8;
+
+    uint64_t frames = 0;
+    bool complete = false;
+    {
+        std::lock_guard<std::mutex> lock(buffer_->stream->mutex);
+        frames = buffer_->stream->frames;
+        complete = buffer_->stream->complete;
+        for (size_t b = stream_blocks_.size(); b < buffer_->stream->blocks.size(); ++b) {
+            stream_blocks_.push_back(buffer_->stream->blocks[b]);
+        }
+    }
+    const size_t full_blocks = static_cast<size_t>(frames / PcmStream::kBlockFrames);
+    const size_t tail_frames = static_cast<size_t>(frames % PcmStream::kBlockFrames);
+    // 渡せるブロックの数
+    const size_t ready_blocks = full_blocks + (complete && tail_frames > 0 ? 1 : 0);
+
+    XAUDIO2_VOICE_STATE state = {};
+    voice_->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+    size_t queued = state.BuffersQueued;
+    while (queued < kQueuedBlocks) {
+        if (next_block_ >= ready_blocks) {
+            if (!complete || !looping_ || ready_blocks == 0) {
+                break;   // 続きを待つ / 最後まで渡した
+            }
+            next_block_ = 0;
+        }
+        const size_t block_frames = next_block_ < full_blocks ? PcmStream::kBlockFrames : tail_frames;
+        XAUDIO2_BUFFER buf = {};
+        buf.AudioBytes = static_cast<UINT32>(block_frames * buffer_->channels * sizeof(float));
+        buf.pAudioData = reinterpret_cast<const BYTE*>(stream_blocks_[next_block_]->data());
+        if (complete && !looping_ && next_block_ + 1 == ready_blocks) {
+            buf.Flags = XAUDIO2_END_OF_STREAM;
+        }
+        if (FAILED(voice_->SubmitSourceBuffer(&buf))) {
+            break;
+        }
+        ++next_block_;
+        ++queued;
+    }
 }
 
 bool AudioVoice::IsFinished() const
@@ -91,6 +151,19 @@ bool AudioVoice::IsFinished() const
     }
     XAUDIO2_VOICE_STATE state = {};
     voice_->GetState(&state);
+    if (buffer_ && buffer_->stream) {
+        // 少しずつ増える音源: 最後まで渡し終えて、出力も読み終えたら終了
+        uint64_t frames = 0;
+        bool complete = false;
+        {
+            std::lock_guard<std::mutex> lock(buffer_->stream->mutex);
+            frames = buffer_->stream->frames;
+            complete = buffer_->stream->complete;
+        }
+        const size_t blocks = static_cast<size_t>(
+            (frames + PcmStream::kBlockFrames - 1) / PcmStream::kBlockFrames);
+        return complete && next_block_ >= blocks && state.BuffersQueued == 0;
+    }
     return state.BuffersQueued == 0;
 }
 
@@ -216,7 +289,24 @@ bool AudioEngine::Decode(const std::vector<uint8_t>& input, PcmBuffer& out)
 
 std::shared_ptr<AudioVoice> AudioEngine::CreateVoice(std::shared_ptr<PcmBuffer> buffer)
 {
-    return std::make_shared<AudioVoice>(this, std::move(buffer));
+    const bool streamed = buffer && buffer->stream;
+    auto voice = std::make_shared<AudioVoice>(this, std::move(buffer));
+    if (streamed) {
+        stream_voices_.push_back(voice);
+    }
+    return voice;
+}
+
+void AudioEngine::Pump()
+{
+    for (size_t i = 0; i < stream_voices_.size();) {
+        if (const std::shared_ptr<AudioVoice> voice = stream_voices_[i].lock()) {
+            voice->Pump();
+            ++i;
+        } else {
+            stream_voices_.erase(stream_voices_.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    }
 }
 
 bool AudioEngine::Render(float*, int, int, int)

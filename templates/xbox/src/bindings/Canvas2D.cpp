@@ -833,7 +833,7 @@ void InstallAccessors(v8::Isolate* isolate, v8::Local<v8::Object> obj)
     // player は色文字列の数値化に読み戻しを使う (@next2d/filters の
     // $convertColorStringToNumber は `+("0x"+ctx.fillStyle.slice(1))` で解釈するため、
     // getter が "rgb(191,255,255)" 等の生文字列を返すと NaN になり、その色を使う
-    // グラデーション (スライム body 等) が黒くなる)。パース済み RGBA を hex 化して保持する。
+    // グラデーションが黒くなる)。パース済み RGBA を hex 化して保持する。
     obj->SetNativeDataProperty(ctx, Str(isolate, "fillStyle"),
         [](v8::Local<v8::Name>, const v8::PropertyCallbackInfo<v8::Value>& info) {
             info.GetReturnValue().Set(v8util::Str(info.GetIsolate(), Self(info.This())->state.fill_style_str));

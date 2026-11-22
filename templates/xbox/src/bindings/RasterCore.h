@@ -43,13 +43,89 @@ struct ClipRect {
 };
 
 // RGBA8 のピクセルバッファ。
+// 透明な (0, 0, 0, 0) の上に、RGBA8 のピクセル列を不透明度 1 で合成した結果を out へ書く
+// (各ピクセルを Blend(..., 1.0) で合成した結果と同じ)。不透明なピクセルはそのまま、透明なピクセルは 0、
+// 半透明なピクセルは透明との合成になる。out は初期化されていなくてよい。
+inline void CompositeOntoTransparent(uint8_t* out, const uint8_t* src, size_t pixel_count)
+{
+    std::memcpy(out, src, pixel_count * 4);
+    for (size_t i = 0; i < pixel_count; ++i) {
+        uint8_t* p = out + i * 4;
+        const uint8_t alpha = p[3];
+        if (alpha == 255) {
+            continue;
+        }
+        if (alpha == 0) {
+            p[0] = p[1] = p[2] = 0;
+            continue;
+        }
+        // Blend(..., 1.0) を、合成先が (0, 0, 0, 0) の場合について書いたもの
+        const double a = alpha / 255.0;
+        p[0] = static_cast<uint8_t>(p[0] * a + 0 * (1 - a));
+        p[1] = static_cast<uint8_t>(p[1] * a + 0 * (1 - a));
+        p[2] = static_cast<uint8_t>(p[2] * a + 0 * (1 - a));
+        p[3] = static_cast<uint8_t>(255 * a + 0 * (1 - a));
+    }
+}
+
+// canvas のビットマップ。読み込んだ画像を canvas へ写して読み出す、という使い方 (幅の代入、
+// 高さの代入、描画、読み出し) で、画像 1 枚につき全ピクセルの書き込みを何度も行わないために、
+// ピクセルを持たない状態を 2 つ持つ (どちらも pixels は空。幅と高さは 1 以上なので、確保済みなら
+// 空にはならない):
+//   - 何も描いていない (source が null): 全面が透明。大きさを変えた直後はこの状態で、確保しない。
+//   - 画像を写しただけ (source が非 null): 同じ大きさの画像を、何も描いていない状態へぴったり
+//     重ねた。内容は「透明の上にその画像を合成したもの」。source の指す先は、この状態の間
+//     呼び出し側が生かしておく。
+// 書き込む側は先に Ensure() を呼ぶ (ピクセルを確保して、内容を実体にする)。
 struct Surface {
     int width = 0;
     int height = 0;
     std::vector<uint8_t> pixels;
+    const uint8_t* source = nullptr;   // 写しただけの画像 (RGBA8、width x height)
 
     Surface(int w, int h)
-        : width(w), height(h), pixels(static_cast<size_t>(w) * h * 4, 0) {}
+        : width(w), height(h) {}
+
+    size_t ByteSize() const
+    {
+        return static_cast<size_t>(width) * height * 4;
+    }
+
+    // 何も描いていない (全面が透明で、ピクセルを確保していない)
+    bool Blank() const
+    {
+        return pixels.empty() && source == nullptr;
+    }
+
+    // ピクセルを確保して、内容を実体にする
+    void Ensure()
+    {
+        if (!pixels.empty()) {
+            return;
+        }
+        if (source != nullptr) {
+            const size_t bytes = ByteSize();
+            pixels.reserve(bytes);
+            // 1 行ずつ足す (全体を 0 で埋めてから上書きしない)
+            const size_t row_bytes = static_cast<size_t>(width) * 4;
+            for (int y = 0; y < height; ++y) {
+                const uint8_t* row = source + static_cast<size_t>(y) * row_bytes;
+                pixels.insert(pixels.end(), row, row + row_bytes);
+                CompositeOntoTransparent(&pixels[static_cast<size_t>(y) * row_bytes], row,
+                                         static_cast<size_t>(width));
+            }
+            source = nullptr;
+            return;
+        }
+        pixels.assign(ByteSize(), 0);
+    }
+
+    // 何も描いていない状態へ戻す
+    void Clear()
+    {
+        pixels.clear();
+        source = nullptr;
+    }
 };
 
 inline Point Apply(const Mat& m, double x, double y)
@@ -114,6 +190,7 @@ inline void Blend(Surface& s, const ClipRect& clip, int x, int y, const RGBA& co
     // 任意形状クリップ: マスクの外なら書き込まない。
     if (clip.mask && (x >= clip.mask_w || y >= clip.mask_h ||
                       (*clip.mask)[static_cast<size_t>(y) * clip.mask_w + x] == 0)) return;
+    s.Ensure();
     size_t i = (static_cast<size_t>(y) * s.width + x) * 4;
     double a = (col.a / 255.0) * alpha;
     s.pixels[i+0] = static_cast<uint8_t>(col.r * a + s.pixels[i+0] * (1 - a));
@@ -126,9 +203,20 @@ inline void Blend(Surface& s, const ClipRect& clip, int x, int y, const RGBA& co
 // 各ピクセルを Blend(..., 1.0) で合成した結果と同じだが、行ごとにまとめて処理する:
 // 不透明なピクセルの並びはそのまま写し、透明なピクセルは飛ばし、半透明のピクセルだけ合成する。
 // surface からはみ出す部分は描かない。
+// まだ何も描いていない surface へ、同じ大きさの画像をぴったり重ねる場合 (読み込んだ画像を
+// canvas へ写す、という最も多い使い方) は、surface を 0 で埋めてから写すのではなく、
+// 画像の行をそのまま並べて作る (結果は同じ。透明なピクセルは 0、半透明なピクセルは透明との合成)。
 inline void CopyImage(Surface& s, const uint8_t* src, uint32_t sw, uint32_t sh,
                       int64_t left, int64_t top)
 {
+    if (s.Blank() && left == 0 && top == 0 && s.width > 0 && s.height > 0 &&
+        sw == static_cast<uint32_t>(s.width) && sh == static_cast<uint32_t>(s.height)) {
+        s.source = src;
+        s.Ensure();
+        return;
+    }
+    s.Ensure();
+
     const int64_t x_begin = std::max<int64_t>(0, -left);
     const int64_t y_begin = std::max<int64_t>(0, -top);
     const int64_t x_end = std::min<int64_t>(sw, static_cast<int64_t>(s.width) - left);
@@ -409,9 +497,10 @@ inline void ClearRect(Surface& s, double x, double y, double w, double h)
     const int y0 = static_cast<int>(std::clamp(y_begin, 0.0, static_cast<double>(s.height)));
     const int x1 = static_cast<int>(std::clamp(x_end, 0.0, static_cast<double>(s.width)));
     const int y1 = static_cast<int>(std::clamp(y_end, 0.0, static_cast<double>(s.height)));
-    if (x1 <= x0 || y1 <= y0) {
-        return;
+    if (x1 <= x0 || y1 <= y0 || s.Blank()) {
+        return;   // 範囲が空、またはまだ何も描いていない (すでに全面が透明)
     }
+    s.Ensure();
     const size_t row_bytes = static_cast<size_t>(x1 - x0) * 4;
     for (int yy = y0; yy < y1; ++yy) {
         std::memset(&s.pixels[(static_cast<size_t>(yy) * s.width + x0) * 4], 0, row_bytes);

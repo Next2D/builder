@@ -96,6 +96,8 @@ struct Canvas2D {
     std::vector<State> stack;
     // 現在のパス開始点 (arcTo/未サブパス時の moveTo 補完用)
     double cur_x = 0.0, cur_y = 0.0;
+    // surface が画像を写しただけの状態 (Surface::source) の間、その画像のオブジェクトを生かしておく
+    v8::Global<v8::Object> source_image;
 
     Canvas2D(int w, int h) : surface(w, h) {}
 };
@@ -478,6 +480,23 @@ void DrawImage(const v8::FunctionCallbackInfo<v8::Value>& a)
         c->state.global_alpha == 1.0 && !c->state.clip.active && !c->state.clip.mask &&
         ox == std::floor(ox) && oy == std::floor(oy) &&
         std::abs(ox) < 1e9 && std::abs(oy) < 1e9) {
+        // 何も描いていない canvas へ、同じ大きさの Image 要素をぴったり重ねる場合は、ピクセルを
+        // 写さずに画像を参照するだけにする (読み込んだ画像を canvas へ写して getImageData で読み出す、
+        // という使い方で、canvas への複写を丸ごと省く)。Image 要素のピクセルは、オブジェクトが
+        // 生きている間は変わらない (src を変えても、前のデコード結果はオブジェクトと一緒に解放される)。
+        // 内容が変わりうる canvas や video は対象にしない。
+        if (c->surface.Blank() && ox == 0 && oy == 0 &&
+            sw == static_cast<uint32_t>(c->surface.width) && sh == static_cast<uint32_t>(c->surface.height) &&
+            a[0]->IsObject()) {
+            v8::Local<v8::Object> source = a[0].As<v8::Object>();
+            v8::Local<v8::Value> is_image;
+            if (source->Get(iso->GetCurrentContext(), Str(iso, "__isImageElement")).ToLocal(&is_image) &&
+                is_image->IsBoolean() && is_image.As<v8::Boolean>()->Value()) {
+                c->surface.source = src;
+                c->source_image.Reset(iso, source);
+                return;
+            }
+        }
         raster::CopyImage(c->surface, src, sw, sh, static_cast<int64_t>(ox), static_cast<int64_t>(oy));
         return;
     }
@@ -505,12 +524,37 @@ void GetImageData(const v8::FunctionCallbackInfo<v8::Value>& a)
     int h = static_cast<int>(Arg(a,3, c->surface.height));
 
     size_t bytes = static_cast<size_t>(w) * h * 4;
-    auto store = v8::ArrayBuffer::NewBackingStore(iso, bytes);
-    auto* dst = static_cast<uint8_t*>(store->Data());
+
+    // 画像を写しただけの canvas の全体を読む場合は、画像から直接、結果の領域へ書く
+    // (canvas のピクセルを作らない)。
+    if (c->surface.source != nullptr && x == 0 && y == 0 &&
+        w == c->surface.width && h == c->surface.height) {
+        auto direct = v8::ArrayBuffer::NewBackingStore(iso, bytes,
+            v8::BackingStoreInitializationMode::kUninitialized);
+        raster::CompositeOntoTransparent(static_cast<uint8_t*>(direct->Data()), c->surface.source,
+                                         static_cast<size_t>(w) * h);
+        auto direct_buffer = v8::ArrayBuffer::New(iso, std::move(direct));
+        v8::Local<v8::Object> direct_data = v8::Object::New(iso);
+        SetValue(iso, direct_data, "width", v8::Integer::New(iso, w));
+        SetValue(iso, direct_data, "height", v8::Integer::New(iso, h));
+        direct_data->Set(ctx, Str(iso, "data"), v8::Uint8ClampedArray::New(direct_buffer, 0, bytes)).Check();
+        a.GetReturnValue().Set(direct_data);
+        return;
+    }
+    if (c->surface.source != nullptr) {
+        c->surface.Ensure();   // 一部だけ読む: 内容を実体にしてから、通常の経路で読む
+    }
+
     // 範囲がすべて surface の中にある場合は行ごとに写す (ピクセルごとの範囲判定を省く)
-    const bool inside = x >= 0 && y >= 0 && w > 0 && h > 0 &&
+    const bool blank = c->surface.Blank();   // まだ何も描いていない: 全面が透明
+    const bool inside = !blank && x >= 0 && y >= 0 && w > 0 && h > 0 &&
         static_cast<int64_t>(x) + w <= c->surface.width &&
         static_cast<int64_t>(y) + h <= c->surface.height;
+    // 全体を上書きする場合は、確保した領域を 0 で埋めない (埋めると全ピクセルの書き込みが 1 回増える)
+    auto store = v8::ArrayBuffer::NewBackingStore(iso, bytes,
+        inside ? v8::BackingStoreInitializationMode::kUninitialized
+               : v8::BackingStoreInitializationMode::kZeroInitialized);
+    auto* dst = static_cast<uint8_t*>(store->Data());
     if (inside) {
         for (int yy = 0; yy < h; ++yy) {
             std::memcpy(&dst[static_cast<size_t>(yy) * w * 4],
@@ -518,7 +562,7 @@ void GetImageData(const v8::FunctionCallbackInfo<v8::Value>& a)
                 static_cast<size_t>(w) * 4);
         }
     }
-    for (int yy = 0; !inside && yy < h; ++yy)
+    for (int yy = 0; !inside && !blank && yy < h; ++yy)
         for (int xx = 0; xx < w; ++xx) {
             int sx = x + xx, sy = y + yy;
             size_t di = (static_cast<size_t>(yy)*w+xx)*4;
@@ -779,6 +823,7 @@ void PutImageData(const v8::FunctionCallbackInfo<v8::Value>& a)
     const uint8_t* data = static_cast<const uint8_t*>(ab->Data()) + ta->ByteOffset();
     const int dx = static_cast<int>(Arg(a,1)), dy = static_cast<int>(Arg(a,2));
     // putImageData は変換・クリップ非適用でそのまま書き込む (Canvas 仕様)。
+    c->surface.Ensure();
     for (int yy = 0; yy < ih; ++yy) {
         for (int xx = 0; xx < iw; ++xx) {
             const int sx = dx + xx, sy = dy + yy;
@@ -797,7 +842,8 @@ void Reset(const v8::FunctionCallbackInfo<v8::Value>& a)
     c->path.clear();
     c->stack.clear();
     c->state = State{};
-    std::fill(c->surface.pixels.begin(), c->surface.pixels.end(), static_cast<uint8_t>(0));
+    c->surface.Clear();   // 全面が透明 (次に描くときに確保する)
+    c->source_image.Reset();
 }
 
 // CanvasRenderingContext2D の全プロパティを getter/setter 付きで設置する。
@@ -907,6 +953,7 @@ bool GetCanvas2DPixels(v8::Local<v8::Object> context2d,
     auto* c = static_cast<Canvas2D*>(
         context2d->GetInternalField(0).As<v8::External>()->Value());
     if (!c) return false;
+    c->surface.Ensure();
     *out_rgba = c->surface.pixels.data();
     *out_width = static_cast<uint32_t>(c->surface.width);
     *out_height = static_cast<uint32_t>(c->surface.height);
@@ -927,6 +974,7 @@ void ResizeCanvas2DContext(v8::Local<v8::Object> context2d, int width, int heigh
         return;
     }
     c->surface = raster::Surface(width > 0 ? width : 1, height > 0 ? height : 1);
+    c->source_image.Reset();
     c->path.clear();
     c->stack.clear();
     c->state = State{};

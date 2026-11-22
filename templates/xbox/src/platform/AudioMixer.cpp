@@ -20,6 +20,8 @@ struct AudioMixerVoice {
     bool finished = false;    // 非ループ再生が最後まで進んだ
     double position = 0.0;    // 再生位置 (元データのフレーム単位)
     float volume = 1.0f;
+    // 少しずつ増える音源: 確定済みのブロックの控え (合成のたびに、増えた分だけ足す)
+    std::vector<std::shared_ptr<std::vector<float>>> blocks;
 };
 
 struct AudioMixerState {
@@ -96,6 +98,15 @@ void AudioVoice::SetVolume(float v)
     mixer_voice_->volume = v;
 }
 
+void AudioVoice::Pump()
+{
+    // 合成 (Render) のときに、確定済みの範囲を直接読む
+}
+
+void AudioEngine::Pump()
+{
+}
+
 AudioEngine::AudioEngine()
     : mixer_(std::make_shared<AudioMixerState>())
 {
@@ -144,8 +155,20 @@ bool AudioEngine::Render(float* out, int frames, int channels, int sample_rate)
 
         const PcmBuffer& pcm = *voice->buffer;
         const int src_channels = static_cast<int>(pcm.channels);
-        const size_t src_frames = src_channels > 0 ? pcm.samples.size() / src_channels : 0;
-        if (src_frames == 0 || pcm.sample_rate == 0) {
+
+        // 少しずつ増える音源は、いま確定している範囲だけを読む。まだ増える (complete でない)
+        // 間は、末尾に着いても終わりにせず、続きができるのを待つ。
+        size_t src_frames = src_channels > 0 ? pcm.samples.size() / src_channels : 0;
+        bool complete = true;
+        if (pcm.stream) {
+            std::lock_guard<std::mutex> stream_lock(pcm.stream->mutex);
+            src_frames = static_cast<size_t>(pcm.stream->frames);
+            complete = pcm.stream->complete;
+            for (size_t b = voice->blocks.size(); b < pcm.stream->blocks.size(); ++b) {
+                voice->blocks.push_back(pcm.stream->blocks[b]);
+            }
+        }
+        if (pcm.sample_rate == 0 || src_channels <= 0 || (src_frames == 0 && complete)) {
             // 空のバッファ (デコード失敗時の無音) は即終了
             voice->playing = false;
             voice->finished = true;
@@ -154,8 +177,19 @@ bool AudioEngine::Render(float* out, int frames, int channels, int sample_rate)
 
         const double step = static_cast<double>(pcm.sample_rate) / sample_rate;
         const float* src = pcm.samples.data();
+        const bool streamed = static_cast<bool>(pcm.stream);
+        const auto& blocks = voice->blocks;
+        // フレーム i の先頭 (チャンネル 0) の位置
+        const auto frame = [&](size_t i) -> const float* {
+            return streamed
+                ? blocks[i / PcmStream::kBlockFrames]->data() + (i % PcmStream::kBlockFrames) * src_channels
+                : src + i * src_channels;
+        };
         for (int f = 0; f < frames; ++f) {
             if (voice->position >= static_cast<double>(src_frames)) {
+                if (!complete) {
+                    break;   // 続きがまだできていない: この先は無音にして待つ
+                }
                 if (voice->looping) {
                     voice->position = std::fmod(voice->position, static_cast<double>(src_frames));
                 } else {
@@ -165,25 +199,27 @@ bool AudioEngine::Render(float* out, int frames, int channels, int sample_rate)
                 }
             }
             const size_t i0 = static_cast<size_t>(voice->position);
-            // 線形補間。末尾の次は、ループ時は先頭、非ループ時は末尾の値を使う
-            const size_t i1 = (i0 + 1 < src_frames) ? i0 + 1 : (voice->looping ? 0 : i0);
+            // 線形補間。末尾の次は、ループ時は先頭、非ループ時 (と、続きを待っている間) は末尾の値を使う
+            const size_t i1 = (i0 + 1 < src_frames) ? i0 + 1 : (voice->looping && complete ? 0 : i0);
             const float t = static_cast<float>(voice->position - static_cast<double>(i0));
+            const float* s0 = frame(i0);
+            const float* s1 = frame(i1);
 
             float* dst = out + static_cast<size_t>(f) * channels;
             for (int c = 0; c < channels; ++c) {
                 float sample = 0.0f;
                 if (src_channels == 1) {
-                    sample = src[i0] + (src[i1] - src[i0]) * t;
+                    sample = s0[0] + (s1[0] - s0[0]) * t;
                 } else if (channels == 1) {
                     // 多チャンネル → モノラル: 左右の平均
-                    const float a = (src[i0 * src_channels] + src[i0 * src_channels + 1]) * 0.5f;
-                    const float b = (src[i1 * src_channels] + src[i1 * src_channels + 1]) * 0.5f;
+                    const float a = (s0[0] + s0[1]) * 0.5f;
+                    const float b = (s1[0] + s1[1]) * 0.5f;
                     sample = a + (b - a) * t;
                 } else {
                     // 出力チャンネルが元より多ければ、余りは無音にする
                     if (c < src_channels) {
-                        const float a = src[i0 * src_channels + c];
-                        const float b = src[i1 * src_channels + c];
+                        const float a = s0[c];
+                        const float b = s1[c];
                         sample = a + (b - a) * t;
                     }
                 }

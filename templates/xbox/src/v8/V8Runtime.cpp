@@ -114,6 +114,11 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     //   破棄し、次回実行時に再パースする (メモリ最適化)。ゲームでは画面遷移で
     //   久々に呼ばれる関数の再パースがフレームヒッチになるため無効化する
     //   (ゲームバンドル数 MB 程度ならバイトコード常駐のメモリ増は許容範囲)。
+    // - --no-lazy: V8 は既定で、関数を初めて呼ぶときにコンパイルする。インタプリタだけで動く
+    //   構成ではこの時間が目立ち、新しい画面に初めて入るとき (初めて呼ばれる関数が多い) に
+    //   フレームが止まる (開発機で、画面を組み立てる処理が 69〜98 ms → 30〜49 ms)。スクリプトの
+    //   読み込み時にまとめてコンパイルする。起動時間への影響は、同じ計測では誤差の範囲だった。
+    //   バイトコードはどのみち破棄しない (--no-flush-bytecode) ので、最終的なメモリは変わらない。
     // 注: PC ビルドも意図的に jitless で統一する。コンソール実機の性能を PC 検証で
     //     忠実に再現するため (PC だけ JIT で速くするとレギュレーション下の実機で
     //     性能問題が再発する)。
@@ -122,6 +127,7 @@ void V8Runtime::InitializeProcess(const char* exec_path)
     // すべて無視される。--wasm-jitless は最後に渡す。
     v8::V8::SetFlagsFromString("--jitless");
     v8::V8::SetFlagsFromString("--no-flush-bytecode");
+    v8::V8::SetFlagsFromString("--no-lazy");
     // 開発用: 環境変数 NEXT2D_V8_FLAGS で追加のフラグを渡せる (空白区切り。調整の効果を測るため)。
     // --jitless より後に渡すので、JIT を有効にするフラグを書いても実行可能メモリが要る環境では動かない。
     if (const char* extra = std::getenv("NEXT2D_V8_FLAGS")) {

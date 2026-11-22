@@ -105,6 +105,9 @@ bool ResolveObjectURL(const std::string& url, std::string* out_text);
 void InstallPolyfills(v8::Isolate* isolate, v8::Local<v8::Context> context);
 
 // 上記をまとめてインストールする
+// 図形の経路とメッシュのネイティブ実装 (ShapeAccelerator.cpp)。グローバルの __next2dShape に置く。
+void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global);
+
 void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host);
 
 } // namespace next2d

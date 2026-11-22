@@ -445,6 +445,7 @@ void InstallGlobalBindings(v8::Isolate* isolate, v8::Local<v8::Object> global, H
     InstallWebGPU(isolate, global, host);   // navigator.gpu
 #endif
     InstallGamepad(isolate, global, host);  // navigator.getGamepads
+    InstallShapeAccelerator(isolate, global);
 
     // TextEncoder/TextDecoder/queueMicrotask。bootstrap.js はメインコンテキスト
     // でのみ実行されるため、worker を含む全コンテキストにはここで注入する

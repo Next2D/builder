@@ -113,7 +113,7 @@ static std::vector<uint8_t> PercentDecode(const std::string& in)
 std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& url) const
 {
     // data: URI (Vite の ?inline はアセットを data:<mime>;base64,<payload> に埋め込む)。
-    // このゲームは全サウンドを ?inline で取り込むため実体は data URI。画像は Image.cpp が
+    // サウンドを ?inline で取り込むゲームでは、音源の実体が data URI になる。画像は Image.cpp が
     // 対応済みだが、音声 (new Audio / Sound の XHR fetch) もこの ReadBinary を通るので
     // ここで一括デコードする。未対応だと data: をファイルパス扱いして開けず、全 SFX/BGM が
     // 無音になる (XAudio2 の可否とは無関係に実機でも無音)。
@@ -161,6 +161,75 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
                   << RelativeKey(url) << std::endl;
     }
     return buffer;
+}
+
+namespace {
+
+// メモリ上のバイト列を読むストリーム (埋め込み資材用)。データは複製しない。
+class MemoryStreamBuffer : public std::streambuf {
+public:
+    MemoryStreamBuffer(const uint8_t* data, size_t size)
+    {
+        char* begin = const_cast<char*>(reinterpret_cast<const char*>(data));
+        setg(begin, begin, begin + size);
+    }
+
+protected:
+    pos_type seekoff(off_type offset, std::ios_base::seekdir direction,
+                     std::ios_base::openmode which) override
+    {
+        if (!(which & std::ios_base::in)) {
+            return pos_type(off_type(-1));
+        }
+        const off_type size = egptr() - eback();
+        off_type base = 0;
+        if (direction == std::ios_base::cur) {
+            base = gptr() - eback();
+        } else if (direction == std::ios_base::end) {
+            base = size;
+        }
+        const off_type target = base + offset;
+        if (target < 0 || target > size) {
+            return pos_type(off_type(-1));
+        }
+        setg(eback(), eback() + target, egptr());
+        return pos_type(target);
+    }
+
+    pos_type seekpos(pos_type position, std::ios_base::openmode which) override
+    {
+        return seekoff(off_type(position), std::ios_base::beg, which);
+    }
+};
+
+class MemoryStream : public std::istream {
+public:
+    MemoryStream(const uint8_t* data, size_t size)
+        : std::istream(nullptr), buffer_(data, size)
+    {
+        rdbuf(&buffer_);
+    }
+
+private:
+    MemoryStreamBuffer buffer_;
+};
+
+} // namespace
+
+std::unique_ptr<std::istream> AssetLoader::OpenStream(const std::string& url) const
+{
+    if (url.rfind("data:", 0) == 0) {
+        return nullptr;
+    }
+    // 埋め込みモード優先 (ReadBinary と同じ順)。埋め込み資材は終了まで解放されない。
+    if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
+        return std::make_unique<MemoryStream>(embedded->data(), embedded->size());
+    }
+    auto file = std::make_unique<std::ifstream>(Resolve(url), std::ios::binary);
+    if (!*file) {
+        return nullptr;
+    }
+    return file;
 }
 
 std::optional<std::string> AssetLoader::ReadText(const std::string& url) const

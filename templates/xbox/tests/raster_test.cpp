@@ -23,6 +23,9 @@ static int checks = 0;
 // (x,y) のピクセルを取得
 static RGBA Px(const Surface& s, int x, int y)
 {
+    if (s.Blank()) {
+        return { 0, 0, 0, 0 };   // まだ何も描いていない: 全面が透明
+    }
     size_t i = (static_cast<size_t>(y) * s.width + x) * 4;
     return { s.pixels[i], s.pixels[i+1], s.pixels[i+2], s.pixels[i+3] };
 }
@@ -327,6 +330,8 @@ static void TestCopyImage()
     for (const auto& offset : offsets) {
         Surface fast(8, 6), slow(8, 6);
         // 合成先を空でない状態にしておく
+        fast.Ensure();
+        slow.Ensure();
         for (size_t i = 0; i < fast.pixels.size(); ++i) {
             fast.pixels[i] = slow.pixels[i] = static_cast<uint8_t>(i * 7 + 3);
         }
@@ -341,11 +346,121 @@ static void TestCopyImage()
         }
         CHECK(fast.pixels == slow.pixels);
     }
+
+    // まだ何も描いていない surface へ、同じ大きさの画像をぴったり重ねる (0 で埋めずに作る経路)
+    {
+        Surface fast(static_cast<int>(sw), static_cast<int>(sh)), slow(static_cast<int>(sw), static_cast<int>(sh));
+        CHECK(fast.Blank());
+        CopyImage(fast, image.data(), sw, sh, 0, 0);
+        CHECK(!fast.Blank());
+        CHECK(fast.pixels.size() == fast.ByteSize());
+        const ClipRect no_clip;
+        for (uint32_t y = 0; y < sh; ++y) {
+            for (uint32_t x = 0; x < sw; ++x) {
+                const uint8_t* p = &image[(static_cast<size_t>(y) * sw + x) * 4];
+                Blend(slow, no_clip, static_cast<int>(x), static_cast<int>(y), RGBA{p[0], p[1], p[2], p[3]}, 1.0);
+            }
+        }
+        CHECK(fast.pixels == slow.pixels);
+    }
+
+    // まだ何も描いていない surface でも、大きさや位置が合わなければ通常の経路 (結果は同じ)
+    for (const auto& offset : offsets) {
+        Surface fast(8, 6), slow(8, 6);
+        slow.Ensure();
+        CopyImage(fast, image.data(), sw, sh, offset[0], offset[1]);
+        const ClipRect no_clip;
+        for (uint32_t y = 0; y < sh; ++y) {
+            for (uint32_t x = 0; x < sw; ++x) {
+                const uint8_t* p = &image[(static_cast<size_t>(y) * sw + x) * 4];
+                Blend(slow, no_clip, offset[0] + static_cast<int>(x), offset[1] + static_cast<int>(y),
+                      RGBA{p[0], p[1], p[2], p[3]}, 1.0);
+            }
+        }
+        fast.Ensure();
+        CHECK(fast.pixels == slow.pixels);
+    }
+}
+
+// 画像を写しただけの状態 (Surface::source): 実体にすると、透明の上に合成した結果になる
+static void TestSurfaceSource()
+{
+    const int w = 5, h = 3;
+    std::vector<uint8_t> image(static_cast<size_t>(w) * h * 4);
+    for (size_t i = 0; i < image.size() / 4; ++i) {
+        image[i * 4] = static_cast<uint8_t>(i * 13 + 5);
+        image[i * 4 + 1] = static_cast<uint8_t>(i * 29 + 7);
+        image[i * 4 + 2] = static_cast<uint8_t>(i * 3 + 200);
+        image[i * 4 + 3] = (i % 3 == 0) ? 255 : (i % 3 == 1) ? 0 : static_cast<uint8_t>(40 + i * 11);
+    }
+    Surface expected(w, h);
+    const ClipRect no_clip;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const uint8_t* p = &image[(static_cast<size_t>(y) * w + x) * 4];
+            Blend(expected, no_clip, x, y, RGBA{p[0], p[1], p[2], p[3]}, 1.0);
+        }
+    }
+
+    // そのまま読む (canvas のピクセルを作らずに読み出す経路と同じ計算)
+    std::vector<uint8_t> direct(image.size(), 0xAB);
+    CompositeOntoTransparent(direct.data(), image.data(), static_cast<size_t>(w) * h);
+    CHECK(direct == expected.pixels);
+
+    // 実体にする
+    Surface s(w, h);
+    s.source = image.data();
+    CHECK(!s.Blank());
+    CHECK(s.pixels.empty());
+    s.Ensure();
+    CHECK(s.source == nullptr);
+    CHECK(s.pixels == expected.pixels);
+
+    // 上から描くと、実体にしてから合成される
+    Surface drawn(w, h), drawn_expected(w, h);
+    drawn_expected.pixels = expected.pixels;
+    drawn.source = image.data();
+    Blend(drawn, no_clip, 1, 1, RGBA{10, 20, 30, 128}, 1.0);
+    Blend(drawn_expected, no_clip, 1, 1, RGBA{10, 20, 30, 128}, 1.0);
+    CHECK(drawn.pixels == drawn_expected.pixels);
+
+    // 消すときも、実体にしてから消す
+    Surface cleared(w, h), cleared_expected(w, h);
+    cleared_expected.pixels = expected.pixels;
+    cleared.source = image.data();
+    ClearRect(cleared, 0, 0, 2, 2);
+    ClearRect(cleared_expected, 0, 0, 2, 2);
+    CHECK(cleared.pixels == cleared_expected.pixels);
+
+    // 何も描いていない状態へ戻す
+    Surface reset(w, h);
+    reset.source = image.data();
+    reset.Clear();
+    CHECK(reset.Blank());
+}
+
+// 何も描いていない surface は確保しない。消しても確保しない。描いたら確保する
+static void TestLazySurface()
+{
+    Surface s(16, 16);
+    CHECK(s.Blank());
+    ClearRect(s, 0, 0, 16, 16);
+    CHECK(s.Blank());
+    const ClipRect no_clip;
+    Blend(s, no_clip, 100, 100, RGBA{255, 0, 0, 255}, 1.0);   // 範囲外: 描かない
+    CHECK(s.Blank());
+    Blend(s, no_clip, 3, 4, RGBA{255, 0, 0, 255}, 1.0);
+    CHECK(!s.Blank());
+    CHECK(s.pixels.size() == s.ByteSize());
+    CHECK(s.pixels[(4 * 16 + 3) * 4] == 255);
+    CHECK(s.pixels[0] == 0);
 }
 
 int main()
 {
     TestCopyImage();
+    TestLazySurface();
+    TestSurfaceSource();
     TestParseColor();
     TestFontPixelSize();
     TestMatrix();

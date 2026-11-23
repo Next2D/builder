@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.5.17",
+  "version": "0.5.18",
   "description": "A multiplatform builder for the Next2d Framework. It supports exporting to a variety of platforms, including Steam, macOS, Windows, Linux, iOS, Android, Xbox, Nintendo Switch, and the web (HTML).",
   "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",

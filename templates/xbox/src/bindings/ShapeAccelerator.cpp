@@ -29,9 +29,15 @@
 // 形式が WebGL 版と違う)。塗りは経路を消さず、reset() を呼ぶまで何度でも取り出せる:
 //   path(commands, index, pixelScale) -> number
 //   fillSize() -> number            メッシュの要素数。経路が 1 本も無ければ -1
-//   fill(target) -> number          メッシュ (頂点あたり 4 要素) を target の先頭から書き、頂点数を返す
+//   fill(target, flat) -> number    メッシュ (頂点あたり 4 要素) を target の先頭から書き、頂点数を返す。
+//                                   flat が真なら、曲線用の係数をすべて 0.5 にする (グラデーションや
+//                                   画像で描く線のメッシュの形式)
 //   exportPath(stroke) -> Float64Array
 //   reset()
+//   strokeSize(thickness, joints, caps, pixelScale) -> number
+//       いまの経路を「線の外周をなぞる経路」に置き換え、それを塗りのメッシュにしたときの要素数を
+//       返す。続けて fill() を呼ぶと、線のメッシュが得られる。描く線が無ければ 0 を返し、経路には
+//       触らない。引数の意味は WebGL 版と同じ。
 #include "Bindings.h"
 
 #include "ShapeAcceleratorCore.h"
@@ -187,8 +193,19 @@ void GpuFill(const v8::FunctionCallbackInfo<v8::Value>& args)
         args.GetReturnValue().Set(0);
         return;
     }
+    const bool flat = args.Length() > 1 && args[1]->BooleanValue(args.GetIsolate());
     args.GetReturnValue().Set(static_cast<double>(
-        shape::gpu::FillMesh(t_gpu_path, target, target_length)));
+        shape::gpu::FillMesh(t_gpu_path, target, target_length, flat)));
+}
+
+void GpuStrokeSize(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    if (args.Length() < 4) {
+        args.GetReturnValue().Set(0);
+        return;
+    }
+    args.GetReturnValue().Set(static_cast<double>(shape::gpu::StrokeSize(
+        t_gpu_path, NumberArg(args, 0), StyleArg(args, 1), StyleArg(args, 2), NumberArg(args, 3))));
 }
 
 void GpuExportPath(const v8::FunctionCallbackInfo<v8::Value>& args)
@@ -247,6 +264,7 @@ void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global)
     v8util::SetMethod(isolate, gpu, "fill", GpuFill);
     v8util::SetMethod(isolate, gpu, "exportPath", GpuExportPath);
     v8util::SetMethod(isolate, gpu, "reset", GpuReset);
+    v8util::SetMethod(isolate, gpu, "strokeSize", GpuStrokeSize);
     object->Set(context, v8util::Str(isolate, "webgpu"), gpu).Check();
 
     global->Set(context, v8util::Str(isolate, "__next2dShape"), object).Check();

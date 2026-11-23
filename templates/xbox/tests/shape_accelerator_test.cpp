@@ -1,6 +1,8 @@
 // 図形の計算 (src/bindings/ShapeAcceleratorCore.h) のテスト。
 // 「経路の組み立て」と「塗りのメッシュの生成」が、Next2D Player の JavaScript と 1 ビットも
 // 違わない結果を返すことを確かめる (WebGL 版の規則と WebGPU 版の規則の両方)。
+// 線の外周の計算 (WebGL 版) も確かめる。三角関数を使わない部分は 1 ビットも違わないこと、
+// 使う部分 (丸いつなぎ目、丸い端) は形と大きさが合うことを見る。
 // V8 にも OS にも依存しない。
 //
 // ビルド (templates/xbox で):
@@ -541,6 +543,317 @@ static void TestGpuAgainstJavaScript()
     }
 }
 
+// ---- 線の外周 ----------------------------------------------------------------------
+
+// 経路 (x, y, 制御点なら 1 の並び) を 1 本持つ状態を作る
+static PathState MakePath(const std::vector<double>& points)
+{
+    PathState state;
+    state.current = points;
+    return state;
+}
+
+static bool Near(const std::vector<double>& actual, const std::vector<double>& expected)
+{
+    if (actual.size() != expected.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < actual.size(); ++i) {
+        if (!(std::fabs(actual[i] - expected[i]) <= 1e-9)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// 直線 1 本: 太さの分だけ両側へずらした四角形になる。端の指定が無ければ何も足さない
+static void TestStrokeLine()
+{
+    PathState state = MakePath({ 0, 0, 0,  10, 0, 0 });
+    CHECK(StrokeSize(state, 2, 2, 0, 1.0) == kTriangleSize * 3);
+    CHECK(state.current.empty());
+    CHECK(state.vertices.size() == 1);
+    const std::vector<double> rectangle = {
+        0, 2, 0,  10, 2, 0,  10, -2, 0,  0, -2, 0,  0, 2, 0
+    };
+    CHECK(state.vertices[0] == rectangle);
+
+    // 続けて塗りのメッシュにできる (経路は空になる)
+    std::vector<float> mesh(kTriangleSize * 3);
+    CHECK(FillMesh(state, mesh.data(), mesh.size(), 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1) == 9);
+    CHECK(mesh[0] == 0.0f && mesh[1] == 2.0f);
+    CHECK(mesh[17] == 10.0f && mesh[18] == 2.0f);
+    CHECK(mesh[34] == 10.0f && mesh[35] == -2.0f);
+    CHECK(state.vertices.empty());
+
+    // 点が 1 つだけの経路は線にならない
+    PathState single = MakePath({ 5, 5, 0 });
+    CHECK(StrokeSize(single, 2, 2, 0, 1.0) == 0);
+    CHECK(single.vertices.empty());
+
+    PathState empty;
+    CHECK(StrokeSize(empty, 2, 2, 1, 1.0) == 0);
+}
+
+// 直角に曲がる線のつなぎ目 (外側の角を埋める)
+static void TestStrokeJoins()
+{
+    const std::vector<double> corner = { 0, 0, 0,  10, 0, 0,  10, 10, 0 };
+    const std::vector<double> first  = { 0, 1, 0,  10, 1, 0,  10, -1, 0,  0, -1, 0,  0, 1, 0 };
+    const std::vector<double> second = { 9, 0, 0,  9, 10, 0,  11, 10, 0,  11, 0, 0,  9, 0, 0 };
+
+    // bevel: 角の点と、2 つの四角形の外側の点を結ぶ
+    PathState bevel = MakePath(corner);
+    StrokeSize(bevel, 1, 0, 0, 1.0);
+    CHECK(bevel.vertices.size() == 3);
+    if (bevel.vertices.size() == 3) {
+        CHECK(bevel.vertices[0] == first);
+        CHECK(bevel.vertices[1] == std::vector<double>({ 10, 0, 0,  11, 0, 0,  10, -1, 0,  10, 0, 0 }));
+        CHECK(bevel.vertices[2] == second);
+    }
+
+    // miter: 外側の 2 点を線の方向へ延ばした交点 (11, -1) まで埋める
+    PathState miter = MakePath(corner);
+    StrokeSize(miter, 1, 1, 0, 1.0);
+    CHECK(miter.vertices.size() == 3);
+    if (miter.vertices.size() == 3) {
+        CHECK(miter.vertices[1] == std::vector<double>({
+            10, 0, 0,  11, 0, 0,  11, -1, 0,  10, 0, 0,  10, -1, 0,  11, -1, 0
+        }));
+    }
+
+    // round: 角の点を中心に、外側の 2 点の間を 8 等分した扇形
+    PathState round = MakePath(corner);
+    StrokeSize(round, 1, 2, 0, 1.0);
+    CHECK(round.vertices.size() == 3);
+    if (round.vertices.size() == 3) {
+        const std::vector<double>& join = round.vertices[1];
+        CHECK(join.size() == 30);
+        if (join.size() == 30) {
+            CHECK(join[0] == 10 && join[1] == 0);
+            CHECK(std::fabs(join[3] - 11) <= 1e-9 && std::fabs(join[4]) <= 1e-9);
+            CHECK(std::fabs(join[27] - 10) <= 1e-9 && std::fabs(join[28] + 1) <= 1e-9);
+            // 途中の点も、角から太さの分だけ離れている
+            for (size_t i = 3; i < 30; i += 3) {
+                CHECK(std::fabs(std::hypot(join[i] - 10, join[i + 1]) - 1) <= 1e-9);
+            }
+        }
+    }
+
+    // まっすぐ続く線には、つなぎ目を足さない
+    PathState straight = MakePath({ 0, 0, 0,  10, 0, 0,  20, 0, 0 });
+    StrokeSize(straight, 1, 1, 0, 1.0);
+    CHECK(straight.vertices.size() == 2);
+
+    // 閉じた経路は、始点にもつなぎ目ができる (端は足さない)
+    PathState closed = MakePath({ 0, 0, 0,  10, 0, 0,  10, 10, 0,  0, 10, 0,  0, 0, 0 });
+    StrokeSize(closed, 1, 0, 2, 1.0);
+    CHECK(closed.vertices.size() == 8);   // 四角形 4 + つなぎ目 4
+}
+
+// 線の端
+static void TestStrokeCaps()
+{
+    // square: 端の点から線の向きへ、太さの分だけ張り出す
+    PathState square = MakePath({ 0, 0, 0,  10, 0, 0 });
+    StrokeSize(square, 2, 2, 2, 1.0);
+    CHECK(square.vertices.size() == 3);
+    if (square.vertices.size() == 3) {
+        CHECK(Near(square.vertices[0], {
+            -4, -2, 0,  -4, 2, 0,  0, 2, 0,  -4, -2, 0,  0, 2, 0,  0, -2, 0
+        }));
+        CHECK(Near(square.vertices[2], {
+            14, 2, 0,  14, -2, 0,  10, -2, 0,  14, 2, 0,  10, -2, 0,  10, 2, 0
+        }));
+    }
+
+    // round: 端の点を中心にした半円 (17 点)
+    PathState round = MakePath({ 0, 0, 0,  10, 0, 0 });
+    StrokeSize(round, 2, 2, 1, 1.0);
+    CHECK(round.vertices.size() == 3);
+    if (round.vertices.size() == 3) {
+        const std::vector<double>& head = round.vertices[0];
+        const std::vector<double>& tail = round.vertices[2];
+        CHECK(head.size() == 51 && tail.size() == 51);
+        if (head.size() == 51 && tail.size() == 51) {
+            for (size_t i = 0; i < 51; i += 3) {
+                CHECK(std::fabs(std::hypot(head[i], head[i + 1]) - 2) <= 1e-9);
+                CHECK(head[i] <= 1e-9);          // 線の外側 (x <= 0) へ張り出す
+                CHECK(std::fabs(std::hypot(tail[i] - 10, tail[i + 1]) - 2) <= 1e-9);
+                CHECK(tail[i] >= 10 - 1e-9);
+            }
+        }
+    }
+}
+
+// 曲線: 画面上の大きさに応じた数に分け、左側を順に、右側を逆順にたどる輪郭になる
+static void TestStrokeCurve()
+{
+    // 拡大率が分からないとき (0) は 5 回 (32 区間) に分ける
+    PathState state = MakePath({ 0, 0, 0,  10, 0, 1,  10, 10, 0 });
+    StrokeSize(state, 1, 2, 0, 0.0);
+    CHECK(state.vertices.size() == 1);
+    if (state.vertices.size() == 1) {
+        const std::vector<double>& outline = state.vertices[0];
+        CHECK(outline.size() == 6 + 12 * 32);
+        // 始点は進む向き (+x) の左へ、終点は進む向き (+y) の左へずれる
+        CHECK(outline[0] == 0 && outline[1] == 1);
+        CHECK(outline[3 * 64] == 9 && outline[3 * 64 + 1] == 10);
+        // 右側は終点から始点へ戻る
+        CHECK(outline[3 * 65] == 11 && outline[3 * 65 + 1] == 10);
+        CHECK(outline[outline.size() - 3] == 0 && outline[outline.size() - 2] == -1);
+    }
+
+    // 小さく表示するときは分けない
+    PathState small = MakePath({ 0, 0, 0,  10, 0, 1,  10, 10, 0 });
+    StrokeSize(small, 1, 2, 0, 0.001);
+    CHECK(small.vertices.size() == 1);
+    if (small.vertices.size() == 1) {
+        CHECK(small.vertices[0].size() == 6 + 12);
+    }
+}
+
+// Math.hypot と同じ値を返す
+static void TestJsHypot()
+{
+    CHECK(JsHypot(3, 4) == 5);
+    CHECK(JsHypot(0, 0) == 0);
+    CHECK(JsHypot(-5, 0) == 5);
+    CHECK(JsHypot(std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN())
+        == std::numeric_limits<double>::infinity());
+    const double nan = JsHypot(1, std::numeric_limits<double>::quiet_NaN());
+    CHECK(nan != nan);
+}
+
+// 線のメッシュの基準値: 入力の長さ、メッシュの要素数、頂点数、メッシュのハッシュ値。
+// 入力は TestAgainstJavaScript と同じ並び (MakeCommands / MakeMatrix)。
+// Next2D Player (WebGL) の JavaScript (canvas の内外判定は、実行環境の canvas と同じ計算) で求めた値。
+// 三角関数を使う場合 (丸いつなぎ目、丸い端) は、処理系で最後の桁が変わりうるので、ハッシュ値は
+// 持たない (0)。要素数と頂点数だけを比べる。
+struct StrokeReference {
+    uint32_t command_length;
+    uint32_t mesh_size;
+    uint32_t index_count;
+    uint32_t mesh_hash;
+};
+
+static const StrokeReference kStrokeReferences[] = {
+    { 171u, 121278u, 7134u, 0xa24ead79u },
+    { 59u, 23511u, 1383u, 0xf73465f4u },
+    { 138u, 449208u, 26424u, 0x00000000u },
+    { 185u, 455175u, 26775u, 0x00000000u },
+    { 67u, 138924u, 8172u, 0x00000000u },
+    { 23u, 56559u, 3327u, 0x00000000u },
+    { 44u, 17136u, 1008u, 0x5f661573u },
+    { 194u, 174369u, 10257u, 0x32631317u },
+    { 116u, 249033u, 14649u, 0x00000000u },
+    { 130u, 326553u, 19209u, 0x9f4508afu },
+    { 32u, 54417u, 3201u, 0xa6dfe8aau },
+    { 77u, 441150u, 25950u, 0x00000000u },
+    { 104u, 77877u, 4581u, 0x00000000u },
+    { 84u, 60384u, 3552u, 0x00000000u },
+    { 33u, 109701u, 6453u, 0x00000000u },
+    { 109u, 303297u, 17841u, 0x05b52770u },
+    { 102u, 123522u, 7266u, 0x1e7f1dd2u },
+    { 133u, 569619u, 33507u, 0x00000000u },
+    { 43u, 24276u, 1428u, 0xf4b6c8d4u },
+    { 111u, 72216u, 4248u, 0x87aceaf3u },
+    { 30u, 95217u, 5601u, 0x00000000u },
+    { 72u, 92004u, 5412u, 0x00000000u },
+    { 77u, 93075u, 5475u, 0x00000000u },
+    { 124u, 981036u, 57708u, 0x00000000u },
+    { 161u, 105825u, 6225u, 0x062d01b9u },
+    { 66u, 43962u, 2586u, 0x45d82599u },
+    { 120u, 363885u, 21405u, 0x00000000u },
+    { 115u, 263517u, 15501u, 0x6d4c0314u },
+    { 128u, 128979u, 7587u, 0x290948e2u },
+    { 62u, 193749u, 11397u, 0x00000000u },
+    { 17u, 8823u, 519u, 0x00000000u },
+    { 55u, 55845u, 3285u, 0x00000000u },
+    { 50u, 158406u, 9318u, 0x00000000u },
+    { 32u, 49980u, 2940u, 0x979434d8u },
+    { 94u, 164220u, 9660u, 0x15f287d0u },
+    { 89u, 829107u, 48771u, 0x00000000u },
+    { 122u, 75990u, 4470u, 0xfabf8176u },
+    { 171u, 111180u, 6540u, 0x1adc8d92u },
+    { 59u, 140097u, 8241u, 0x00000000u },
+    { 150u, 399738u, 23514u, 0x00000000u },
+    { 43u, 118473u, 6969u, 0x00000000u },
+    { 91u, 235008u, 13824u, 0x00000000u },
+    { 66u, 34833u, 2049u, 0x2b63d9deu },
+    { 23u, 27489u, 1617u, 0xe654ed7bu },
+    { 121u, 326910u, 19230u, 0x00000000u },
+    { 79u, 156519u, 9207u, 0x51d235a0u },
+    { 85u, 174828u, 10284u, 0xa4cd345bu },
+    { 179u, 1426062u, 83886u, 0x00000000u },
+};
+
+// NaN は 1 つの表現にそろえてから数える (符号などが処理系で違う)
+static uint32_t FnvCanonical(const float* data, size_t length)
+{
+    std::vector<uint32_t> words(length);
+    for (size_t i = 0; i < length; ++i) {
+        if (data[i] != data[i]) {
+            words[i] = 0x7fc00000u;
+        } else {
+            std::memcpy(&words[i], &data[i], sizeof(uint32_t));
+        }
+    }
+    return FnvBytes(words.data(), length * sizeof(uint32_t));
+}
+
+static void TestStrokeAgainstJavaScript()
+{
+    const double thicknesses[] = { 0.5, 1, 2.5, 10 };
+    const size_t cases = sizeof(kStrokeReferences) / sizeof(kStrokeReferences[0]);
+    for (size_t i = 0; i < cases; ++i) {
+        const StrokeReference& reference = kStrokeReferences[i];
+        const std::vector<float> commands = MakeCommands(i);
+        CHECK(commands.size() == reference.command_length);
+
+        float m[9];
+        MakeMatrix(i, m);
+        const float color[4] = {
+            static_cast<float>(static_cast<double>(i % 5) / 4), 0.5f, 1.0f,
+            static_cast<float>(static_cast<double>(i % 3 + 1) / 3)
+        };
+        const double width = 1920, height = 1080;
+        const double scale_x = static_cast<double>(m[0]) * m[0] + static_cast<double>(m[1]) * m[1];
+        const double scale_y = static_cast<double>(m[3]) * m[3] + static_cast<double>(m[4]) * m[4];
+        const double pixel_x = std::sqrt(scale_x);
+        const double pixel_y = std::sqrt(scale_y);
+        const int joints = static_cast<int>(i % 3);
+        const int caps = static_cast<int>(i / 3 % 3);
+
+        PathState state;
+        CHECK(FeedPath(state, commands.data(), commands.size(), 0, scale_x > scale_y ? scale_x : scale_y) == commands.size());
+        const size_t size = StrokeSize(state, thicknesses[i % 4] / 2, joints, caps,
+            pixel_x > pixel_y ? pixel_x : pixel_y);
+        CHECK(size == reference.mesh_size);
+        if (size != reference.mesh_size) {
+            std::printf("  stroke case %zu: mesh size %zu, expected %u\n", i, size, reference.mesh_size);
+            std::printf("::error::stroke case %zu: mesh size %zu, expected %u\n", i, size, reference.mesh_size);
+            continue;
+        }
+        std::vector<float> mesh(size);
+        const size_t index_count = FillMesh(state, mesh.data(), mesh.size(), 0,
+            static_cast<float>(m[0] / width), static_cast<float>(m[1] / height),
+            static_cast<float>(m[3] / width), static_cast<float>(m[4] / height),
+            static_cast<float>(m[6] / width), static_cast<float>(m[7] / height),
+            color[0], color[1], color[2], color[3]);
+        CHECK(index_count == reference.index_count);
+        if (reference.mesh_hash == 0) {
+            continue;
+        }
+        const uint32_t hash = FnvCanonical(mesh.data(), mesh.size());
+        CHECK(hash == reference.mesh_hash);
+        if (hash != reference.mesh_hash) {
+            std::printf("  stroke case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+            std::printf("::error::stroke case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+        }
+    }
+}
+
 int main()
 {
     TestFeedPath();
@@ -553,6 +866,12 @@ int main()
     TestGpuCurveMesh();
     TestGpuArc();
     TestGpuAgainstJavaScript();
+    TestStrokeLine();
+    TestStrokeJoins();
+    TestStrokeCaps();
+    TestStrokeCurve();
+    TestJsHypot();
+    TestStrokeAgainstJavaScript();
     if (g_failed) {
         std::printf("%d check(s) failed\n", g_failed);
         // 結果が食い違うのは、たいてい積和の融合 (FMA) が入ったとき。原因を切り分ける情報を出す

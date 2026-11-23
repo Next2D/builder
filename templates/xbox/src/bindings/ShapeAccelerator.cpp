@@ -1,4 +1,4 @@
-// ShapeAccelerator: 図形の「経路の組み立て」と「塗りのメッシュの生成」のネイティブ実装。
+// ShapeAccelerator: 図形の「経路の組み立て」「塗りのメッシュの生成」「線の外周の計算」のネイティブ実装。
 //
 // Next2D Player (WebGL) は、キャッシュの無い図形を描くたびに、描画命令 (Float32Array) を 1 つずつ
 // 解読して経路を組み立て、三角形のメッシュに変換する。どれも単純な数値計算だが、JIT が使えない
@@ -15,10 +15,15 @@
 //   fill(target, offset, a, b, c, d, tx, ty, red, green, blue, alpha) -> number
 //       メッシュを target[offset..] へ書き、頂点数を返す。経路は空になる。
 //   exportPath(stroke) -> Float64Array
-//       経路を [本数, 要素数, x, y, 制御点か, ..., 要素数, ...] で返す (線など、ここで扱わない処理用)。
+//       経路を [本数, 要素数, x, y, 制御点か, ..., 要素数, ...] で返す (ここで扱わない処理用)。
 //       経路は空になる。
 //   reset()
 //       経路を空にする。
+//   strokeSize(thickness, joints, caps, pixelScale) -> number
+//       いまの経路を「線の外周をなぞる経路」に置き換え、それを塗りのメッシュにしたときの要素数を
+//       返す (0 なら描く線が無い)。続けて fill() を呼ぶと、線のメッシュが得られる。
+//       thickness は線の太さの半分、joints は 0 = bevel / 1 = miter / 2 = round、
+//       caps は 1 = round / 2 = square。
 //
 // __next2dShape.webgpu には、WebGPU 版の player と同じ規則の実装を置く (経路の規則とメッシュの
 // 形式が WebGL 版と違う)。塗りは経路を消さず、reset() を呼ぶまで何度でも取り出せる:
@@ -129,6 +134,25 @@ void Reset(const v8::FunctionCallbackInfo<v8::Value>&)
     t_path.vertices.clear();
 }
 
+// 線の種類の番号 (0 / 1 / 2)。それ以外の値は「何も足さない」として扱う
+inline int StyleArg(const v8::FunctionCallbackInfo<v8::Value>& args, int index)
+{
+    const double value = NumberArg(args, index);
+    return value == 0.0 ? 0 : value == 1.0 ? 1 : value == 2.0 ? 2 : -1;
+}
+
+void StrokeSize(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    if (args.Length() < 4) {
+        t_path.current.clear();
+        t_path.vertices.clear();
+        args.GetReturnValue().Set(0);
+        return;
+    }
+    args.GetReturnValue().Set(static_cast<double>(shape::StrokeSize(
+        t_path, NumberArg(args, 0), StyleArg(args, 1), StyleArg(args, 2), NumberArg(args, 3))));
+}
+
 // ---- WebGPU 版 ----------------------------------------------------------------
 thread_local shape::gpu::PathState t_gpu_path;
 
@@ -215,6 +239,7 @@ void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global)
     v8util::SetMethod(isolate, object, "fill", Fill);
     v8util::SetMethod(isolate, object, "exportPath", ExportPath);
     v8util::SetMethod(isolate, object, "reset", Reset);
+    v8util::SetMethod(isolate, object, "strokeSize", StrokeSize);
 
     v8::Local<v8::Object> gpu = v8::Object::New(isolate);
     v8util::SetMethod(isolate, gpu, "path", GpuPath);

@@ -1,4 +1,4 @@
-// ShapeAcceleratorCore: 図形の「経路の組み立て」と「塗りのメッシュの生成」の計算本体。
+// ShapeAcceleratorCore: 図形の「経路の組み立て」「塗りのメッシュの生成」「線の外周の計算」の計算本体。
 // V8 に依存しないので、単体テスト (tests/shape_accelerator_test.cpp) からも使える。
 // 計算の順序と、32 ビットへ丸める位置は、Next2D Player の JavaScript と合わせてある。
 // player は描画の方式 (WebGL / WebGPU) ごとに経路の規則とメッシュの形式が違うので、
@@ -377,7 +377,619 @@ inline size_t FillMesh(PathState& s, float* target, size_t target_length, size_t
     return index;
 }
 
-// ---- WebGPU 版の player と同じ規則 ------------------------------------------------
+// ---- 線 (WebGL 版) -----------------------------------------------------------------
+// player は線を「線の外周をなぞる経路 (区間ごとの四角形、つなぎ目、端)」に変換してから、塗りと
+// 同じ方法でメッシュにする。ここでは経路を外周の経路に置き換えるところまでを行い、メッシュは
+// FillMesh で作る。計算の順序は player の JavaScript (Mesh/usecase/MeshGenerateStrokeOutlineUseCase
+// と、そこから呼ばれる処理) と同じ。
+// 丸いつなぎ目・丸い端の三角関数 (atan2 / cos / sin) と、曲線の分割数を決める acos は、C++ の
+// 標準ライブラリの実装を使う。JavaScript エンジンの実装とは最後の桁が違うことがあるが、メッシュは
+// 32 ビットへ丸めて持つので、ほぼすべての頂点が同じ値になる。
+
+using Path = std::vector<double>;
+
+constexpr int kStrokeSplitCount = 5;
+constexpr int kStrokeSegmentCount = 1 << kStrokeSplitCount;
+constexpr double kStrokeTolerance = 0.05;
+constexpr double kStrokeEpsilon = 0.0001;
+constexpr double kStrokePi = 3.141592653589793;   // JavaScript の Math.PI
+
+// JavaScript の Math.hypot(x, y) と同じ計算 (大きい方で割ってから 2 乗を足す。V8 の実装と同じ順序)
+inline double JsHypot(double x, double y)
+{
+    const bool nan = x != x || y != y;
+    const double ax = x != x ? 0.0 : std::fabs(x);
+    const double ay = y != y ? 0.0 : std::fabs(y);
+    const double max = ax > ay ? ax : ay;
+    if (max == std::numeric_limits<double>::infinity()) {
+        return max;
+    }
+    if (nan) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (max == 0) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    double compensation = 0.0;
+    const double values[2] = { ax, ay };
+    for (int idx = 0; idx < 2; ++idx) {
+        const double n = values[idx] / max;
+        const double summand = n * n - compensation;
+        const double preliminary = sum + summand;
+        compensation = (preliminary - sum) - summand;
+        sum = preliminary;
+    }
+    return std::sqrt(sum) * max;
+}
+
+inline void PushPathPoint(Path& path, double x, double y, double control)
+{
+    path.push_back(x);
+    path.push_back(y);
+    path.push_back(control);
+}
+
+// 直線の区間を、太さの分だけ両側へずらした四角形にする
+inline void StrokeLineRectangle(double sx, double sy, double ex, double ey, double thickness, Path& out)
+{
+    const double vx = ex - sx;
+    const double vy = ey - sy;
+    const double magnitude = std::sqrt(vx * vx + vy * vy);
+    const double nx = -(vy / magnitude) * thickness;
+    const double ny = vx / magnitude * thickness;
+    PushPathPoint(out, sx + nx, sy + ny, 0.0);
+    PushPathPoint(out, ex + nx, ey + ny, 0.0);
+    PushPathPoint(out, ex - nx, ey - ny, 0.0);
+    PushPathPoint(out, sx - nx, sy - ny, 0.0);
+    PushPathPoint(out, sx + nx, sy + ny, 0.0);
+}
+
+// 2 次ベジェ曲線上の t の位置を、法線の方向へ offset だけずらした点
+inline void StrokeOffsetPoint(double t, double x0, double y0, double x1, double y1,
+                              double x2, double y2, double offset, double* out)
+{
+    const double u = 1 - t;
+    const double position_x = u * u * x0 + 2 * u * t * x1 + t * t * x2;
+    const double position_y = u * u * y0 + 2 * u * t * y1 + t * t * y2;
+    const double tangent_x = 2 * u * (x1 - x0) + 2 * t * (x2 - x1);
+    const double tangent_y = 2 * u * (y1 - y0) + 2 * t * (y2 - y1);
+    const double normal_x = -tangent_y;
+    const double normal_y = tangent_x;
+    const double length = std::sqrt(normal_x * normal_x + normal_y * normal_y);
+    if (length == 0) {
+        out[0] = position_x + 0 * offset;
+        out[1] = position_y + 0 * offset;
+    } else {
+        out[0] = position_x + normal_x / length * offset;
+        out[1] = position_y + normal_y / length * offset;
+    }
+}
+
+// 曲線の区間を半分に分ける回数 (画面上の誤差が kStrokeTolerance ピクセル以下になる最小の回数)
+inline int StrokeSplitCount(double x0, double y0, double x1, double y1, double x2, double y2,
+                            double thickness, double pixel_scale)
+{
+    if (!(pixel_scale > 0)) {
+        return kStrokeSplitCount;
+    }
+    const double ax = x1 - x0;
+    const double ay = y1 - y0;
+    const double bx = x2 - x1;
+    const double by = y2 - y1;
+    const double length_a = std::sqrt(ax * ax + ay * ay);
+    const double length_b = std::sqrt(bx * bx + by * by);
+    if (length_a == 0 || length_b == 0) {
+        return kStrokeSplitCount;
+    }
+    double cosine = (ax * bx + ay * by) / (length_a * length_b);
+    if (cosine > 1) {
+        cosine = 1;
+    } else if (cosine < -1) {
+        cosine = -1;
+    }
+    const double theta = std::acos(cosine);
+    if (theta > 2) {
+        return kStrokeSplitCount;
+    }
+    const double dx = x0 - 2 * x1 + x2;
+    const double dy = y0 - 2 * y1 + y2;
+    const double sagitta = std::sqrt(dx * dx + dy * dy) / 4
+        + std::fabs(thickness) * theta * theta / 8;
+    double error = sagitta * 0.75 * pixel_scale;
+    int count = 0;
+    while (error > kStrokeTolerance && count < kStrokeSplitCount) {
+        error *= 0.25;
+        ++count;
+    }
+    return count;
+}
+
+// 曲線の区間を、太さの分だけ両側へずらした輪郭にする (左側を順に、右側を逆順にたどる)
+inline void StrokeCurveRectangle(double sx, double sy, double cx, double cy, double ex, double ey,
+                                 double thickness, double pixel_scale, Path& out)
+{
+    const int split_count = StrokeSplitCount(sx, sy, cx, cy, ex, ey, thickness, pixel_scale);
+
+    double buffer_a[kStrokeSegmentCount * 6];
+    double buffer_b[kStrokeSegmentCount * 6];
+    double right[kStrokeSegmentCount * 6];
+    double* segments = buffer_a;
+    double* next = buffer_b;
+    segments[0] = sx; segments[1] = sy;
+    segments[2] = cx; segments[3] = cy;
+    segments[4] = ex; segments[5] = ey;
+
+    int count = 1;
+    for (int split = 0; split < split_count; ++split) {
+        for (int idx = 0; idx < count; ++idx) {
+            const double* p = segments + idx * 6;
+            const double x0 = p[0], y0 = p[1];
+            const double x1 = p[2], y1 = p[3];
+            const double x2 = p[4], y2 = p[5];
+            const double m0x = x0 + (x1 - x0) * 0.5;
+            const double m0y = y0 + (y1 - y0) * 0.5;
+            const double m1x = x1 + (x2 - x1) * 0.5;
+            const double m1y = y1 + (y2 - y1) * 0.5;
+            const double m01x = m0x + (m1x - m0x) * 0.5;
+            const double m01y = m0y + (m1y - m0y) * 0.5;
+            double* q = next + idx * 12;
+            q[0] = x0;   q[1] = y0;
+            q[2] = m0x;  q[3] = m0y;
+            q[4] = m01x; q[5] = m01y;
+            q[6] = m01x; q[7] = m01y;
+            q[8] = m1x;  q[9] = m1y;
+            q[10] = x2;  q[11] = y2;
+        }
+        double* swap = segments;
+        segments = next;
+        next = swap;
+        count *= 2;
+    }
+
+    double point[2];
+    StrokeOffsetPoint(0, segments[0], segments[1], segments[2], segments[3],
+                      segments[4], segments[5], +thickness, point);
+    PushPathPoint(out, point[0], point[1], 0.0);
+
+    for (int idx = 0; idx < count; ++idx) {
+        const int source = idx * 6;
+        const double* p = segments + source;
+        const double x0 = p[0], y0 = p[1];
+        const double x1 = p[2], y1 = p[3];
+        const double x2 = p[4], y2 = p[5];
+
+        double control[2];
+        StrokeOffsetPoint(0.5, x0, y0, x1, y1, x2, y2, +thickness, control);
+        StrokeOffsetPoint(1, x0, y0, x1, y1, x2, y2, +thickness, point);
+        PushPathPoint(out, control[0], control[1], 1.0);
+        PushPathPoint(out, point[0], point[1], 0.0);
+
+        StrokeOffsetPoint(0, x0, y0, x1, y1, x2, y2, -thickness, right + source);
+        StrokeOffsetPoint(0.5, x0, y0, x1, y1, x2, y2, -thickness, right + source + 2);
+        if (idx == count - 1) {
+            StrokeOffsetPoint(1, x0, y0, x1, y1, x2, y2, -thickness, right + source + 4);
+        }
+    }
+
+    const int last = (count - 1) * 6;
+    PushPathPoint(out, right[last + 4], right[last + 5], 0.0);
+    for (int idx = count - 1; idx >= 0; --idx) {
+        const int source = idx * 6;
+        PushPathPoint(out, right[source + 2], right[source + 3], 1.0);
+        PushPathPoint(out, right[source], right[source + 1], 0.0);
+    }
+}
+
+// 輪郭の点 (制御点を除く) のうち、(x, y) からの距離が r のものを (x, y) の並びで集める
+inline void StrokeFindOverlapping(double x, double y, double r, const Path& path, std::vector<double>& out)
+{
+    out.clear();
+    for (size_t idx = 0; idx + 2 < path.size(); idx += 3) {
+        if (path[idx + 2] != 0.0) {
+            continue;
+        }
+        const double dx = path[idx];
+        const double dy = path[idx + 1];
+        const double distance = std::sqrt((dx - x) * (dx - x) + (dy - y) * (dy - y));
+        if (std::fabs(distance - r) > kStrokeEpsilon) {
+            continue;
+        }
+        out.push_back(dx);
+        out.push_back(dy);
+    }
+}
+
+// points のうち、輪郭 rectangle の外にある最初の点を返す (すべて内側なら false)。
+// player は canvas の isPointInPath で判定するので、実行環境の canvas の実装 (RasterCore.h の
+// FlattenQuadratic と PointInPath) と同じ計算をする: 曲線は 12 本の直線に分け、巻き数で判定する。
+inline bool StrokeFirstPointOutside(const std::vector<double>& points, const Path& rectangle,
+                                    std::vector<double>& polygon, double* out)
+{
+    polygon.clear();
+    const size_t size = rectangle.size();
+    auto value = [&](size_t index) { return index < size ? rectangle[index] : 0.0; };
+    polygon.push_back(value(0));
+    polygon.push_back(value(1));
+    for (size_t idx = 3; idx < size; idx += 3) {
+        if (value(idx + 2) != 0.0) {
+            const double p0x = polygon[polygon.size() - 2];
+            const double p0y = polygon[polygon.size() - 1];
+            const double p1x = value(idx);
+            const double p1y = value(idx + 1);
+            const double p2x = value(idx + 3);
+            const double p2y = value(idx + 4);
+            for (int step = 1; step <= 12; ++step) {
+                const double t = static_cast<double>(step) / 12;
+                const double u = 1 - t;
+                polygon.push_back(u * u * p0x + 2 * u * t * p1x + t * t * p2x);
+                polygon.push_back(u * u * p0y + 2 * u * t * p1y + t * t * p2y);
+            }
+            idx += 3;
+        } else {
+            polygon.push_back(value(idx));
+            polygon.push_back(value(idx + 1));
+        }
+    }
+
+    const size_t count = polygon.size() / 2;
+    for (size_t idx = 0; idx + 1 < points.size(); idx += 2) {
+        const double px = points[idx];
+        const double py = points[idx + 1];
+        int wind = 0;
+        if (count >= 2) {
+            for (size_t i = 0; i < count; ++i) {
+                const size_t j = (i + 1) % count;
+                const double ax = polygon[i * 2], ay = polygon[i * 2 + 1];
+                const double bx = polygon[j * 2], by = polygon[j * 2 + 1];
+                if ((ay <= py && by > py) || (by <= py && ay > py)) {
+                    const double t = (py - ay) / (by - ay);
+                    const double cross = ax + t * (bx - ax);
+                    if (cross > px) {
+                        wind += ay < by ? 1 : -1;
+                    }
+                }
+            }
+        }
+        if (wind != 0) {
+            continue;
+        }
+        out[0] = px;
+        out[1] = py;
+        return true;
+    }
+    return false;
+}
+
+// JavaScript の a[i] === b[j] (どちらも範囲の外なら等しい)
+inline bool StrokeSameValue(const std::vector<double>& a, size_t i, const std::vector<double>& b, size_t j)
+{
+    const bool has_a = i < a.size();
+    const bool has_b = j < b.size();
+    if (!has_a || !has_b) {
+        return has_a == has_b;
+    }
+    return a[i] == b[j];
+}
+
+// つなぎ目の計算で使い回す作業領域
+struct StrokeWork {
+    std::vector<double> points_a;
+    std::vector<double> points_b;
+    std::vector<double> polygon;
+};
+
+// つなぎ目を作る 2 つの輪郭から、互いの外側にある点を 1 つずつ探す。つなぎ目が要らなければ false
+inline bool StrokeJoinPoints(double x, double y, double r, const std::vector<Path>& rectangles,
+                             bool is_last, bool skip_parallel, StrokeWork& work,
+                             double* point_a, double* point_b)
+{
+    const size_t index_a = is_last ? 0 : rectangles.size() - 1;
+    const size_t index_b = is_last ? rectangles.size() - 1 : rectangles.size() - 2;
+    const Path& rect_a = rectangles[index_a];
+    const Path& rect_b = rectangles[index_b];
+
+    // 曲線の輪郭どうしはなめらかにつながっているので、つなぎ目は要らない
+    if (rect_a.size() > 15 && rect_b.size() > 15) {
+        return false;
+    }
+
+    StrokeFindOverlapping(x, y, r, rect_a, work.points_a);
+    StrokeFindOverlapping(x, y, r, rect_b, work.points_b);
+
+    // 平行なら要らない
+    if (skip_parallel
+        && ((StrokeSameValue(work.points_a, 0, work.points_b, 0)
+                && StrokeSameValue(work.points_a, 1, work.points_b, 1))
+            || (StrokeSameValue(work.points_a, 0, work.points_b, 2)
+                && StrokeSameValue(work.points_a, 1, work.points_b, 3)))
+    ) {
+        return false;
+    }
+
+    if (!StrokeFirstPointOutside(work.points_a, rect_b, work.polygon, point_a)) {
+        return false;
+    }
+    if (!StrokeFirstPointOutside(work.points_b, rect_a, work.polygon, point_b)) {
+        return false;
+    }
+    return true;
+}
+
+// つなぎ目の経路を、最後の輪郭の手前へ入れる
+inline void StrokeInsertJoin(std::vector<Path>& rectangles, Path&& join)
+{
+    rectangles.insert(rectangles.end() - 1, std::move(join));
+}
+
+inline void StrokeBevelJoin(double x, double y, double r, std::vector<Path>& rectangles,
+                            bool is_last, StrokeWork& work)
+{
+    double a[2];
+    double b[2];
+    if (!StrokeJoinPoints(x, y, r, rectangles, is_last, true, work, a, b)) {
+        return;
+    }
+    Path join;
+    PushPathPoint(join, x, y, 0.0);
+    PushPathPoint(join, a[0], a[1], 0.0);
+    PushPathPoint(join, b[0], b[1], 0.0);
+    PushPathPoint(join, x, y, 0.0);
+    StrokeInsertJoin(rectangles, std::move(join));
+}
+
+inline void StrokeMiterJoin(double sx, double sy, double ex, double ey, double px, double py,
+                            double r, std::vector<Path>& rectangles, bool is_last, StrokeWork& work)
+{
+    double a[2];
+    double b[2];
+    if (!StrokeJoinPoints(sx, sy, r, rectangles, is_last, true, work, a, b)) {
+        return;
+    }
+
+    // 外側の 2 点を、それぞれの線の方向へ延ばした交点を求める
+    const double a_vx = ex - sx;
+    const double a_vy = ey - sy;
+    const double length_a = JsHypot(a_vx, a_vy);
+    const double d1x = a_vx / length_a;
+    const double d1y = a_vy / length_a;
+
+    const double b_vx = px - sx;
+    const double b_vy = py - sy;
+    const double length_b = JsHypot(b_vx, b_vy);
+    const double d2x = b_vx / length_b;
+    const double d2y = b_vy / length_b;
+
+    Path join;
+    const double denom = d1x * d2y - d1y * d2x;
+    if (denom == 0) {
+        PushPathPoint(join, sx, sy, 0.0);
+        PushPathPoint(join, a[0], a[1], 0.0);
+        PushPathPoint(join, b[0], b[1], 0.0);
+        StrokeInsertJoin(rectangles, std::move(join));
+        return;
+    }
+
+    const double t = ((b[0] - a[0]) * d2y - (b[1] - a[1]) * d2x) / denom;
+    const double ix = a[0] + t * d1x;
+    const double iy = a[1] + t * d1y;
+    PushPathPoint(join, sx, sy, 0.0);
+    PushPathPoint(join, a[0], a[1], 0.0);
+    PushPathPoint(join, ix, iy, 0.0);
+    PushPathPoint(join, sx, sy, 0.0);
+    PushPathPoint(join, b[0], b[1], 0.0);
+    PushPathPoint(join, ix, iy, 0.0);
+    StrokeInsertJoin(rectangles, std::move(join));
+}
+
+inline void StrokeRoundJoin(double x, double y, double r, std::vector<Path>& rectangles,
+                            bool is_last, StrokeWork& work)
+{
+    double a[2];
+    double b[2];
+    if (!StrokeJoinPoints(x, y, r, rectangles, is_last, false, work, a, b)) {
+        return;
+    }
+
+    const double angle_a = std::atan2(a[1] - y, a[0] - x);
+    const double angle_b = std::atan2(b[1] - y, b[0] - x);
+
+    // 角度の差を -180 度から 180 度の範囲にする
+    double angle_diff = angle_b - angle_a;
+    if (angle_diff > kStrokePi) {
+        angle_diff -= 2 * kStrokePi;
+    } else if (angle_diff < -kStrokePi) {
+        angle_diff += 2 * kStrokePi;
+    }
+
+    // 差が小さいとき、180 度に近いときは作らない
+    const double abs_diff = std::fabs(angle_diff);
+    if (abs_diff < 0.1 || abs_diff > kStrokePi - 0.1) {
+        return;
+    }
+
+    const int segment = 8;
+    const double step = angle_diff / segment;
+    Path join;
+    PushPathPoint(join, x, y, 0.0);
+    for (int idx = 0; idx <= segment; ++idx) {
+        const double angle = angle_a + idx * step;
+        PushPathPoint(join, x + r * std::cos(angle), y + r * std::sin(angle), 0.0);
+    }
+    StrokeInsertJoin(rectangles, std::move(join));
+}
+
+// 経路の端の点と、その隣の点 (端の向きを決める)
+inline void StrokeCapEnds(const Path& v, int end, double* sx, double* sy, double* ex, double* ey)
+{
+    const size_t size = v.size();
+    if (end == 0) {
+        *sx = v[0];        *sy = v[1];
+        *ex = v[3];        *ey = v[4];
+    } else {
+        *sx = v[size - 3]; *sy = v[size - 2];
+        *ex = v[size - 6]; *ey = v[size - 5];
+    }
+}
+
+inline void StrokeRoundCap(const Path& v, double r, std::vector<Path>& rectangles)
+{
+    for (int end = 0; end < 2; ++end) {
+        double sx, sy, ex, ey;
+        StrokeCapEnds(v, end, &sx, &sy, &ex, &ey);
+
+        const double angle_to_end = std::atan2(ey - sy, ex - sx);
+        const double start_angle = angle_to_end + kStrokePi / 2;
+        const double end_angle = angle_to_end - kStrokePi / 2;
+
+        const int segments = 16;
+        const double step = (end_angle - start_angle) / segments;
+        Path points;
+        for (int idx = 0; idx <= segments; ++idx) {
+            const double t = end_angle + step * idx;
+            PushPathPoint(points, sx + r * std::cos(t), sy + r * std::sin(t), 0.0);
+        }
+        if (end == 0) {
+            rectangles.insert(rectangles.begin(), std::move(points));
+        } else {
+            rectangles.push_back(std::move(points));
+        }
+    }
+}
+
+inline void StrokeSquareCap(const Path& v, double r, std::vector<Path>& rectangles)
+{
+    for (int end = 0; end < 2; ++end) {
+        double sx, sy, ex, ey;
+        StrokeCapEnds(v, end, &sx, &sy, &ex, &ey);
+
+        const double dx = -(ex - sx);
+        const double dy = -(ey - sy);
+        const double length = std::sqrt(dx * dx + dy * dy);
+        if (length == 0) {
+            continue;
+        }
+        const double ux = dx / length;
+        const double uy = dy / length;
+        const double cxn = sx + r * ux;
+        const double cyn = sy + r * uy;
+        const double vx = -uy;
+        const double vy = ux;
+
+        Path points;
+        PushPathPoint(points, cxn + r * ux + r * vx, cyn + r * uy + r * vy, 0.0);
+        PushPathPoint(points, cxn + r * ux - r * vx, cyn + r * uy - r * vy, 0.0);
+        PushPathPoint(points, cxn - r * ux - r * vx, cyn - r * uy - r * vy, 0.0);
+        PushPathPoint(points, cxn + r * ux + r * vx, cyn + r * uy + r * vy, 0.0);
+        PushPathPoint(points, cxn - r * ux - r * vx, cyn - r * uy - r * vy, 0.0);
+        PushPathPoint(points, cxn - r * ux + r * vx, cyn - r * uy + r * vy, 0.0);
+        if (end == 0) {
+            rectangles.insert(rectangles.begin(), std::move(points));
+        } else {
+            rectangles.push_back(std::move(points));
+        }
+    }
+}
+
+// 経路 1 本の線の外周を、塗りと同じ形式の経路の並びにして out の末尾へ足す。
+// joints: 0 = bevel / 1 = miter / 2 = round、caps: 1 = round / 2 = square (ほかは何も足さない)
+inline void StrokeOutline(const Path& v, double thickness, int joints, int caps, double pixel_scale,
+                          StrokeWork& work, std::vector<Path>& out)
+{
+    const size_t size = v.size();
+    if (size < 6) {
+        return;
+    }
+
+    double start_x = v[0];
+    double start_y = v[1];
+    double control_x = 0.0;
+    double control_y = 0.0;
+
+    std::vector<Path> rectangles;
+    for (size_t idx = 3; idx + 2 < size; idx += 3) {
+        const double x = v[idx];
+        const double y = v[idx + 1];
+        if (v[idx + 2] != 0.0) {
+            control_x = x;
+            control_y = y;
+            continue;
+        }
+
+        rectangles.emplace_back();
+        if (v[idx - 1] != 0.0) {
+            StrokeCurveRectangle(start_x, start_y, control_x, control_y, x, y,
+                                 thickness, pixel_scale, rectangles.back());
+        } else {
+            StrokeLineRectangle(start_x, start_y, x, y, thickness, rectangles.back());
+        }
+
+        if (rectangles.size() > 1) {
+            if (joints == 0) {
+                StrokeBevelJoin(start_x, start_y, thickness, rectangles, false, work);
+            } else if (joints == 1) {
+                StrokeMiterJoin(start_x, start_y, x, y, v[idx - 6], v[idx - 5],
+                                thickness, rectangles, false, work);
+            } else if (joints == 2) {
+                StrokeRoundJoin(start_x, start_y, thickness, rectangles, false, work);
+            }
+        }
+
+        start_x = x;
+        start_y = y;
+    }
+
+    // 始点と終点がつながっていれば、そこにもつなぎ目を作る。つながっていなければ端を作る
+    const double closed_start_x = v[0];
+    const double closed_start_y = v[1];
+    const double closed_end_x = v[size - 3];
+    const double closed_end_y = v[size - 2];
+    const bool is_closed = std::fabs(closed_start_x - closed_end_x) < kStrokeEpsilon
+        && std::fabs(closed_start_y - closed_end_y) < kStrokeEpsilon
+        && rectangles.size() > 1;
+
+    if (is_closed) {
+        if (joints == 0) {
+            StrokeBevelJoin(closed_start_x, closed_start_y, thickness, rectangles, true, work);
+        } else if (joints == 1) {
+            StrokeMiterJoin(closed_start_x, closed_start_y, v[3], v[4], v[size - 6], v[size - 5],
+                            thickness, rectangles, true, work);
+        } else if (joints == 2) {
+            StrokeRoundJoin(closed_start_x, closed_start_y, thickness, rectangles, true, work);
+        }
+    } else if (caps == 1) {
+        StrokeRoundCap(v, thickness, rectangles);
+    } else if (caps == 2) {
+        StrokeSquareCap(v, thickness, rectangles);
+    }
+
+    for (Path& rectangle : rectangles) {
+        out.push_back(std::move(rectangle));
+    }
+}
+
+// いまの経路を線の外周の経路に置き換え、それを塗りのメッシュにしたときの要素数を返す
+// (0 なら描く線が無い)。続けて FillMesh を呼ぶと、線のメッシュが得られる。
+// thickness は線の太さの半分。pixel_scale は座標 1 単位が画面上で何ピクセルになるか。
+inline size_t StrokeSize(PathState& s, double thickness, int joints, int caps, double pixel_scale)
+{
+    FinalizePaths(s, 6);
+
+    StrokeWork work;
+    std::vector<Path> outlines;
+    for (const Path& path : s.vertices) {
+        StrokeOutline(path, thickness, joints, caps, pixel_scale, work, outlines);
+    }
+    s.vertices = std::move(outlines);
+
+    size_t size = 0;
+    for (const Path& path : s.vertices) {
+        size += (path.size() / 3 - 2) * kTriangleSize;
+    }
+    return size;
+}
+
+// ---- WebGPU 版の player と同じ規則------------------------------------------------
 // WebGL 版との主な違い:
 //   - 経路は 64 ビットのまま持ち、3 次ベジェ曲線の分割の途中でも 32 ビットへ丸めない
 //   - moveTo は常に新しい経路を始める。同じ点かどうかは「いまの位置」と比べる

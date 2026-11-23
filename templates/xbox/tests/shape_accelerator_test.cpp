@@ -340,6 +340,7 @@ static void TestAgainstJavaScript()
         CHECK(hash == reference.mesh_hash);
         if (hash != reference.mesh_hash) {
             std::printf("  case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+            std::printf("::error::webgl case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
         }
     }
 }
@@ -535,6 +536,7 @@ static void TestGpuAgainstJavaScript()
         CHECK(stroke_hash == reference.stroke_hash);
         if (stroke_hash != reference.stroke_hash) {
             std::printf("  webgpu case %zu: path hash %08x, expected %08x\n", i, stroke_hash, reference.stroke_hash);
+            std::printf("::error::webgpu case %zu: path hash %08x, expected %08x\n", i, stroke_hash, reference.stroke_hash);
         }
     }
 }
@@ -553,6 +555,33 @@ int main()
     TestGpuAgainstJavaScript();
     if (g_failed) {
         std::printf("%d check(s) failed\n", g_failed);
+        // 結果が食い違うのは、たいてい積和の融合 (FMA) が入ったとき。原因を切り分ける情報を出す
+        const char* arch =
+#if defined(__aarch64__) || defined(_M_ARM64)
+            "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+            "x64";
+#else
+            "other";
+#endif
+        const char* compiler =
+#if defined(__VERSION__)
+            __VERSION__;
+#elif defined(_MSC_FULL_VER)
+            "msvc";
+#else
+            "unknown";
+#endif
+        int fast_fma = 0;
+#if defined(__FP_FAST_FMA) || defined(__FMA__)
+        fast_fma = 1;
+#endif
+        // 融合されていれば 0 以外になる (a * b を丸めてから引くと 0)
+        volatile double a = 1.0 + 0x1p-30, b = 1.0 - 0x1p-30;
+        const double product = a * b;
+        const double residual = a * b - product;
+        std::printf("::error::%d check(s) failed (%s, %s, fma available %d, contraction residual %g)\n",
+            g_failed, arch, compiler, fast_fma, residual);
         return 1;
     }
     std::printf("shape accelerator tests passed\n");

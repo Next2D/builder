@@ -10,8 +10,14 @@
 // JavaScript での計算と結果が一致しなくなる。
 #if defined(_MSC_VER)
 #pragma fp_contract(off)
-#else
+#elif defined(__clang__)
 #pragma STDC FP_CONTRACT OFF
+#elif defined(__GNUC__)
+// GCC は上の標準の指定を無視するので、最適化の設定として止める (このヘッダの関数だけに効かせる。
+// 末尾の pop_options と対)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#define NEXT2D_SHAPE_GCC_OPTIONS_PUSHED 1
 #endif
 
 #include <cmath>
@@ -697,3 +703,8 @@ inline size_t FillMesh(const PathState& s, float* target, size_t target_length)
 } // namespace gpu
 
 } // namespace next2d::shape
+
+#if defined(NEXT2D_SHAPE_GCC_OPTIONS_PUSHED)
+#pragma GCC pop_options
+#undef NEXT2D_SHAPE_GCC_OPTIONS_PUSHED
+#endif

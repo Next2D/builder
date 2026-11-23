@@ -158,7 +158,7 @@ jobs:
         run: |
           rem 経路と塗りのメッシュの計算が、Player の JavaScript と同じ結果になることを確かめる。
           cl /nologo /utf-8 /std:c++17 /EHsc /O2 /W3 /Isrc ^
-             testsshape_accelerator_test.cpp ^
+             tests\shape_accelerator_test.cpp ^
              /Fe:shape_accelerator_test.exe
           if errorlevel 1 exit /b 1
           shape_accelerator_test.exe

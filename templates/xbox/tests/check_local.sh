@@ -32,9 +32,10 @@ c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
 /tmp/next2d_stb_safety_test_asan
 
 echo "== 4/5 shape accelerator unit tests =="
-c++ -std=c++17 -Wall -Wextra -O2 -Isrc -o /tmp/next2d_shape_accelerator_test tests/shape_accelerator_test.cpp
+# 積和の融合 (FMA) が入ると JavaScript と結果が変わる。ヘッダの中でも止めているが、ここでも明示する
+c++ -std=c++17 -Wall -Wextra -O2 -ffp-contract=off -Isrc -o /tmp/next2d_shape_accelerator_test tests/shape_accelerator_test.cpp
 /tmp/next2d_shape_accelerator_test
-c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
+c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer -ffp-contract=off -Isrc \
     -o /tmp/next2d_shape_accelerator_test_asan tests/shape_accelerator_test.cpp
 /tmp/next2d_shape_accelerator_test_asan
 

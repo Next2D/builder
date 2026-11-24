@@ -1080,6 +1080,35 @@ static void TestGpuStrokeAgainstJavaScript()
     }
 }
 
+// ---- 描画データのハッシュ値 ----------------------------------------------------------
+
+// Next2D Player (display の DisplayObjectGenerateHashService) の JavaScript で求めた値。
+// player のテストも同じ値で確かめている。
+static void TestHash()
+{
+    auto ramp = [](size_t length) {
+        std::vector<float> data(length);
+        for (size_t i = 0; i < length; ++i) {
+            data[i] = static_cast<float>(static_cast<double>(i) * 0.375 - 100);
+        }
+        return data;
+    };
+    auto hash = [](const std::vector<float>& data) {
+        return HashFloat32(data.data(), data.size());
+    };
+
+    CHECK(HashFloat32(nullptr, 0) == 6141092u);
+    CHECK(hash({ 0.0f }) == 15990438u);
+    CHECK(hash({ 0.0f, 0.0f }) == 9344940u);
+    CHECK(hash({ 1.5f, -2.25f, 3.0f }) == 7875761u);
+    CHECK(hash({ -1.5f, 2.25f, 3.0f }) == 10177548u);
+    CHECK(hash(ramp(4)) == 16577691u);
+    CHECK(hash(ramp(5)) == 5381896u);
+    CHECK(hash(ramp(7)) == 11206304u);
+    CHECK(hash(ramp(1000)) == 3711294u);
+    CHECK(hash(ramp(4097)) == 15450031u);
+}
+
 int main()
 {
     TestFeedPath();
@@ -1102,6 +1131,7 @@ int main()
     TestGpuStrokeJoins();
     TestGpuStrokeCurve();
     TestGpuStrokeAgainstJavaScript();
+    TestHash();
     if (g_failed) {
         std::printf("%d check(s) failed\n", g_failed);
         // 結果が食い違うのは、たいてい積和の融合 (FMA) が入ったとき。原因を切り分ける情報を出す

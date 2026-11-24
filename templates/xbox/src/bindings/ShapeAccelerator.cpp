@@ -24,6 +24,9 @@
 //       返す (0 なら描く線が無い)。続けて fill() を呼ぶと、線のメッシュが得られる。
 //       thickness は線の太さの半分、joints は 0 = bevel / 1 = miter / 2 = round、
 //       caps は 1 = round / 2 = square。
+//   hash(data) -> number
+//       描画データ (Float32Array) 全体のハッシュ値 (24 ビット)。player が図形のキャッシュの鍵に使う。
+//       描画の方式によらない (メインスレッドから呼ばれる)。
 //
 // __next2dShape.webgpu には、WebGPU 版の player と同じ規則の実装を置く (経路の規則とメッシュの
 // 形式が WebGL 版と違う)。塗りは経路を消さず、reset() を呼ぶまで何度でも取り出せる:
@@ -159,6 +162,17 @@ void StrokeSize(const v8::FunctionCallbackInfo<v8::Value>& args)
         t_path, NumberArg(args, 0), StyleArg(args, 1), StyleArg(args, 2), NumberArg(args, 3))));
 }
 
+void Hash(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    float* data = nullptr;
+    size_t length = 0;
+    if (args.Length() < 1 || !GetFloat32(args[0], &data, &length)) {
+        args.GetReturnValue().Set(-1);
+        return;
+    }
+    args.GetReturnValue().Set(shape::HashFloat32(data, length));
+}
+
 // ---- WebGPU 版 ----------------------------------------------------------------
 thread_local shape::gpu::PathState t_gpu_path;
 
@@ -257,6 +271,7 @@ void InstallShapeAccelerator(v8::Isolate* isolate, v8::Local<v8::Object> global)
     v8util::SetMethod(isolate, object, "exportPath", ExportPath);
     v8util::SetMethod(isolate, object, "reset", Reset);
     v8util::SetMethod(isolate, object, "strokeSize", StrokeSize);
+    v8util::SetMethod(isolate, object, "hash", Hash);
 
     v8::Local<v8::Object> gpu = v8::Object::New(isolate);
     v8util::SetMethod(isolate, gpu, "path", GpuPath);

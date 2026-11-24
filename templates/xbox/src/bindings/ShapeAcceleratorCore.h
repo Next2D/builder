@@ -377,6 +377,24 @@ inline size_t FillMesh(PathState& s, float* target, size_t target_length, size_t
     return index;
 }
 
+// ---- 描画データのハッシュ値 ----------------------------------------------------------
+// player は、図形を初めて描くときに、その描画データ (Float32Array) 全体からハッシュ値を作って
+// キャッシュの鍵にする。player の JavaScript (display の DisplayObjectGenerateHashService) と
+// 同じ値を返す: 1 要素 (32 ビット) ごとに 1 回掛けて上位を下位へ折り返し、最後に 24 ビットへ縮める。
+inline uint32_t HashFloat32(const float* data, size_t length)
+{
+    uint32_t hash = 2166136261u ^ static_cast<uint32_t>(length);
+    for (size_t idx = 0; idx < length; ++idx) {
+        uint32_t bits;
+        std::memcpy(&bits, data + idx, sizeof(bits));
+        hash = (hash ^ bits) * 0x9E3779B1u;
+        hash ^= hash >> 15;
+    }
+    hash = (hash ^ (hash >> 16)) * 0x85EBCA6Bu;
+    hash ^= hash >> 13;
+    return ((hash >> 8) ^ (hash & 0xffu)) & 0xffffffu;
+}
+
 // ---- 線 (WebGL 版) -----------------------------------------------------------------
 // player は線を「線の外周をなぞる経路 (区間ごとの四角形、つなぎ目、端)」に変換してから、塗りと
 // 同じ方法でメッシュにする。ここでは経路を外周の経路に置き換えるところまでを行い、メッシュは

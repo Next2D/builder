@@ -1692,6 +1692,66 @@ const Method kMethods[] = {
 
     // --- 描画
     {"drawArrays", [](const Args& a) { glDrawArrays(U(a, 0), I(a, 1), I(a, 2)); Touch(S(a)); }},
+    // WebGL には無い拡張: 「ステンシルに形を描く → 色を塗る」の 2 回の描画を、続けて何個分も行う。
+    //   __next2dSolidFills(mask_program, color_program, first, length, counts)
+    // counts[0 .. length) が塗りごとの頂点数で、頂点は first から順に並んでいる。1 個ごとに
+    //   1. ステンシルを増減する設定 (色は書かない) にして、mask_program で描く
+    //      (SAMPLE_ALPHA_TO_COVERAGE を有効にして、縁の被覆率をステンシルへ反映する)
+    //   2. ステンシルが 0 でない所だけ色を書き、ステンシルを 0 に戻す設定にして、color_program で描く
+    // を行う。個々の GL 呼び出しを JavaScript から行うのと同じ結果になる
+    // (インタプリタで動く環境では、その往復が描画時間の大きな部分を占める)。
+    // 呼び出し側の前提: ステンシルテストが有効、頂点配列とブレンドの設定が済んでいて、
+    // 2 つのプログラムの uniform も設定済み。
+    // 戻ったときの状態: 手順 2 の設定のまま (color_program が使用中、色の書き込みが有効、
+    // SAMPLE_ALPHA_TO_COVERAGE は無効)。
+    {"__next2dSolidFills", [](const Args& a) {
+        GLState* s = S(a);
+        const GLuint mask_program = Name(a, 0, kProgram);
+        const GLuint color_program = Name(a, 1, kProgram);
+        GLint first = I(a, 2);
+        const GLint length = I(a, 3);
+        const GLint* counts = nullptr;
+        size_t available = 0;
+        if (length <= 0 || !IntList(a, 4, s, &counts, &available)) {
+            return;
+        }
+        if (first < 0 || static_cast<size_t>(length) > available) {
+            SetError(s, GL_INVALID_VALUE);
+            return;
+        }
+        for (GLint i = 0; i < length; ++i) {
+            const GLint count = counts[i];
+            if (count < 0) {
+                SetError(s, GL_INVALID_VALUE);
+                break;
+            }
+
+            glStencilFunc(GL_ALWAYS, 0, 0xff);
+            glStencilOpSeparate(GL_FRONT, GL_KEEP, GL_KEEP, GL_INCR_WRAP);
+            glStencilOpSeparate(GL_BACK, GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+            glUseProgram(mask_program);
+            glDrawArrays(GL_TRIANGLES, first, count);
+            glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+
+            glStencilFunc(GL_NOTEQUAL, 0, 0xff);
+            glStencilOp(GL_KEEP, GL_ZERO, GL_ZERO);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glUseProgram(color_program);
+            glDrawArrays(GL_TRIANGLES, first, count);
+
+            first += count;
+        }
+        // 途中で打ち切った場合も、戻ったときの状態は同じにする
+        glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        glStencilFunc(GL_NOTEQUAL, 0, 0xff);
+        glStencilOp(GL_KEEP, GL_ZERO, GL_ZERO);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glUseProgram(color_program);
+        for (int i = 0; i < 4; ++i) { s->color_mask[i] = GL_TRUE; }
+        Touch(s);
+    }},
     {"drawArraysInstanced", [](const Args& a) {
         glDrawArraysInstanced(U(a, 0), I(a, 1), I(a, 2), I(a, 3)); Touch(S(a));
     }},

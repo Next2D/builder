@@ -514,6 +514,43 @@ static void Pass_Draw(const v8::FunctionCallbackInfo<v8::Value>& args)
     pass.Draw(n(0, 0), n(1, 1), n(2, 0), n(3, 0));
 }
 
+// WebGPU には無い拡張: 図形の塗り 1 つ分の「ステンシルに形を描く → 色を塗る」を 1 回で行う。
+//   __next2dStencilFill(write_pipeline, fill_pipeline, vertex_buffer, bind_group,
+//                       uniform_offset, vertex_count)
+// 次の呼び出しを順に行うのと同じ結果になる
+// (インタプリタで動く環境では、塗りごとの 9 回の往復が描画時間に効く):
+//   setPipeline(write_pipeline); setStencilReference(0); setVertexBuffer(0, vertex_buffer);
+//   setBindGroup(0, bind_group, [uniform_offset]); draw(vertex_count, 1, 0, 0);
+//   setPipeline(fill_pipeline); setStencilReference(0);
+//   setBindGroup(0, bind_group, [uniform_offset]); draw(vertex_count, 1, 0, 0);
+static void Pass_Next2dStencilFill(const v8::FunctionCallbackInfo<v8::Value>& args)
+{
+    if (args.Length() < 6
+        || !args[0]->IsObject() || !args[1]->IsObject()
+        || !args[2]->IsObject() || !args[3]->IsObject()
+        || !args[4]->IsNumber() || !args[5]->IsNumber()) {
+        return;
+    }
+    auto& pass = Unwrap<wgpu::RenderPassEncoder>(args.This());
+    auto& write_pipeline = Unwrap<wgpu::RenderPipeline>(args[0].As<v8::Object>());
+    auto& fill_pipeline = Unwrap<wgpu::RenderPipeline>(args[1].As<v8::Object>());
+    auto& buffer = Unwrap<wgpu::Buffer>(args[2].As<v8::Object>());
+    auto& group = Unwrap<wgpu::BindGroup>(args[3].As<v8::Object>());
+    const uint32_t offset = static_cast<uint32_t>(args[4].As<v8::Number>()->Value());
+    const uint32_t count = static_cast<uint32_t>(args[5].As<v8::Number>()->Value());
+
+    pass.SetPipeline(write_pipeline);
+    pass.SetStencilReference(0);
+    pass.SetVertexBuffer(0, buffer, 0, wgpu::kWholeSize);
+    pass.SetBindGroup(0, group, 1, &offset);
+    pass.Draw(count, 1, 0, 0);
+
+    pass.SetPipeline(fill_pipeline);
+    pass.SetStencilReference(0);
+    pass.SetBindGroup(0, group, 1, &offset);
+    pass.Draw(count, 1, 0, 0);
+}
+
 static void Pass_DrawIndexed(const v8::FunctionCallbackInfo<v8::Value>& args)
 {
     auto& pass = Unwrap<wgpu::RenderPassEncoder>(args.This());
@@ -609,6 +646,7 @@ static v8::Local<v8::Object> WrapRenderPass(v8::Isolate* isolate, wgpu::RenderPa
     SetMethod(isolate, obj, "pushDebugGroup", Pass_PushDebugGroup);
     SetMethod(isolate, obj, "popDebugGroup", Pass_PopDebugGroup);
     SetMethod(isolate, obj, "insertDebugMarker", Pass_InsertDebugMarker);
+    SetMethod(isolate, obj, "__next2dStencilFill", Pass_Next2dStencilFill);
     SetMethod(isolate, obj, "end", Pass_End);
     return obj;
 }

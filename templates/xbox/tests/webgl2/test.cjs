@@ -358,6 +358,143 @@ test("stencil clip (player mask path): write mask then draw where equal", () => 
     gl.deleteTexture(texture);
 });
 
+test("__next2dSolidFills: same pixels and state as the calls made one by one", () => {
+    assert(typeof gl.__next2dSolidFills === "function", "__next2dSolidFills is provided");
+
+    // 形だけを描くプログラム (ステンシル用) と、頂点の色で塗るプログラム
+    const SHAPE_VS = `#version 300 es
+layout (location = 0) in vec2 a_vertex;
+layout (location = 1) in vec4 a_color;
+out vec4 v_color;
+void main() { v_color = a_color; gl_Position = vec4(a_vertex, 0.0, 1.0); }`;
+    const MASK_FS = `#version 300 es
+precision mediump float;
+out vec4 o_color;
+void main() { o_color = vec4(1.0); }`;
+    const VERTEX_COLOR_FS = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+out vec4 o_color;
+void main() { o_color = v_color; }`;
+    const maskProgram = link(SHAPE_VS, MASK_FS);
+    const fillProgram = link(SHAPE_VS, VERTEX_COLOR_FS);
+
+    // 塗り A: 左 3/4 を赤。塗り B: 右 3/4 を青 (中央で重なる。後から描く B が上)。
+    // 塗り C: 上半分に、向きが逆の三角形 2 枚を重ねた形 (巻き数が打ち消し合い、重なりは塗られない)
+    const quad = (x0, x1, y0, y1, r, g, b) => [
+        x0, y0, r, g, b, 1,  x1, y0, r, g, b, 1,  x1, y1, r, g, b, 1,
+        x0, y0, r, g, b, 1,  x1, y1, r, g, b, 1,  x0, y1, r, g, b, 1
+    ];
+    const data = new Float32Array([
+        ...quad(-1, 0.5, -1, 0, 1, 0, 0),
+        ...quad(-0.5, 1, -1, 0, 0, 0, 1),
+        -1, 0.25, 0, 1, 0, 1,   1, 0.25, 0, 1, 0, 1,   0, 1, 0, 1, 0, 1,
+        1, 0.25, 0, 1, 0, 1,   -1, 0.25, 0, 1, 0, 1,   0, 1, 0, 1, 0, 1
+    ]);
+    const shapes = gl.createVertexArray();
+    gl.bindVertexArray(shapes);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, 8);
+    const counts = new Int32Array([6, 6, 6, 99]);   // 4 個目は使わない
+
+    const render = (draw) => {
+        const { fbo, texture } = makeTarget(16, 16);
+        const stencil = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, stencil);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.STENCIL_INDEX8, 16, 16);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.STENCIL_ATTACHMENT, gl.RENDERBUFFER, stencil);
+        assert(gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE, "fbo incomplete");
+        gl.viewport(0, 0, 16, 16);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clearStencil(0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+        gl.enable(gl.STENCIL_TEST);
+        gl.stencilMask(0xff);
+        gl.bindVertexArray(shapes);
+        draw();
+        // 戻ったときの状態
+        eq(gl.getParameter(gl.COLOR_WRITEMASK).map(Number), [1, 1, 1, 1], "color mask after fills");
+        // 使用中のプログラムは色のプログラム (CURRENT_PROGRAM は取得できないので、描いて確かめる):
+        // ステンシルを全面 1 にしてから、プログラムを指定せずに塗り A をもう一度描くと、同じ色になる
+        gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(0, 0, 1, 1);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.scissor(0, 0, W, H);
+        eq(pixel(0, 0), [255, 0, 0, 255], "current program after fills");
+        gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.ZERO, gl.ZERO);
+        assert(gl.isEnabled(gl.SAMPLE_ALPHA_TO_COVERAGE) === false, "alpha to coverage after fills");
+        assert(gl.getParameter(gl.STENCIL_FUNC) === gl.NOTEQUAL, "stencil func after fills");
+        assert(gl.getParameter(gl.STENCIL_PASS_DEPTH_PASS) === gl.ZERO, "stencil op after fills");
+        gl.disable(gl.STENCIL_TEST);
+        const pixels = new Uint8Array(16 * 16 * 4);
+        gl.readPixels(0, 0, 16, 16, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        gl.deleteRenderbuffer(stencil);
+        gl.deleteFramebuffer(fbo);
+        gl.deleteTexture(texture);
+        return pixels;
+    };
+
+    // 1 つずつ呼ぶ場合 (player が JavaScript から行う手順)
+    const expected = render(() => {
+        let first = 0;
+        for (let i = 0; i < 3; ++i) {
+            gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+            gl.stencilOpSeparate(gl.FRONT, gl.KEEP, gl.KEEP, gl.INCR_WRAP);
+            gl.stencilOpSeparate(gl.BACK, gl.KEEP, gl.KEEP, gl.DECR_WRAP);
+            gl.colorMask(false, false, false, false);
+            gl.enable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+            gl.useProgram(maskProgram);
+            gl.drawArrays(gl.TRIANGLES, first, counts[i]);
+            gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+            gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+            gl.stencilOp(gl.KEEP, gl.ZERO, gl.ZERO);
+            gl.colorMask(true, true, true, true);
+            gl.useProgram(fillProgram);
+            gl.drawArrays(gl.TRIANGLES, first, counts[i]);
+            first += counts[i];
+        }
+    });
+    const at = (pixels, x, y) => pixels.subarray((y * 16 + x) * 4, (y * 16 + x) * 4 + 4);
+    eq(at(expected, 2, 4), [255, 0, 0, 255], "only A");
+    eq(at(expected, 8, 4), [0, 0, 255, 255], "A and B overlap: B on top");
+    eq(at(expected, 14, 4), [0, 0, 255, 255], "only B");
+    eq(at(expected, 8, 12), [0, 0, 0, 0], "C: opposite windings cancel");
+
+    // まとめて呼ぶ場合
+    const actual = render(() => {
+        gl.__next2dSolidFills(maskProgram, fillProgram, 0, 3, counts);
+    });
+    eq(actual, expected, "pixels of the run");
+
+    // 途中から、1 個だけ
+    const second = render(() => {
+        gl.__next2dSolidFills(maskProgram, fillProgram, 6, 1, counts.subarray(1));
+    });
+    eq(at(second, 2, 4), [0, 0, 0, 0], "A is not drawn");
+    eq(at(second, 14, 4), [0, 0, 255, 255], "B is drawn");
+
+    // 個数が 0 なら何もしない。配列より多い個数は INVALID_VALUE
+    gl.__next2dSolidFills(maskProgram, fillProgram, 0, 0, counts);
+    assert(gl.getError() === gl.NO_ERROR, "length 0 is a no-op");
+    gl.__next2dSolidFills(maskProgram, fillProgram, 0, 5, counts);
+    assert(gl.getError() === gl.INVALID_VALUE, "length beyond the array");
+
+    gl.bindVertexArray(null);
+    gl.deleteBuffer(buffer);
+    gl.deleteVertexArray(shapes);
+    gl.deleteProgram(maskProgram);
+    gl.deleteProgram(fillProgram);
+});
+
 test("MSAA renderbuffer resolved with blitFramebuffer", () => {
     const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES));
     const msaa = gl.createFramebuffer();

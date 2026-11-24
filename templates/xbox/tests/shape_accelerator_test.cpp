@@ -1,7 +1,7 @@
 // 図形の計算 (src/bindings/ShapeAcceleratorCore.h) のテスト。
 // 「経路の組み立て」と「塗りのメッシュの生成」が、Next2D Player の JavaScript と 1 ビットも
 // 違わない結果を返すことを確かめる (WebGL 版の規則と WebGPU 版の規則の両方)。
-// 線の外周の計算 (WebGL 版) も確かめる。三角関数を使わない部分は 1 ビットも違わないこと、
+// 線の外周の計算 (WebGL 版と WebGPU 版) も確かめる。三角関数を使わない部分は 1 ビットも違わないこと、
 // 使う部分 (丸いつなぎ目、丸い端) は形と大きさが合うことを見る。
 // V8 にも OS にも依存しない。
 //
@@ -854,6 +854,232 @@ static void TestStrokeAgainstJavaScript()
     }
 }
 
+// ---- 線の外周 (WebGPU 版) -----------------------------------------------------------
+
+static gpu::PathState MakeGpuPath(const std::vector<double>& points)
+{
+    gpu::PathState state;
+    state.current = points;
+    return state;
+}
+
+// 直線と端: 丸い端は 8 分割の扇形、四角い端は 5 点の四角形。描く線が無ければ経路に触らない
+static void TestGpuStrokeLine()
+{
+    gpu::PathState state = MakeGpuPath({ 0, 0, 0,  10, 0, 0 });
+    CHECK(gpu::StrokeSize(state, 2, 2, 0, 1.0) == gpu::kTriangleSize * 3);
+    CHECK(state.current.empty());
+    CHECK(state.vertices.size() == 1);
+    const std::vector<double> rectangle = {
+        0, 2, 0,  10, 2, 0,  10, -2, 0,  0, -2, 0,  0, 2, 0
+    };
+    CHECK(state.vertices[0] == rectangle);
+
+    // 塗りのメッシュにできる。flat なら曲線用の係数はすべて 0.5
+    std::vector<float> mesh(gpu::kTriangleSize * 3);
+    CHECK(gpu::FillMesh(state, mesh.data(), mesh.size(), true) == 9);
+    CHECK(mesh[0] == 0.0f && mesh[1] == 2.0f && mesh[2] == 0.5f && mesh[3] == 0.5f);
+    CHECK(mesh[4] == 10.0f && mesh[5] == 2.0f);
+    CHECK(mesh[8] == 10.0f && mesh[9] == -2.0f);
+
+    // 四角い端: 端の点から外へ太さの分だけ延ばした四角形が、前後に付く
+    gpu::PathState square = MakeGpuPath({ 0, 0, 0,  10, 0, 0 });
+    CHECK(gpu::StrokeSize(square, 2, 1, 2, 1.0) == gpu::kTriangleSize * 9);
+    CHECK(square.vertices.size() == 3);
+    const std::vector<double> start_cap = {
+        0, -2, 0,  -2, -2, 0,  -2, 2, 0,  0, 2, 0,  0, -2, 0
+    };
+    const std::vector<double> end_cap = {
+        10, 2, 0,  12, 2, 0,  12, -2, 0,  10, -2, 0,  10, 2, 0
+    };
+    CHECK(Near(square.vertices[0], start_cap));
+    CHECK(square.vertices[1] == rectangle);
+    CHECK(Near(square.vertices[2], end_cap));
+
+    // 丸い端: 中心と 9 点
+    gpu::PathState round = MakeGpuPath({ 0, 0, 0,  10, 0, 0 });
+    CHECK(gpu::StrokeSize(round, 2, 1, 1, 1.0) == gpu::kTriangleSize * (8 + 3 + 8));
+    CHECK(round.vertices.size() == 3);
+    CHECK(round.vertices[0].size() == 30);
+    CHECK(round.vertices[0][0] == 0 && round.vertices[0][1] == 0);
+    CHECK(std::fabs(round.vertices[0][3] - 0) < 1e-9 && std::fabs(round.vertices[0][4] - 2) < 1e-9);
+    CHECK(std::fabs(round.vertices[0][15] + 2) < 1e-9 && std::fabs(round.vertices[0][16]) < 1e-9);
+    CHECK(std::fabs(round.vertices[2][15] - 12) < 1e-9 && std::fabs(round.vertices[2][16]) < 1e-9);
+
+    // 点が 1 つだけの経路は線にならず、経路はそのまま残る
+    gpu::PathState single = MakeGpuPath({ 5, 5, 0 });
+    CHECK(gpu::StrokeSize(single, 2, 2, 0, 1.0) == 0);
+    CHECK(single.current.size() == 3);
+    CHECK(single.vertices.empty());
+
+    // 長さ 0 の直線は、太さ 0 の四角形になる (値が無くならない)
+    gpu::PathState zero = MakeGpuPath({ 3, 4, 0,  3, 4, 0 });
+    CHECK(gpu::StrokeSize(zero, 2, 2, 0, 1.0) == gpu::kTriangleSize * 3);
+    const std::vector<double> point = {
+        3, 4, 0,  3, 4, 0,  3, 4, 0,  3, 4, 0,  3, 4, 0
+    };
+    CHECK(zero.vertices[0] == point);
+}
+
+// つなぎ目: 曲線どうしでも作る。書きかけの経路と確定した経路の両方を線にする
+static void TestGpuStrokeJoins()
+{
+    // 直角に曲がる 2 本の直線 (miter): 四角形 2 つの間に、つなぎ目 (6 点) が入る
+    gpu::PathState miter = MakeGpuPath({ 0, 0, 0,  10, 0, 0,  10, 10, 0 });
+    CHECK(gpu::StrokeSize(miter, 1, 1, 0, 1.0) == gpu::kTriangleSize * (3 + 4 + 3));
+    CHECK(miter.vertices.size() == 3);
+    const std::vector<double> join = {
+        10, 0, 0,  11, 0, 0,  11, -1, 0,  10, 0, 0,  10, -1, 0,  11, -1, 0
+    };
+    CHECK(Near(miter.vertices[1], join));
+
+    // bevel: 4 点
+    gpu::PathState bevel = MakeGpuPath({ 0, 0, 0,  10, 0, 0,  10, 10, 0 });
+    CHECK(gpu::StrokeSize(bevel, 1, 0, 0, 1.0) == gpu::kTriangleSize * (3 + 2 + 3));
+    CHECK(bevel.vertices[1].size() == 12);
+
+    // round: 中心と 9 点
+    gpu::PathState round = MakeGpuPath({ 0, 0, 0,  10, 0, 0,  10, 10, 0 });
+    CHECK(gpu::StrokeSize(round, 1, 2, 0, 1.0) == gpu::kTriangleSize * (3 + 8 + 3));
+    CHECK(round.vertices[1].size() == 30);
+
+    // 確定した経路と書きかけの経路
+    gpu::PathState two;
+    two.vertices.push_back({ 0, 0, 0,  10, 0, 0 });
+    two.current = { 0, 5, 0,  10, 5, 0 };
+    CHECK(gpu::StrokeSize(two, 1, 1, 0, 1.0) == gpu::kTriangleSize * 6);
+    CHECK(two.vertices.size() == 2);
+    CHECK(two.current.empty());
+}
+
+// 曲線: 輪郭の右側は、各区間の始点が前の区間の終点と同じ値になる
+static void TestGpuStrokeCurve()
+{
+    gpu::PathState state = MakeGpuPath({ 0, 0, 0,  50, 80, 1,  100, 0, 0 });
+    const size_t size = gpu::StrokeSize(state, 3, 1, 0, 4.0);
+    CHECK(size > 0);
+    CHECK(state.vertices.size() == 1);
+    const std::vector<double>& outline = state.vertices[0];
+    // 点の数は 2 + 4 * 区間数。制御点と通過点が交互に並ぶ
+    const size_t points = outline.size() / 3;
+    CHECK(points >= 6 && (points - 2) % 4 == 0);
+    CHECK(size == (points - 2) * gpu::kTriangleSize);
+    for (size_t idx = 0; idx < points; ++idx) {
+        const size_t half = points / 2;
+        const size_t local = idx < half ? idx : idx - half;
+        CHECK(outline[idx * 3 + 2] == (local % 2 == 1 ? 1.0 : 0.0));
+    }
+}
+
+// Next2D Player (WebGPU) の JavaScript (canvas の内外判定は、実行環境の canvas と同じ計算) で求めた値。
+// 三角関数を使う場合 (丸いつなぎ目、丸い端) は、ハッシュ値を持たない (0)。
+struct GpuStrokeReference {
+    uint32_t command_length;
+    uint32_t mesh_size;
+    uint32_t index_count;
+    uint32_t mesh_hash;
+    uint32_t flat_hash;
+};
+
+static const GpuStrokeReference kGpuStrokeReferences[] = {
+    { 171u, 43548u, 10887u, 0xe6b519edu, 0xbda74ebdu },
+    { 59u, 5532u, 1383u, 0x68970482u, 0x71d038a2u },
+    { 138u, 132624u, 33156u, 0x00000000u, 0x00000000u },
+    { 185u, 108624u, 27156u, 0x00000000u, 0x00000000u },
+    { 67u, 36612u, 9153u, 0x00000000u, 0x00000000u },
+    { 23u, 13812u, 3453u, 0x00000000u, 0x00000000u },
+    { 44u, 8856u, 2214u, 0xd414d170u, 0x933dcf54u },
+    { 194u, 48648u, 12162u, 0x75ee9ccdu, 0x09941a81u },
+    { 116u, 66156u, 16539u, 0x00000000u, 0x00000000u },
+    { 130u, 82872u, 20718u, 0xd5dfbfd0u, 0xd96cef7cu },
+    { 32u, 14628u, 3657u, 0xf3b781a2u, 0xf4ce3322u },
+    { 77u, 111900u, 27975u, 0x00000000u, 0x00000000u },
+    { 104u, 24012u, 6003u, 0x00000000u, 0x00000000u },
+    { 84u, 19020u, 4755u, 0x00000000u, 0x00000000u },
+    { 33u, 23820u, 5955u, 0x00000000u, 0x00000000u },
+    { 109u, 75216u, 18804u, 0xbd0979e6u, 0x0e084ea2u },
+    { 102u, 31128u, 7782u, 0xc83ff7d1u, 0xb01ac5a9u },
+    { 133u, 146988u, 36747u, 0x00000000u, 0x00000000u },
+    { 43u, 5844u, 1461u, 0x045a1308u, 0x096af038u },
+    { 111u, 20988u, 5247u, 0x05dd116au, 0x91bd841eu },
+    { 30u, 24516u, 6129u, 0x00000000u, 0x00000000u },
+    { 72u, 19332u, 4833u, 0x00000000u, 0x00000000u },
+    { 77u, 23292u, 5823u, 0x00000000u, 0x00000000u },
+    { 124u, 256572u, 64143u, 0x00000000u, 0x00000000u },
+    { 161u, 44484u, 11121u, 0x267f68e2u, 0xc33e27b2u },
+    { 66u, 10452u, 2613u, 0x2b5c7dabu, 0x678d3193u },
+    { 120u, 93660u, 23415u, 0x00000000u, 0x00000000u },
+    { 115u, 63492u, 15873u, 0xe8148fdeu, 0x8283655au },
+    { 128u, 35340u, 8835u, 0x08d3b969u, 0xcab985c9u },
+    { 62u, 39708u, 9927u, 0x00000000u, 0x00000000u },
+    { 17u, 1908u, 477u, 0x00000000u, 0x00000000u },
+    { 55u, 20028u, 5007u, 0x00000000u, 0x00000000u },
+    { 50u, 45960u, 11490u, 0x00000000u, 0x00000000u },
+    { 32u, 11784u, 2946u, 0xfc7d2d0au, 0xbc8b01e6u },
+    { 94u, 44136u, 11034u, 0x949aefebu, 0xbdba4b9bu },
+    { 89u, 231516u, 57879u, 0x00000000u, 0x00000000u },
+    { 122u, 20832u, 5208u, 0x433ecc60u, 0xb297d8d0u },
+    { 171u, 32016u, 8004u, 0x85cad8bbu, 0xab3522dfu },
+    { 59u, 40308u, 10077u, 0x00000000u, 0x00000000u },
+    { 150u, 99792u, 24948u, 0x00000000u, 0x00000000u },
+    { 43u, 27876u, 6969u, 0x00000000u, 0x00000000u },
+    { 91u, 45336u, 11334u, 0x00000000u, 0x00000000u },
+    { 66u, 11364u, 2841u, 0xf688bb6au, 0x2a20988au },
+    { 23u, 6588u, 1647u, 0x6663d1d3u, 0xd4b25e03u },
+    { 121u, 86148u, 21537u, 0x00000000u, 0x00000000u },
+    { 79u, 36132u, 9033u, 0xe862480eu, 0x95ade4eau },
+    { 85u, 42480u, 10620u, 0x57bdecf0u, 0x5684d5a4u },
+    { 179u, 364632u, 91158u, 0x00000000u, 0x00000000u },
+};
+
+static void TestGpuStrokeAgainstJavaScript()
+{
+    const double thicknesses[] = { 0.5, 1, 2.5, 10 };
+    const size_t cases = sizeof(kGpuStrokeReferences) / sizeof(kGpuStrokeReferences[0]);
+    for (size_t i = 0; i < cases; ++i) {
+        const GpuStrokeReference& reference = kGpuStrokeReferences[i];
+        const std::vector<float> commands = MakeCommands(i);
+        CHECK(commands.size() == reference.command_length);
+
+        float m[9];
+        MakeMatrix(i, m);
+        const double scale_x = std::sqrt(static_cast<double>(m[0]) * m[0] + static_cast<double>(m[1]) * m[1]);
+        const double scale_y = std::sqrt(static_cast<double>(m[3]) * m[3] + static_cast<double>(m[4]) * m[4]);
+        const double pixel_scale = scale_x > scale_y ? scale_x : scale_y;
+        const int joints = static_cast<int>(i % 3);
+        const int caps = static_cast<int>(i / 3 % 3);
+
+        gpu::PathState state;
+        CHECK(gpu::FeedPath(state, commands.data(), commands.size(), 0, pixel_scale) == commands.size());
+        const size_t size = gpu::StrokeSize(state, thicknesses[i % 4] / 2, joints, caps, pixel_scale);
+        CHECK(size == reference.mesh_size);
+        if (size != reference.mesh_size) {
+            std::printf("  webgpu stroke case %zu: mesh size %zu, expected %u\n", i, size, reference.mesh_size);
+            std::printf("::error::webgpu stroke case %zu: mesh size %zu, expected %u\n", i, size, reference.mesh_size);
+            continue;
+        }
+        std::vector<float> mesh(size);
+        CHECK(gpu::FillMesh(state, mesh.data(), mesh.size()) == reference.index_count);
+        std::vector<float> flat(size);
+        CHECK(gpu::FillMesh(state, flat.data(), flat.size(), true) == reference.index_count);
+        if (reference.mesh_hash == 0) {
+            continue;
+        }
+        const uint32_t hash = FnvCanonical(mesh.data(), mesh.size());
+        CHECK(hash == reference.mesh_hash);
+        if (hash != reference.mesh_hash) {
+            std::printf("  webgpu stroke case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+            std::printf("::error::webgpu stroke case %zu: mesh hash %08x, expected %08x\n", i, hash, reference.mesh_hash);
+        }
+        const uint32_t flat_hash = FnvCanonical(flat.data(), flat.size());
+        CHECK(flat_hash == reference.flat_hash);
+        if (flat_hash != reference.flat_hash) {
+            std::printf("  webgpu stroke case %zu: flat hash %08x, expected %08x\n", i, flat_hash, reference.flat_hash);
+            std::printf("::error::webgpu stroke case %zu: flat hash %08x, expected %08x\n", i, flat_hash, reference.flat_hash);
+        }
+    }
+}
+
 int main()
 {
     TestFeedPath();
@@ -872,6 +1098,10 @@ int main()
     TestStrokeCurve();
     TestJsHypot();
     TestStrokeAgainstJavaScript();
+    TestGpuStrokeLine();
+    TestGpuStrokeJoins();
+    TestGpuStrokeCurve();
+    TestGpuStrokeAgainstJavaScript();
     if (g_failed) {
         std::printf("%d check(s) failed\n", g_failed);
         // 結果が食い違うのは、たいてい積和の融合 (FMA) が入ったとき。原因を切り分ける情報を出す

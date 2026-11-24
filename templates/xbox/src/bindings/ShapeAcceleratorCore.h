@@ -505,9 +505,12 @@ inline int StrokeSplitCount(double x0, double y0, double x1, double y1, double x
     return count;
 }
 
-// 曲線の区間を、太さの分だけ両側へずらした輪郭にする (左側を順に、右側を逆順にたどる)
+// 曲線の区間を、太さの分だけ両側へずらした輪郭にする (左側を順に、右側を逆順にたどる)。
+// join_previous: 右側の各区間の始点に、その区間の t = 0 の点ではなく、前の区間の t = 1 の点を使う
+// (WebGPU 版の規則。同じ位置だが、計算に使う区間が違うので最後の桁が変わりうる)
 inline void StrokeCurveRectangle(double sx, double sy, double cx, double cy, double ex, double ey,
-                                 double thickness, double pixel_scale, Path& out)
+                                 double thickness, double pixel_scale, Path& out,
+                                 bool join_previous = false)
 {
     const int split_count = StrokeSplitCount(sx, sy, cx, cy, ex, ey, thickness, pixel_scale);
 
@@ -565,9 +568,11 @@ inline void StrokeCurveRectangle(double sx, double sy, double cx, double cy, dou
         PushPathPoint(out, control[0], control[1], 1.0);
         PushPathPoint(out, point[0], point[1], 0.0);
 
-        StrokeOffsetPoint(0, x0, y0, x1, y1, x2, y2, -thickness, right + source);
+        if (!join_previous || idx == 0) {
+            StrokeOffsetPoint(0, x0, y0, x1, y1, x2, y2, -thickness, right + source);
+        }
         StrokeOffsetPoint(0.5, x0, y0, x1, y1, x2, y2, -thickness, right + source + 2);
-        if (idx == count - 1) {
+        if (join_previous || idx == count - 1) {
             StrokeOffsetPoint(1, x0, y0, x1, y1, x2, y2, -thickness, right + source + 4);
         }
     }
@@ -577,7 +582,11 @@ inline void StrokeCurveRectangle(double sx, double sy, double cx, double cy, dou
     for (int idx = count - 1; idx >= 0; --idx) {
         const int source = idx * 6;
         PushPathPoint(out, right[source + 2], right[source + 3], 1.0);
-        PushPathPoint(out, right[source], right[source + 1], 0.0);
+        if (join_previous && idx > 0) {
+            PushPathPoint(out, right[source - 2], right[source - 1], 0.0);
+        } else {
+            PushPathPoint(out, right[source], right[source + 1], 0.0);
+        }
     }
 }
 
@@ -677,6 +686,8 @@ struct StrokeWork {
     std::vector<double> points_a;
     std::vector<double> points_b;
     std::vector<double> polygon;
+    // WebGPU 版の規則でつなぎ目を作る (曲線どうしでも作る。丸いつなぎ目を角度で省かない)
+    bool webgpu_rules = false;
 };
 
 // つなぎ目を作る 2 つの輪郭から、互いの外側にある点を 1 つずつ探す。つなぎ目が要らなければ false
@@ -689,8 +700,8 @@ inline bool StrokeJoinPoints(double x, double y, double r, const std::vector<Pat
     const Path& rect_a = rectangles[index_a];
     const Path& rect_b = rectangles[index_b];
 
-    // 曲線の輪郭どうしはなめらかにつながっているので、つなぎ目は要らない
-    if (rect_a.size() > 15 && rect_b.size() > 15) {
+    // 曲線の輪郭どうしはなめらかにつながっているので、つなぎ目は要らない (WebGL 版の規則)
+    if (!work.webgpu_rules && rect_a.size() > 15 && rect_b.size() > 15) {
         return false;
     }
 
@@ -802,9 +813,9 @@ inline void StrokeRoundJoin(double x, double y, double r, std::vector<Path>& rec
         angle_diff += 2 * kStrokePi;
     }
 
-    // 差が小さいとき、180 度に近いときは作らない
+    // 差が小さいとき、180 度に近いときは作らない (WebGL 版の規則)
     const double abs_diff = std::fabs(angle_diff);
-    if (abs_diff < 0.1 || abs_diff > kStrokePi - 0.1) {
+    if (!work.webgpu_rules && (abs_diff < 0.1 || abs_diff > kStrokePi - 0.1)) {
         return;
     }
 
@@ -1252,7 +1263,9 @@ inline size_t FillSize(const PathState& s)
     return triangles * kTriangleSize;
 }
 
-inline size_t FillPath(const std::vector<double>& path, float* target, size_t target_length, size_t index)
+// flat: 曲線用の係数をすべて 0.5 にする (グラデーションや画像で描く線のメッシュの形式)
+inline size_t FillPath(const std::vector<double>& path, float* target, size_t target_length, size_t index,
+                       bool flat = false)
 {
     const double* v = path.data();
     const size_t size = path.size();
@@ -1267,16 +1280,16 @@ inline size_t FillPath(const std::vector<double>& path, float* target, size_t ta
             // 曲線 (前の点、制御点、次の点)
             out[0] = static_cast<float>(v[idx - 3]);
             out[1] = static_cast<float>(v[idx - 2]);
-            out[2] = 0.0f;
-            out[3] = 0.0f;
+            out[2] = flat ? 0.5f : 0.0f;
+            out[3] = flat ? 0.5f : 0.0f;
             out[4] = static_cast<float>(v[idx]);
             out[5] = static_cast<float>(v[idx + 1]);
             out[6] = 0.5f;
-            out[7] = 0.0f;
+            out[7] = flat ? 0.5f : 0.0f;
             out[8] = static_cast<float>(v[idx + 3]);
             out[9] = static_cast<float>(v[idx + 4]);
-            out[10] = 1.0f;
-            out[11] = 1.0f;
+            out[10] = flat ? 0.5f : 1.0f;
+            out[11] = flat ? 0.5f : 1.0f;
         } else {
             // 扇形の三角形 (先頭の点、この点、次の点。次が制御点ならその先)
             const size_t next = v[idx + 5] != 0.0 ? idx + 6 : idx + 3;
@@ -1300,16 +1313,202 @@ inline size_t FillPath(const std::vector<double>& path, float* target, size_t ta
 }
 
 // メッシュを target の先頭から書き、頂点数を返す。経路はそのまま残る
-inline size_t FillMesh(const PathState& s, float* target, size_t target_length)
+inline size_t FillMesh(const PathState& s, float* target, size_t target_length, bool flat = false)
 {
     size_t index = 0;
     for (const std::vector<double>& path : s.vertices) {
-        index = FillPath(path, target, target_length, index);
+        index = FillPath(path, target, target_length, index, flat);
     }
     if (UsesCurrent(s, false)) {
-        index = FillPath(s.current, target, target_length, index);
+        index = FillPath(s.current, target, target_length, index, flat);
     }
     return index;
+}
+
+// ---- 線 (WebGPU 版) ----------------------------------------------------------------
+// WebGL 版と同じ考え方 (線の外周をなぞる経路に変換して、塗りと同じ方法でメッシュにする) だが、
+// player の WebGPU 版 (Mesh/usecase/MeshStrokeGenerateUseCase) は次の点が違う:
+//   - 長さ 0 の直線は、太さ 0 の四角形になる (WebGL 版は値が無い)
+//   - 曲線の輪郭の右側は、各区間の始点に前の区間の終点を使う
+//   - 曲線どうしのつなぎ目も作る。丸いつなぎ目を角度で省かない
+//   - 丸い端は 8 分割の扇形、四角い端は 5 点の四角形
+
+inline void StrokeLineRectangle(double sx, double sy, double ex, double ey, double thickness, Path& out)
+{
+    const double vx = ex - sx;
+    const double vy = ey - sy;
+    const double magnitude = std::sqrt(vx * vx + vy * vy);
+    double nx = 0.0;
+    double ny = 0.0;
+    if (magnitude != 0) {
+        nx = -(vy / magnitude) * thickness;
+        ny = vx / magnitude * thickness;
+    }
+    PushPathPoint(out, sx + nx, sy + ny, 0.0);
+    PushPathPoint(out, ex + nx, ey + ny, 0.0);
+    PushPathPoint(out, ex - nx, ey - ny, 0.0);
+    PushPathPoint(out, sx - nx, sy - ny, 0.0);
+    PushPathPoint(out, sx + nx, sy + ny, 0.0);
+}
+
+// 端の点から外へ向かう半円 (端の点を中心にした、8 分割の扇形)
+inline void StrokeRoundCapPath(double x, double y, double from_x, double from_y, double r, Path& out)
+{
+    const double base = std::atan2(y - from_y, x - from_x);
+    const int segment = 8;
+    PushPathPoint(out, x, y, 0.0);
+    for (int idx = 0; idx <= segment; ++idx) {
+        const double angle = base - kStrokePi / 2 + idx * kStrokePi / segment;
+        PushPathPoint(out, x + r * std::cos(angle), y + r * std::sin(angle), 0.0);
+    }
+}
+
+inline void StrokeRoundCap(const Path& v, double r, std::vector<Path>& rectangles)
+{
+    const size_t size = v.size();
+    Path start;
+    StrokeRoundCapPath(v[0], v[1], v[3], v[4], r, start);
+    rectangles.insert(rectangles.begin(), std::move(start));
+
+    Path end;
+    StrokeRoundCapPath(v[size - 3], v[size - 2], v[size - 6], v[size - 5], r, end);
+    rectangles.push_back(std::move(end));
+}
+
+// 端の点から外へ、太さの分だけ延ばした四角形。端の向きが決まらなければ false
+inline bool StrokeSquareCapPath(double x, double y, double from_x, double from_y, double r, Path& out)
+{
+    const double dx = x - from_x;
+    const double dy = y - from_y;
+    const double length = JsHypot(dx, dy);
+    if (!(length > 0)) {
+        return false;
+    }
+    const double nx = dx / length;
+    const double ny = dy / length;
+    const double ext_x = x + nx * r;
+    const double ext_y = y + ny * r;
+    PushPathPoint(out, x - ny * r, y + nx * r, 0.0);
+    PushPathPoint(out, ext_x - ny * r, ext_y + nx * r, 0.0);
+    PushPathPoint(out, ext_x + ny * r, ext_y - nx * r, 0.0);
+    PushPathPoint(out, x + ny * r, y - nx * r, 0.0);
+    PushPathPoint(out, x - ny * r, y + nx * r, 0.0);
+    return true;
+}
+
+inline void StrokeSquareCap(const Path& v, double r, std::vector<Path>& rectangles)
+{
+    const size_t size = v.size();
+    Path start;
+    if (StrokeSquareCapPath(v[0], v[1], v[3], v[4], r, start)) {
+        rectangles.insert(rectangles.begin(), std::move(start));
+    }
+    Path end;
+    if (StrokeSquareCapPath(v[size - 3], v[size - 2], v[size - 6], v[size - 5], r, end)) {
+        rectangles.push_back(std::move(end));
+    }
+}
+
+// 経路 1 本の線の外周を、塗りと同じ形式の経路の並びにして out の末尾へ足す
+inline void StrokeOutline(const Path& v, double thickness, int joints, int caps, double pixel_scale,
+                          StrokeWork& work, std::vector<Path>& out)
+{
+    const size_t size = v.size();
+    if (size < 6) {
+        return;
+    }
+
+    double start_x = v[0];
+    double start_y = v[1];
+    double control_x = 0.0;
+    double control_y = 0.0;
+
+    std::vector<Path> rectangles;
+    for (size_t idx = 3; idx + 2 < size; idx += 3) {
+        const double x = v[idx];
+        const double y = v[idx + 1];
+        if (v[idx + 2] != 0.0) {
+            control_x = x;
+            control_y = y;
+            continue;
+        }
+
+        rectangles.emplace_back();
+        if (v[idx - 1] != 0.0) {
+            StrokeCurveRectangle(start_x, start_y, control_x, control_y, x, y,
+                                 thickness, pixel_scale, rectangles.back(), true);
+        } else {
+            StrokeLineRectangle(start_x, start_y, x, y, thickness, rectangles.back());
+        }
+
+        if (rectangles.size() > 1) {
+            if (joints == 0) {
+                StrokeBevelJoin(start_x, start_y, thickness, rectangles, false, work);
+            } else if (joints == 1) {
+                StrokeMiterJoin(start_x, start_y, x, y, v[idx - 6], v[idx - 5],
+                                thickness, rectangles, false, work);
+            } else if (joints == 2) {
+                StrokeRoundJoin(start_x, start_y, thickness, rectangles, false, work);
+            }
+        }
+
+        start_x = x;
+        start_y = y;
+    }
+
+    // 始点と終点がつながっていれば、そこにもつなぎ目を作る。つながっていなければ端を作る
+    const double closed_start_x = v[0];
+    const double closed_start_y = v[1];
+    const double closed_end_x = v[size - 3];
+    const double closed_end_y = v[size - 2];
+    const bool is_closed = std::fabs(closed_start_x - closed_end_x) < kStrokeEpsilon
+        && std::fabs(closed_start_y - closed_end_y) < kStrokeEpsilon
+        && rectangles.size() > 1;
+
+    if (is_closed) {
+        if (joints == 0) {
+            StrokeBevelJoin(closed_start_x, closed_start_y, thickness, rectangles, true, work);
+        } else if (joints == 1) {
+            StrokeMiterJoin(closed_start_x, closed_start_y, v[3], v[4], v[size - 6], v[size - 5],
+                            thickness, rectangles, true, work);
+        } else if (joints == 2) {
+            StrokeRoundJoin(closed_start_x, closed_start_y, thickness, rectangles, true, work);
+        }
+    } else if (!rectangles.empty()) {
+        if (caps == 1) {
+            StrokeRoundCap(v, thickness, rectangles);
+        } else if (caps == 2) {
+            StrokeSquareCap(v, thickness, rectangles);
+        }
+    }
+
+    for (Path& rectangle : rectangles) {
+        out.push_back(std::move(rectangle));
+    }
+}
+
+// いまの経路を線の外周の経路に置き換え、それを塗りのメッシュにしたときの要素数を返す。
+// 続けて FillMesh を呼ぶと、線のメッシュが得られる。
+// 描く線が無ければ 0 を返し、経路には触らない (JavaScript で線を作るときと同じ)。
+// thickness は線の太さの半分。pixel_scale は座標 1 単位が画面上で何ピクセルになるか。
+inline size_t StrokeSize(PathState& s, double thickness, int joints, int caps, double pixel_scale)
+{
+    StrokeWork work;
+    work.webgpu_rules = true;
+    std::vector<Path> outlines;
+    // 名前空間を明示する (引数の型から、WebGL 版の同名の関数も候補に入ってしまうため)
+    for (const Path& path : s.vertices) {
+        gpu::StrokeOutline(path, thickness, joints, caps, pixel_scale, work, outlines);
+    }
+    if (UsesCurrent(s, true)) {
+        gpu::StrokeOutline(s.current, thickness, joints, caps, pixel_scale, work, outlines);
+    }
+    if (outlines.empty()) {
+        return 0;
+    }
+    s.vertices = std::move(outlines);
+    s.current.clear();
+    return FillSize(s);
 }
 
 } // namespace gpu

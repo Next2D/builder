@@ -161,6 +161,25 @@ export const readElectronConfig = (root: string): IElectronConfig => {
 };
 
 /** JSON is the source of game metadata; secrets stay in the environment/keychain. */
+/**
+ * Electron fuses for a packaged game (names of @electron/fuses FuseV1Options).
+ * ASAR integrity validation exists on macOS and Windows only.
+ */
+export const createElectronFuses = (platform: string, arch: string): {
+    resetAdHocDarwinSignature: boolean;
+    options: Record<string, boolean>;
+} => ({
+    // Changing the binary invalidates the ad-hoc signature Apple silicon requires; a real signature replaces it later.
+    "resetAdHocDarwinSignature": platform === "darwin" && arch === "arm64",
+    "options": {
+        "RunAsNode": false,
+        "EnableNodeOptionsEnvironmentVariable": false,
+        "EnableNodeCliInspectArguments": false,
+        "EnableEmbeddedAsarIntegrityValidation": platform === "darwin" || platform === "win32",
+        "OnlyLoadAppFromAsar": true
+    }
+});
+
 export const createElectronPackagerOptions = (
     root: string, config: IElectronConfig, os: ElectronOS, resources: string
 ) => {

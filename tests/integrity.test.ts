@@ -57,3 +57,22 @@ test("the generated Electron host carries the manifest of the game files it ship
         assert.match(fs.readFileSync(path.join(dir, "index.js"), "utf8"), /verifyAsset\(integrity, assetRoot, asset, data\)/);
     });
 });
+
+test("packaged Electron runtimes load only the validated ASAR and ignore switches that run other code", async () => {
+    const { createElectronFuses } = await import("../dist/electron-config.js");
+    for (const [platform, arch, validated, adHoc] of [
+        ["win32", "x64", true, false], ["darwin", "arm64", true, true],
+        ["darwin", "x64", true, false], ["linux", "x64", false, false]
+    ]) {
+        const fuses = createElectronFuses(platform, arch);
+        assert.equal(fuses.resetAdHocDarwinSignature, adHoc);
+        assert.deepEqual(fuses.options, {
+            RunAsNode: false,
+            EnableNodeOptionsEnvironmentVariable: false,
+            EnableNodeCliInspectArguments: false,
+            // Electron validates the ASAR on macOS and Windows only
+            EnableEmbeddedAsarIntegrityValidation: validated,
+            OnlyLoadAppFromAsar: true
+        });
+    }
+});

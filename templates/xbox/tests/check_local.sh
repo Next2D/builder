@@ -19,6 +19,11 @@ echo "== 1/5 RasterCore unit tests =="
 c++ -std=c++17 -Wall -Wextra -O1 -o /tmp/next2d_raster_test tests/raster_test.cpp
 /tmp/next2d_raster_test
 
+echo "== asset integrity unit tests (ASan/UBSan) =="
+c++ -std=c++17 -Wall -Wextra -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -Isrc -o /tmp/next2d_integrity_test tests/integrity_test.cpp
+/tmp/next2d_integrity_test
+
 echo "== 2/5 RasterCore unit tests (ASan/UBSan) =="
 c++ -std=c++17 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -o /tmp/next2d_raster_test_asan tests/raster_test.cpp

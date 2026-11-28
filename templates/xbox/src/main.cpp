@@ -18,6 +18,8 @@
 #include "HostContext.h"
 #include "AssetLoader.h"
 #include "EmbeddedAssets.h"
+#include "AssetIntegrityManifest.h"
+#include "platform/AssetIntegrity.h"
 #include "EventLoop.h"
 #include "gpu/DawnContext.h"
 #include "platform/DecodeQueue.h"
@@ -510,6 +512,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
         std::cerr << "[Assets] using embedded pak" << std::endl;
     }
 
+    // ゲームのファイルの照合に使う一覧 (builder が書き出すときに実行ファイルへ組み込む)。
+    // 空 (builder を通さないビルド) なら照合しない。
+    {
+        std::string manifest;
+        for (const char* const* line = kAssetIntegrityLines; *line; ++line) {
+            manifest += *line;
+            manifest += '
+';
+        }
+        integrity::SetManifest(manifest.c_str());
+    }
+
     // フォント登録 (stb_truetype 用)。コンソールにはシステムフォント/DirectWrite が
     // 無いため、資材内の TTF/OTF を stbtext レジストリへ登録しておく
     // (デスクトップは DirectWrite が主経路のため未使用でも無害)。
@@ -636,10 +650,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmd_line, int)
     {
         // 埋め込み pak を優先し、無ければ隣接ファイルから読む host スクリプトローダ。
         const auto load_host_script = [&](const std::string& key, const fs::path& file) {
+            std::string script;
             if (const auto* embedded = GetEmbeddedAsset(key)) {
-                return std::string(embedded->begin(), embedded->end());
+                script.assign(embedded->begin(), embedded->end());
+            } else {
+                script = ReadFile(file);
             }
-            return ReadFile(file);
+            // 書き換えられたホストスクリプトは実行しない
+            if (!script.empty() && !integrity::Verify(key, script)) {
+                script.clear();
+            }
+            return script;
         };
 
         const std::string boot = load_host_script("js/bootstrap.js", bootstrap_js);

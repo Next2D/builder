@@ -93,3 +93,21 @@ test("developer tools are off unless the Electron config turns them on", async (
     fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ devTools: "yes" }));
     assert.throws(() => readElectronConfig(root), /devTools must be a boolean/);
 });
+
+test("native hosts get one line per script file, and nothing for media", async () => {
+    const { createIntegrityLines, renderIntegrityHeader, isCodeFile } = await import("../dist/integrity.js");
+    for (const name of ["a.js", "a.MJS", "index.html", "data/config.json", "x.wasm"]) assert.equal(isCodeFile(name), true, name);
+    for (const name of ["bgm.mp3", "a.png", "font.ttf", "js", "a.js.map"]) assert.equal(isCodeFile(name), false, name);
+    const lines = createIntegrityLines([
+        ["js/bootstrap.js", Buffer.from("boot")], ["assets/bgm.mp3", Buffer.from("sound")], ["index.html", Buffer.from("<html>")]
+    ]);
+    assert.deepEqual(lines, [
+        `${crypto.createHash("sha256").update("boot").digest("hex")}  js/bootstrap.js`,
+        `${crypto.createHash("sha256").update("<html>").digest("hex")}  index.html`
+    ].sort());
+    assert.throws(() => createIntegrityLines([["a\n.js", Buffer.from("")]]), /line break/);
+    const header = renderIntegrityHeader([`${"0".repeat(64)}  a "quoted" \\ name.js`]);
+    assert.match(header, /inline const char\* const kAssetIntegrityLines\[\] = \{/);
+    assert.ok(header.includes(`    "${"0".repeat(64)}  a \\"quoted\\" \\\\ name.js",`));
+    assert.ok(header.includes("    nullptr\n};"));
+});

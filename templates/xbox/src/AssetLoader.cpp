@@ -1,4 +1,5 @@
 #include "AssetLoader.h"
+#include "platform/AssetIntegrity.h"
 #include "EmbeddedAssets.h"
 
 #include <chrono>
@@ -135,7 +136,12 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
     }
 
     // 埋め込みモード優先: exe 内 pak に同じ相対キーがあれば実ファイルより先に返す。
-    if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
+    const std::string key = RelativeKey(url);
+    if (const auto* embedded = GetEmbeddedAsset(key)) {
+        // ビルドの後に書き換えられたファイルは使わない (platform/AssetIntegrity.h)
+        if (!integrity::Verify(key, embedded->data(), embedded->size())) {
+            return std::nullopt;
+        }
         return *embedded;
     }
 
@@ -158,7 +164,10 @@ std::optional<std::vector<uint8_t>> AssetLoader::ReadBinary(const std::string& u
         std::chrono::steady_clock::now() - started).count();
     if (perf && ms >= 10) {
         std::cerr << "[HostCore] slow read: " << ms << " ms, " << size << " bytes, "
-                  << RelativeKey(url) << std::endl;
+                  << key << std::endl;
+    }
+    if (!integrity::Verify(key, buffer.data(), buffer.size())) {
+        return std::nullopt;
     }
     return buffer;
 }
@@ -221,6 +230,10 @@ std::unique_ptr<std::istream> AssetLoader::OpenStream(const std::string& url) co
     if (url.rfind("data:", 0) == 0) {
         return nullptr;
     }
+    // 照合が要るファイルは、全体を読んでからでないと使えない (呼び出し側は ReadBinary へ回る)
+    if (integrity::NeedsCheck(RelativeKey(url))) {
+        return nullptr;
+    }
     // 埋め込みモード優先 (ReadBinary と同じ順)。埋め込み資材は終了まで解放されない。
     if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
         return std::make_unique<MemoryStream>(embedded->data(), embedded->size());
@@ -234,7 +247,11 @@ std::unique_ptr<std::istream> AssetLoader::OpenStream(const std::string& url) co
 
 std::optional<std::string> AssetLoader::ReadText(const std::string& url) const
 {
-    if (const auto* embedded = GetEmbeddedAsset(RelativeKey(url))) {
+    const std::string key = RelativeKey(url);
+    if (const auto* embedded = GetEmbeddedAsset(key)) {
+        if (!integrity::Verify(key, embedded->data(), embedded->size())) {
+            return std::nullopt;
+        }
         return std::string(embedded->begin(), embedded->end());
     }
 
@@ -245,7 +262,11 @@ std::optional<std::string> AssetLoader::ReadText(const std::string& url) const
     }
     std::ostringstream oss;
     oss << ifs.rdbuf();
-    return oss.str();
+    std::string text = oss.str();
+    if (!integrity::Verify(key, text)) {
+        return std::nullopt;
+    }
+    return text;
 }
 
 std::optional<std::string> AssetLoader::ResolveEntryModule() const
@@ -264,6 +285,9 @@ std::optional<std::string> AssetLoader::ResolveEntryModule() const
         std::ostringstream oss;
         oss << ifs.rdbuf();
         html = oss.str();
+    }
+    if (!integrity::Verify("index.html", html)) {
+        return std::nullopt;
     }
 
     // type="module" を含む <script ... src="..."> を優先して拾う。

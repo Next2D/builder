@@ -176,6 +176,12 @@ NEXT2D_HOST_CORE_API void next2d_host_set_render_thread(
  * NULL か空文字列を渡すと既定に戻る。 */
 NEXT2D_HOST_CORE_API void next2d_host_set_cache_dir(const char* directory);
 
+/* アプリに見せる表示言語 (navigator.language / navigator.languages) を BCP 47 の言語タグ
+ * (例 "ja", "en-US", "zh-Hans") で設定する (不要なら呼ばなくてよい)。next2d_host_create の前に
+ * 呼ぶこと。本体の言語設定に合わせてゲームの文言を切り替えるために使う。
+ * NULL か空文字列を渡すと既定 ("en-US") に戻る。 */
+NEXT2D_HOST_CORE_API void next2d_host_set_language(const char* language);
+
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);
 

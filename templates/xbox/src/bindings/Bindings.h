@@ -9,6 +9,10 @@ namespace next2d {
 
 class HostContext;
 
+// navigator.language / navigator.languages に出す言語タグを設定する (next2d_host_set_language)。
+// 空文字列なら既定 ("en-US")。InstallGlobalBindings より前に呼ぶこと。
+void SetNavigatorLanguage(const std::string& language);
+
 // console.* (log/info/warn/error/debug)
 void InstallConsole(v8::Isolate* isolate, v8::Local<v8::Object> global);
 

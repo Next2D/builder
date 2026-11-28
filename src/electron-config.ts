@@ -23,6 +23,7 @@ export interface IElectronConfig {
     window: { width: number; height: number; fullscreen: boolean; overlay?: IElectronOverlayConfig; mini?: IElectronMiniConfig };
     steam?: { appId: string | null; depots: Partial<Record<ElectronOS, string | null>>; branch?: string };
     macos: { sign: boolean; notarize: boolean; localNetworkUsageDescription?: string };
+    devTools: boolean;
 }
 
 export const validateSteamId = (value: unknown): string => {
@@ -55,6 +56,8 @@ export const readElectronConfig = (root: string): IElectronConfig => {
         "architectures": input.architectures ?? {},
         "window": { "width": 1280, "height": 720, "fullscreen": false, ...input.window },
         "macos": { "sign": false, "notarize": false, ...input.macos },
+        // Developer tools let anyone inspect and change the running game; off unless a development config asks for them.
+        "devTools": input.devTools ?? false,
         "steam": input.steam,
         "nativeBridge": input.nativeBridge
     };
@@ -78,6 +81,9 @@ export const readElectronConfig = (root: string): IElectronConfig => {
         if (typeof value !== "boolean") {
             throw new Error("Electron fullscreen/sign/notarize options must be booleans.");
         }
+    }
+    if (typeof config.devTools !== "boolean") {
+        throw new Error("electron.config.json devTools must be a boolean.");
     }
     const overlay: Partial<IElectronOverlayConfig> | undefined = config.window.overlay;
     if (overlay !== undefined) {

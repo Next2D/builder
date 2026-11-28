@@ -46,7 +46,7 @@ export const withElectronHost = async <T>(
         fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
         fs.cpSync(resources, path.join(dir, "resources"), { "recursive": true });
         const nativeBridge = config.nativeBridge ? stageNativeBridge(root, dir, config.nativeBridge, target ?? "") : undefined;
-        const runtime = { "appId": config.appId, "appName": config.appName, "window": config.window, "icon": "", nativeBridge };
+        const runtime = { "appId": config.appId, "appName": config.appName, "window": config.window, "icon": "", "devTools": config.devTools, nativeBridge };
         if (config.icons.linux) {
             fs.copyFileSync(path.resolve(root, config.icons.linux), path.join(dir, "resources/desktop-icon.png"));
             runtime.icon = "desktop-icon.png";

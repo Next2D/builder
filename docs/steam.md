@@ -76,6 +76,7 @@ Steamは複数Depotに対応。builderは各OSに1 IDまでで、一部OSだけ�
 | `steam.appId` / `steam.depots` | 配布時は `null` を実際のApp ID・Depot IDへ変更する。Depot IDをApp IDから推測しない。未設定のOSはアップロード対象外。 |
 | `steam.branch` | 反映先。既定は `internal`。 |
 | `macos.sign` / `macos.notarize` | ローカル検証は `false`、配布時は両方 `true`。 |
+| `devTools` | 開発者ツール（コンソールなど）を開けるようにするか。既定は `false`（開けない）。`true` にすると F12 または Ctrl/Cmd+Shift+I で開閉できる。開発用の設定ファイル（`NEXT2D_ELECTRON_CONFIG_FILE`）でだけ `true` にし、配布するビルドでは指定しない。 |
 | `macos.localNetworkUsageDescription` | LAN通信の利用目的。指定時のみ、メインアプリとElectron HelperのInfo.plistへ`NSLocalNetworkUsageDescription`を設定する。macOSの許可操作はユーザーが行う。 |
 
 #### オーバーレイウィンドウ
@@ -353,6 +354,7 @@ Edit the configuration at the game root. The version comes from the root `packag
 | `steam.appId` / `steam.depots` | For distribution, replace `null` with actual App/Depot IDs. Do not infer Depot IDs from the App ID. Operating systems without a Depot ID are excluded from uploading. |
 | `steam.branch` | Target branch; defaults to `internal`. |
 | `macos.sign` / `macos.notarize` | Both `false` for local testing; both `true` for distribution. |
+| `devTools` | Whether the developer tools (console, etc.) can be opened. Defaults to `false` (they cannot). With `true`, F12 or Ctrl/Cmd+Shift+I toggles them. Set it only in a development config file (`NEXT2D_ELECTRON_CONFIG_FILE`); leave it out of builds you distribute. |
 
 #### Overlay window
 

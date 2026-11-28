@@ -76,3 +76,20 @@ test("packaged Electron runtimes load only the validated ASAR and ignore switche
         });
     }
 });
+
+test("developer tools are off unless the Electron config turns them on", async (t) => {
+    const root = fixture(t);
+    const web = path.join(root, "web");
+    assert.equal(readElectronConfig(root).devTools, false);
+    await withElectronHost(root, web, readElectronConfig(root), async (dir) => {
+        assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "runtime-config.json"), "utf8")).devTools, false);
+        assert.match(fs.readFileSync(path.join(dir, "index.js"), "utf8"), /devTools: config\.devTools === true/);
+    });
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ devTools: true }));
+    assert.equal(readElectronConfig(root).devTools, true);
+    await withElectronHost(root, web, readElectronConfig(root), async (dir) => {
+        assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "runtime-config.json"), "utf8")).devTools, true);
+    });
+    fs.writeFileSync(path.join(root, "electron.config.json"), JSON.stringify({ devTools: "yes" }));
+    assert.throws(() => readElectronConfig(root), /devTools must be a boolean/);
+});

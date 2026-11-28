@@ -304,6 +304,8 @@ const createWindow = async () => {
         } : {}),
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
+            // Developer tools can read and change the running game. Off unless electron.config.json sets devTools.
+            devTools: config.devTools === true,
             ...(preloadFlags.length ? { preload: path.join(__dirname, "preload.cjs"), additionalArguments: preloadFlags } : {}),
             ...(config.nativeBridge ? { backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
         }
@@ -362,6 +364,15 @@ const createWindow = async () => {
         }
     }
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    if (config.devTools === true) {
+        // No application menu carries the usual shortcut, so offer it here: F12 or Ctrl/Cmd+Shift+I.
+        mainWindow.webContents.on("before-input-event", (event, input) => {
+            if (input.type === "keyDown" && (input.key === "F12" || ((input.control || input.meta) && input.shift && input.key.toLowerCase() === "i"))) {
+                event.preventDefault();
+                mainWindow.webContents.toggleDevTools();
+            }
+        });
+    }
     mainWindow.webContents.on("will-navigate", (event, url) => {
         if (!resolveAssetPath(assetRoot, url)) {
             event.preventDefault();

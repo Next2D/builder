@@ -1,9 +1,13 @@
-const { app, BrowserWindow, Menu, net, powerMonitor, protocol, screen, session, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, net, powerMonitor, protocol, screen, session, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { resolveAssetPath, CSP } = require("./local-assets.cjs");
+const { resolveAssetPath, verifyAsset, CSP } = require("./local-assets.cjs");
 const config = require("./runtime-config.json");
+// Hashes of the game files, recorded by the builder. Absent only when the host is run without the builder.
+const integrityFile = path.join(__dirname, "integrity.json");
+const integrity = fs.existsSync(integrityFile) ? JSON.parse(fs.readFileSync(integrityFile, "utf8")) : null;
+let tampered = false;
 const { NativeBridge, isTrustedSender } = require("./native-bridge.cjs");
 let nativeBridge;
 const closeNativeBridge = () => nativeBridge?.close();
@@ -300,6 +304,8 @@ const createWindow = async () => {
         } : {}),
         webPreferences: {
             nodeIntegration: false, contextIsolation: true, sandbox: true,
+            // Developer tools can read and change the running game. Off unless electron.config.json sets devTools.
+            devTools: config.devTools === true,
             ...(preloadFlags.length ? { preload: path.join(__dirname, "preload.cjs"), additionalArguments: preloadFlags } : {}),
             ...(config.nativeBridge ? { backgroundThrottling: config.nativeBridge.backgroundThrottling ?? false } : {})
         }
@@ -358,6 +364,15 @@ const createWindow = async () => {
         }
     }
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    if (config.devTools === true) {
+        // No application menu carries the usual shortcut, so offer it here: F12 or Ctrl/Cmd+Shift+I.
+        mainWindow.webContents.on("before-input-event", (event, input) => {
+            if (input.type === "keyDown" && (input.key === "F12" || ((input.control || input.meta) && input.shift && input.key.toLowerCase() === "i"))) {
+                event.preventDefault();
+                mainWindow.webContents.toggleDevTools();
+            }
+        });
+    }
     mainWindow.webContents.on("will-navigate", (event, url) => {
         if (!resolveAssetPath(assetRoot, url)) {
             event.preventDefault();
@@ -409,7 +424,20 @@ app.whenReady().then(async () => {
             const response = await net.fetch(pathToFileURL(asset).href);
             const headers = new Headers(response.headers);
             headers.set("Content-Security-Policy", CSP);
-            return new Response(response.body, { status: response.status, headers });
+            if (!integrity) {
+                return new Response(response.body, { status: response.status, headers });
+            }
+            // Serve exactly the bytes that were checked, so a file cannot be swapped between the check and the read.
+            const data = Buffer.from(await response.arrayBuffer());
+            if (!verifyAsset(integrity, assetRoot, asset, data)) {
+                if (!tampered) {
+                    tampered = true;
+                    dialog.showErrorBox(config.appName, "The game files have been modified or are damaged. Please reinstall the game.");
+                    setImmediate(() => app.quit());
+                }
+                return new Response("Forbidden", { status: 403 });
+            }
+            return new Response(data, { status: response.status, headers });
         } catch {
             return new Response("Not found", { status: 404 });
         }

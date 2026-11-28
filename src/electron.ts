@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { createElectronPackagerOptions, readElectronConfig } from "./electron-config.js";
+import { createElectronFuses, createElectronPackagerOptions, readElectronConfig } from "./electron-config.js";
 import type { ElectronOS } from "./electron-config.js";
 import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
@@ -73,10 +73,25 @@ export const buildElectron = async (): Promise<void> => {
         const packages = await resolveToolPackages("electron");
         const require = createRequire(packages["@electron/packager"]);
         const { packager } = await import(pathToFileURL(require.resolve("@electron/packager")).href);
+        const fusesRequire = createRequire(packages["@electron/fuses"]);
+        const { flipFuses, FuseVersion, FuseV1Options } = await import(pathToFileURL(fusesRequire.resolve("@electron/fuses")).href);
+        // The host inside the ASAR checks the game files (integrity.json). The fuses keep the ASAR itself
+        // from being replaced or bypassed: Electron validates it against the hash the packager embeds in
+        // the executable, loads the app only from it, and ignores the switches that run other code.
+        const lockRuntime = async ({ buildPath, platform, arch }: { buildPath: string; platform: string; arch: string }): Promise<void> => {
+            const fuses = createElectronFuses(platform, arch);
+            const electron = path.join(buildPath, platform === "darwin" ? "Electron.app" : platform === "win32" ? "electron.exe" : "electron");
+            await flipFuses(electron, {
+                "version": FuseVersion.V1,
+                "resetAdHocDarwinSignature": fuses.resetAdHocDarwinSignature,
+                ...Object.fromEntries(Object.entries(fuses.options).map(([name, value]) => [FuseV1Options[name], value]))
+            });
+        };
         // The generated host has no npm dependencies or native addons. Packager downloads
         // the pinned Electron runtime directly and uses its normal download cache.
         return await withElectronPackagerTemp(async (tmpdir) => await packager({
             ...options, dir, ...target,
+            "afterExtract": [lockRuntime],
             tmpdir,
             "out": outDir,
             "electronVersion": getElectronVersion(),

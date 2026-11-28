@@ -5,6 +5,7 @@
 #include "HostContext.h"
 #include "AssetLoader.h"
 #include "EmbeddedAssets.h"
+#include "platform/AssetIntegrity.h"
 #include "bindings/Bindings.h"
 
 #include <cstdlib>
@@ -293,6 +294,18 @@ v8::MaybeLocal<v8::Module> V8Runtime::LoadModule(const std::string& path,
         source = ReadTextFile(abs);
         if (source.empty() && !fs::exists(abs)) {
             v8util::ThrowTypeError(isolate_, "Module not found: " + abs);
+            return v8::MaybeLocal<v8::Module>();
+        }
+    }
+
+    // ビルドの後に書き換えられたモジュールは実行しない (platform/AssetIntegrity.h)。
+    // キーは assets/app からの相対パス。
+    if (integrity::Enabled() && host_ && host_->assets) {
+        std::error_code ec;
+        const fs::path root = fs::weakly_canonical(fs::path(host_->assets->root()), ec);
+        const std::string key = fs::path(abs).lexically_relative(root).generic_string();
+        if (!integrity::Verify(key, source)) {
+            v8util::ThrowTypeError(isolate_, "Module failed the integrity check: " + key);
             return v8::MaybeLocal<v8::Module>();
         }
     }

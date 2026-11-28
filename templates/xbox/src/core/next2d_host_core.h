@@ -182,6 +182,16 @@ NEXT2D_HOST_CORE_API void next2d_host_set_cache_dir(const char* directory);
  * NULL か空文字列を渡すと既定 ("en-US") に戻る。 */
 NEXT2D_HOST_CORE_API void next2d_host_set_language(const char* language);
 
+/* ゲームのファイルの照合に使う一覧を設定する (不要なら呼ばなくてよい)。next2d_host_create の前に呼ぶこと。
+ * 形式は 1 行 1 ファイルで "<SHA-256 の 16 進 64 桁><空白 2 つ><キー>" (sha256sum の出力と同じ)。
+ * キーは assets_dir からの相対パス (区切りは "/")、ホストスクリプトは "js/bootstrap.js"。
+ * 設定すると、一覧にあるファイルは内容が一致するときだけ読まれ、一覧に無いスクリプト類
+ * (.js / .mjs / .html / .json / .wasm) は読まれない。ビルドの後に書き換えられたファイルで
+ * ゲームを動かさないためのもので、一覧は書き換えられない場所 (実行ファイルの中) に置くこと。
+ * NULL か空文字列を渡すと照合しない (既定)。 */
+#define NEXT2D_HOST_CORE_HAS_ASSET_INTEGRITY 1
+NEXT2D_HOST_CORE_API void next2d_host_set_asset_integrity(const char* manifest);
+
 /* コアを破棄する。 */
 NEXT2D_HOST_CORE_API void next2d_host_destroy(Next2DHost* host);
 

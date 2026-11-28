@@ -9,6 +9,7 @@ import cp from "child_process";
 import { loadProjectVite } from "./project-vite.js";
 import { ctx } from "./context.js";
 import { getTemplateDir } from "./utils.js";
+import { createIntegrityLines, renderIntegrityHeader } from "./integrity.js";
 import {
     XBOX_DIR_NAME,
     XBOX_CONFIG_NAME,
@@ -291,6 +292,12 @@ const embedXboxAssets = async (): Promise<void> =>
             console.log(pc.green(`Minified ${minified} host script(s) before embedding.`));
         }
         fs.writeFileSync(pakPath, pak);
+
+        // 埋め込んだスクリプト類の SHA-256 を、ホストの実行コードへ組み込む (ヘッダを置き換える)。
+        // ホストは読み込むたびに照合し、書き換えられたものや一覧に無いスクリプトを実行しない。
+        const integrityLines: string[] = createIntegrityLines(pakEntries);
+        fs.writeFileSync(`${xboxDir}/src/AssetIntegrityManifest.h`, renderIntegrityHeader(integrityLines), "utf8");
+        console.log(pc.green(`Recorded the integrity of ${integrityLines.length} script file(s) in the host.`));
 
         // rc.exe が assets.pak を RCDATA "N2DASSETS" として取り込む .rc を生成する。
         fs.writeFileSync(rcPath, renderAssetsRc(path.resolve(pakPath)), "utf8");

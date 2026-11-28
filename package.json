@@ -1,6 +1,6 @@
 {
   "name": "@next2d/builder",
-  "version": "0.5.23",
+  "version": "0.5.24",
   "description": "A multiplatform builder for the Next2d Framework. It supports exporting to a variety of platforms, including Steam, macOS, Windows, Linux, iOS, Android, Xbox, Nintendo Switch, and the web (HTML).",
   "author": "Toshiyuki Ienaga <ienaga@next2d.app>",
   "license": "MIT",
@@ -41,12 +41,12 @@
     "@next2d/builder": "dist/index.js"
   },
   "devDependencies": {
-    "@types/node": "^26.6.6",
-    "eslint": "^10.15.0",
+    "@types/node": "^26.6.11",
+    "eslint": "^10.16.0",
     "eslint-parser-oxc": "^0.1.1",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.14.0",
     "typescript": "^7.0.2",
-    "vite": "^8.3.8"
+    "vite": "^8.4.0"
   }
 }

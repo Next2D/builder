@@ -4,6 +4,7 @@ import path from "node:path";
 import { getTemplateDir } from "./utils.js";
 import type { IElectronConfig } from "./electron-config.js";
 import { stageNativeBridge } from "./electron-native.js";
+import { createIntegrityManifest } from "./integrity.js";
 
 /** Packager cleans its temporary root; never share that root with concurrent builds. */
 export const withElectronPackagerTemp = async <T>(use: (directory: string) => Promise<T>): Promise<T> => {
@@ -45,12 +46,16 @@ export const withElectronHost = async <T>(
         fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
         fs.cpSync(resources, path.join(dir, "resources"), { "recursive": true });
         const nativeBridge = config.nativeBridge ? stageNativeBridge(root, dir, config.nativeBridge, target ?? "") : undefined;
-        const runtime = { "appId": config.appId, "appName": config.appName, "window": config.window, "icon": "", nativeBridge };
+        const runtime = { "appId": config.appId, "appName": config.appName, "window": config.window, "icon": "", "devTools": config.devTools, nativeBridge };
         if (config.icons.linux) {
             fs.copyFileSync(path.resolve(root, config.icons.linux), path.join(dir, "resources/desktop-icon.png"));
             runtime.icon = "desktop-icon.png";
         }
         fs.writeFileSync(path.join(dir, "runtime-config.json"), `${JSON.stringify(runtime, null, 2)}\n`);
+        // The game files ship outside the ASAR as plain files. The host keeps their hashes inside the
+        // ASAR and refuses to serve a file that no longer matches (see templates/electron/index.js).
+        fs.writeFileSync(path.join(dir, "integrity.json"),
+            `${JSON.stringify(createIntegrityManifest(path.join(dir, "resources")))}\n`);
         return await use(dir);
     } finally {
         fs.rmSync(dir, { "recursive": true, "force": true });

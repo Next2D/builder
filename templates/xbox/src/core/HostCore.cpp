@@ -12,6 +12,7 @@
 #include "../gpu/GlesContext.h"
 #include "../platform/DecodeQueue.h"
 #include "../platform/HostCache.h"
+#include "../platform/AssetIntegrity.h"
 #include "../platform/GamepadManager.h"
 #include "../platform/AudioEngine.h"
 #include "../platform/StbTextRasterizer.h"
@@ -462,6 +463,10 @@ Next2DHost* next2d_host_create(const Next2DHostConfig* config)
     const std::string boot = ReadFile(bootstrap_js);
     if (boot.empty()) {
         std::cerr << "[HostCore] bootstrap.js not found: " << bootstrap_js.string() << std::endl;
+    } else if (!integrity::Verify("js/bootstrap.js", boot)) {
+        // 書き換えられたホストスクリプトでは起動しない
+        DestroyHost(h);
+        return nullptr;
     } else if (!h->runtime->RunScript(boot, "js/bootstrap.js")) {
         std::cerr << "[HostCore] bootstrap.js execution failed" << std::endl;
     }
@@ -802,6 +807,11 @@ void next2d_host_set_cache_dir(const char* directory)
 void next2d_host_set_language(const char* language)
 {
     SetNavigatorLanguage(language ? language : "");
+}
+
+void next2d_host_set_asset_integrity(const char* manifest)
+{
+    integrity::SetManifest(manifest);
 }
 
 void next2d_host_destroy(Next2DHost* h)

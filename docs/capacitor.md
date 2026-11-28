@@ -90,6 +90,20 @@ Capacitorの `cap run` を使う場合は `--build` を `--preview` に置き換
 テンプレートのnpmスクリプト `open:ios` / `open:android` / `build:ios` / `build:android` も使用できる。
 環境指定は `npm run build:ios -- --env prd` のように渡す。
 
+### 補足：書き換えの検知
+
+`sync` / `open` / `build` は、アプリに入れたスクリプト類（`.js` `.mjs` `.html` `.json` `.wasm`）と Capacitor の設定ファイルの SHA-256 を記録し、起動時に照合するコードをネイティブプロジェクトへ入れる。ビルドの後に書き換えられたファイルや、後から足されたスクリプトがあると、アプリは起動しない。画像や音声は対象外。
+
+| OS | 入るもの | ゲームのリポジトリに残る変更 |
+|---|---|---|
+| Android | `app/src/main/java/app/next2d/integrity/` に照合のクラスと一覧（一覧は同じ場所の `.gitignore` で除外）。`AndroidManifest.xml` に `<provider>` を 1 つ | `AndroidManifest.xml` と照合のクラス（どちらも初回だけ） |
+| iOS | `AppDelegate.swift` の末尾に照合の処理と、起動時の呼び出し 1 行。一覧は `App/App/public/next2d-integrity.txt` | `AppDelegate.swift`（初回だけ） |
+
+- 一覧は `sync` のたびに、Capacitor がコピーした後のファイルから作り直す。IDE から Web 資材だけを入れ替えた（`cap copy` など）場合は一覧と合わなくなり、起動しなくなる。builder の `sync` / `build` をやり直すこと。
+- `preview`（`cap run`）は照合しない一覧を書く。開発中に起動できなくならないようにするため。
+- Android は、一覧をアプリのコードに持たせている。別の鍵で署名し直した APK でも、スクリプトを書き換えただけでは動かない。コードごと書き換える相手までは防げないので、配布経路での検証（Play Integrity など）と併用する。
+- iOS は、アプリ全体が署名で封印されていて、書き換えたものは通常の端末では起動しない。この照合が効くのは、署名の検証が働かない端末でスクリプトだけを差し替えられた場合。一覧はバンドルの中にあるので、署名し直せる相手には効かない。
+
 ### 補足：既存プロジェクトの移行とSDKキャッシュ
 
 1. ゲームから不要になった `@capacitor/cli`・`@capacitor/ios`・`@capacitor/android` の直接依存を外す。
@@ -188,6 +202,20 @@ If any command fails, the builder fails as well.
 
 Template npm scripts `open:ios` / `open:android` / `build:ios` / `build:android` are also available.
 Pass the environment as in `npm run build:ios -- --env prd`.
+
+### Reference: Detecting modified files
+
+`sync` / `open` / `build` record the SHA-256 of the scripts packaged in the app (`.js` `.mjs` `.html` `.json` `.wasm`) and of the Capacitor config files, and add native code that checks them at launch. If a file was changed after the build, or a script was added, the app does not start. Images and audio are not checked.
+
+| OS | What is added | Changes left in the game repository |
+|---|---|---|
+| Android | The check class and the list under `app/src/main/java/app/next2d/integrity/` (the list is excluded by a `.gitignore` in that folder). One `<provider>` in `AndroidManifest.xml` | `AndroidManifest.xml` and the check class (first time only) |
+| iOS | The check and one call at launch, appended to `AppDelegate.swift`. The list is `App/App/public/next2d-integrity.txt` | `AppDelegate.swift` (first time only) |
+
+- The list is rebuilt on every `sync` from the files Capacitor has just copied. If you replace only the web files from the IDE (`cap copy`, etc.) they no longer match the list and the app does not start; run the builder's `sync` / `build` again.
+- `preview` (`cap run`) writes a list that checks nothing, so development runs are never blocked.
+- Android keeps the list in the app's code. An APK re-signed with another key does not run if only its scripts were changed. It cannot stop someone who also patches the code, so combine it with verification on the distribution side (Play Integrity, etc.).
+- On iOS the whole app is sealed by its signature and a modified app does not start on a normal device. This check matters only where signature validation is not enforced and just the scripts are swapped. The list is inside the bundle, so it does not stop someone who can re-sign the app.
 
 ### Reference: Existing project migration and SDK cache
 

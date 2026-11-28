@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 
 // Keep native SDKs together and pin tools independently of the game's dependencies.
 const packages = {
-    "electron": { "@electron/packager": "20.3.0" },
+    "electron": { "@electron/packager": "20.3.0", "@electron/fuses": "2.1.3" },
     "capacitor": {
         "@capacitor/cli": "8.5.2", "@capacitor/core": "8.5.2",
         "@capacitor/ios": "8.5.2", "@capacitor/android": "8.5.2"

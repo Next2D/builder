@@ -1,9 +1,13 @@
-const { app, BrowserWindow, Menu, net, powerMonitor, protocol, screen, session, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, net, powerMonitor, protocol, screen, session, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { resolveAssetPath, CSP } = require("./local-assets.cjs");
+const { resolveAssetPath, verifyAsset, CSP } = require("./local-assets.cjs");
 const config = require("./runtime-config.json");
+// Hashes of the game files, recorded by the builder. Absent only when the host is run without the builder.
+const integrityFile = path.join(__dirname, "integrity.json");
+const integrity = fs.existsSync(integrityFile) ? JSON.parse(fs.readFileSync(integrityFile, "utf8")) : null;
+let tampered = false;
 const { NativeBridge, isTrustedSender } = require("./native-bridge.cjs");
 let nativeBridge;
 const closeNativeBridge = () => nativeBridge?.close();
@@ -409,7 +413,20 @@ app.whenReady().then(async () => {
             const response = await net.fetch(pathToFileURL(asset).href);
             const headers = new Headers(response.headers);
             headers.set("Content-Security-Policy", CSP);
-            return new Response(response.body, { status: response.status, headers });
+            if (!integrity) {
+                return new Response(response.body, { status: response.status, headers });
+            }
+            // Serve exactly the bytes that were checked, so a file cannot be swapped between the check and the read.
+            const data = Buffer.from(await response.arrayBuffer());
+            if (!verifyAsset(integrity, assetRoot, asset, data)) {
+                if (!tampered) {
+                    tampered = true;
+                    dialog.showErrorBox(config.appName, "The game files have been modified or are damaged. Please reinstall the game.");
+                    setImmediate(() => app.quit());
+                }
+                return new Response("Forbidden", { status: 403 });
+            }
+            return new Response(data, { status: response.status, headers });
         } catch {
             return new Response("Not found", { status: 404 });
         }

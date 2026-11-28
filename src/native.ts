@@ -5,6 +5,7 @@ import { ctx } from "./context.js";
 import { $spawn } from "./utils.js";
 import { CAPACITOR_CONFIG_NAME } from "./constants.js";
 import { resolveToolPackages } from "./tool-packages.js";
+import { applyAndroidIntegrity, applyIosIntegrity, createNativeIntegrityLines } from "./native-integrity.js";
 
 /** Resolve from npm's persistent tool cache without installing into the game. */
 export const getCapacitorCommand = async (): Promise<{ cli: string; env: NodeJS.ProcessEnv }> => {
@@ -52,13 +53,40 @@ const prepareNativeProject = async (): Promise<void> => {
 };
 
 /** Keep native customizations and update web assets/dependency paths in place. */
+const nativePlatformDir = (): string => {
+    const root = process.cwd();
+    const config = JSON.parse(fs.readFileSync(path.join(root, CAPACITOR_CONFIG_NAME), "utf8"));
+    return path.resolve(root, config[ctx.platform]?.path ?? ctx.platform);
+};
+
+/**
+ * Put the check of the game's script files into the native project (see native-integrity.ts).
+ * `check` false writes an empty list: a development run replaces the web files itself, and a list
+ * left over from an earlier build would stop the app from starting.
+ */
+export const applyNativeIntegrity = (check: boolean): void => {
+    const platformDir = nativePlatformDir();
+    if (ctx.platform === "android") {
+        const assets = path.join(platformDir, "app/src/main/assets");
+        applyAndroidIntegrity(platformDir, check
+            ? createNativeIntegrityLines(assets, ["capacitor.config.json", "capacitor.plugins.json"]) : null);
+    } else {
+        const bundle = path.join(platformDir, "App/App");
+        applyIosIntegrity(platformDir, check
+            ? createNativeIntegrityLines(bundle, ["capacitor.config.json"]) : null);
+    }
+};
+
 export const syncNative = async (): Promise<void> => {
     await prepareNativeProject();
     await runCapacitor(["sync", ctx.platform]);
+    // The list is made from the files Capacitor has just copied into the native project.
+    applyNativeIntegrity(true);
 };
 
 export const runNative = async (): Promise<void> => {
     await prepareNativeProject();
+    applyNativeIntegrity(false);
     await runCapacitor(["run", ctx.platform]);
 };
 

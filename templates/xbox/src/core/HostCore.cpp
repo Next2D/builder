@@ -799,6 +799,11 @@ void next2d_host_set_cache_dir(const char* directory)
     hostcache::SetDirectory(directory ? directory : "");
 }
 
+void next2d_host_set_language(const char* language)
+{
+    SetNavigatorLanguage(language ? language : "");
+}
+
 void next2d_host_destroy(Next2DHost* h)
 {
     if (!h) {

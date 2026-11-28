@@ -328,6 +328,16 @@ void OffscreenCanvasConstructor(const v8::FunctionCallbackInfo<v8::Value>& args)
 
 } // namespace
 
+namespace {
+// next2d_host_set_language で設定された言語タグ (空なら既定)
+std::string g_navigator_language;
+}
+
+void SetNavigatorLanguage(const std::string& language)
+{
+    g_navigator_language = language;
+}
+
 void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostContext* host)
 {
     v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
@@ -387,7 +397,11 @@ void InstallDomShims(v8::Isolate* isolate, v8::Local<v8::Object> global, HostCon
     v8::Local<v8::Object> navigator = v8::Object::New(isolate);
     SetValue(isolate, navigator, "userAgent",
              Str(isolate, "Next2D/Xbox (GDK; V8; Dawn/WebGPU)"));
-    SetValue(isolate, navigator, "language", Str(isolate, "en-US"));
+    const std::string language = g_navigator_language.empty() ? "en-US" : g_navigator_language;
+    SetValue(isolate, navigator, "language", Str(isolate, language.c_str()));
+    v8::Local<v8::Array> languages = v8::Array::New(isolate, 1);
+    languages->Set(isolate->GetCurrentContext(), 0, Str(isolate, language.c_str())).Check();
+    SetValue(isolate, navigator, "languages", languages);
     SetValue(isolate, navigator, "platform", Str(isolate, "Xbox"));
 
     // navigator.clipboard (テキスト貼付/コピー。Windows 以外では常に空)
